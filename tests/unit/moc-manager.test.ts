@@ -43,6 +43,18 @@ describe('applyMocUpdate', () => {
     vol.reset()
   })
 
+  it('throws when nodeId is an empty string', async () => {
+    await expect(
+      applyMocUpdate('/omg/mocs/moc-identity.md', { action: 'add', nodeId: '' })
+    ).rejects.toThrow('MocUpdateEntry.nodeId must not be empty')
+  })
+
+  it('throws when nodeId is whitespace-only', async () => {
+    await expect(
+      applyMocUpdate('/omg/mocs/moc-identity.md', { action: 'add', nodeId: '   ' })
+    ).rejects.toThrow('MocUpdateEntry.nodeId must not be empty')
+  })
+
   it('creates the file with the wikilink when MOC does not exist', async () => {
     await applyMocUpdate('/omg/mocs/moc-identity.md', {
       action: 'add',
@@ -164,6 +176,34 @@ describe('applyMocUpdate', () => {
 
     const content = readFile('/omg/mocs/moc-identity.md')
     expect(content).toContain('[[omg/identity/preferred-name-2026-02-20]]')
+  })
+
+  it('propagates non-ENOENT errors from readFile (e.g. EACCES)', async () => {
+    vol.fromJSON({
+      '/omg/mocs/moc-identity.md': '---\ntype: moc\ndomain: identity\n---\n# Identity\n',
+    })
+
+    const accessError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+    const readSpy = vi.spyOn(memfs.promises, 'readFile').mockRejectedValueOnce(accessError)
+
+    await expect(
+      applyMocUpdate('/omg/mocs/moc-identity.md', { action: 'add', nodeId: 'omg/identity/test' })
+    ).rejects.toThrow('EACCES')
+
+    readSpy.mockRestore()
+  })
+
+  it('propagates errors from the underlying write (e.g. ENOSPC)', async () => {
+    const writeError = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
+    })
+    const writeSpy = vi.spyOn(memfs.promises, 'writeFile').mockRejectedValueOnce(writeError)
+
+    await expect(
+      applyMocUpdate('/omg/mocs/moc-identity.md', { action: 'add', nodeId: 'omg/identity/test' })
+    ).rejects.toThrow()
+
+    writeSpy.mockRestore()
   })
 
   it('updates the frontmatter updated field to today', async () => {

@@ -49,6 +49,16 @@ describe('parseFrontmatter', () => {
     parseFrontmatter(raw)
     expect(raw).toBe(copy)
   })
+
+  it('throws when the frontmatter block is a YAML array at root level', () => {
+    const raw = '---\n- item1\n- item2\n---\nBody content.'
+    expect(() => parseFrontmatter(raw)).toThrow(/array.*instead of object|instead of object/)
+  })
+
+  it('throws when the frontmatter block is a YAML scalar at root level', () => {
+    const raw = '---\n42\n---\nBody content.'
+    expect(() => parseFrontmatter(raw)).toThrow(/number.*instead of object|instead of object/)
+  })
 })
 
 describe('serializeFrontmatter', () => {

@@ -176,4 +176,16 @@ describe('resolveStatePath', () => {
     const result = resolveStatePath('/workspace', 'test-session')
     expect(result).toContain('/.omg-state/')
   })
+
+  it('throws for sessionKey containing a forward slash', () => {
+    expect(() => resolveStatePath('/workspace', 'path/traversal')).toThrow(/Invalid sessionKey/)
+  })
+
+  it('throws for sessionKey containing a backslash', () => {
+    expect(() => resolveStatePath('/workspace', 'path\\traversal')).toThrow(/Invalid sessionKey/)
+  })
+
+  it('throws for sessionKey containing double dots', () => {
+    expect(() => resolveStatePath('/workspace', '../escape')).toThrow(/Invalid sessionKey/)
+  })
 })

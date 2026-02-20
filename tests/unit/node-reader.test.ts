@@ -1,5 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest'
-import { vol } from 'memfs'
+import { vol, fs as memfs } from 'memfs'
 
 vi.mock('node:fs', async () => {
   const m = await vi.importActual<typeof import('memfs')>('memfs')
@@ -80,6 +80,15 @@ describe('readGraphNode', () => {
     const result = await readGraphNode('/omg/nodes/identity/malformed.md')
     expect(result).toBeNull()
   })
+
+  it('throws for non-ENOENT filesystem errors (e.g. EACCES)', async () => {
+    const accessError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+    const readSpy = vi.spyOn(memfs.promises, 'readFile').mockRejectedValueOnce(accessError)
+
+    await expect(readGraphNode('/omg/nodes/identity/any.md')).rejects.toThrow('Failed to read node file')
+
+    readSpy.mockRestore()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -114,6 +123,15 @@ describe('listNodesByType', () => {
   it('returns an empty array when the directory does not exist', async () => {
     const result = await listNodesByType('/omg', 'identity')
     expect(result).toEqual([])
+  })
+
+  it('throws for non-ENOENT errors on the type directory (e.g. EACCES)', async () => {
+    const accessError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+    const readdirSpy = vi.spyOn(memfs.promises, 'readdir').mockRejectedValueOnce(accessError)
+
+    await expect(listNodesByType('/omg', 'identity')).rejects.toThrow('Failed to read node directory')
+
+    readdirSpy.mockRestore()
   })
 
   it('ignores non-.md files in the directory', async () => {
@@ -165,6 +183,15 @@ describe('listAllNodes', () => {
   it('returns an empty array when the nodes/ directory does not exist', async () => {
     const result = await listAllNodes('/omg')
     expect(result).toEqual([])
+  })
+
+  it('throws for non-ENOENT errors on the nodes/ directory (e.g. EACCES)', async () => {
+    const accessError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+    const readdirSpy = vi.spyOn(memfs.promises, 'readdir').mockRejectedValueOnce(accessError)
+
+    await expect(listAllNodes('/omg')).rejects.toThrow('Failed to read nodes directory')
+
+    readdirSpy.mockRestore()
   })
 
   it('skips invalid/null files and returns only valid nodes', async () => {

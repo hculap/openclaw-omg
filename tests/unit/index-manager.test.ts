@@ -242,4 +242,67 @@ describe('regenerateIndex', () => {
     expect(content).toContain('Nodes: 99')
     expect(content).not.toContain('# Old Index')
   })
+
+  it('missing mocs/ directory — creates index with empty MOC list', async () => {
+    // omgRoot exists but mocs/ subdirectory does not
+    vol.fromJSON({ [`${OMG_ROOT}/.omgkeep`]: '' })
+
+    await regenerateIndex(OMG_ROOT, 0)
+
+    const content = readFile(`${OMG_ROOT}/index.md`)
+    expect(content).toContain('Nodes: 0')
+    expect(content).toContain('## Maps of Content')
+    expect(content).not.toContain('[[')
+  })
+
+  it('preserves the created timestamp from the existing index.md', async () => {
+    const originalCreated = '2025-01-01T00:00:00.000Z'
+    vol.fromJSON({
+      [`${OMG_ROOT}/index.md`]: [
+        '---',
+        'type: index',
+        'id: omg/index',
+        'priority: high',
+        `created: ${originalCreated}`,
+        `updated: ${originalCreated}`,
+        '---',
+        '# OMG Index',
+        '',
+      ].join('\n'),
+      [`${OMG_ROOT}/mocs/moc-identity.md`]: '---\ntype: moc\n---\n',
+    })
+
+    await regenerateIndex(OMG_ROOT, 5)
+
+    const content = readFile(`${OMG_ROOT}/index.md`)
+    expect(content).toContain(`created: ${originalCreated}`)
+    expect(content).toContain('Nodes: 5')
+  })
+
+  it('rejects and wraps errors when the atomic write fails', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/mocs/moc-identity.md`]: '---\ntype: moc\n---\n',
+    })
+
+    const writeError = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
+    })
+    const writeSpy = vi.spyOn(memfs.promises, 'writeFile').mockRejectedValueOnce(writeError)
+
+    await expect(regenerateIndex(OMG_ROOT, 1)).rejects.toThrow('Failed to regenerate index')
+
+    writeSpy.mockRestore()
+  })
+
+  it('uses current time for created when no existing index.md', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/mocs/moc-identity.md`]: '---\ntype: moc\n---\n',
+    })
+
+    await regenerateIndex(OMG_ROOT, 1)
+
+    const content = readFile(`${OMG_ROOT}/index.md`)
+    expect(content).toMatch(/created: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+    expect(content).toMatch(/updated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+  })
 })

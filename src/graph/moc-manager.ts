@@ -1,38 +1,14 @@
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
-import { randomBytes } from 'node:crypto'
 import type { MocUpdateEntry, GraphNode } from '../types.js'
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
+import { atomicWrite } from '../utils/fs.js'
 import { insertWikilink, removeWikilink } from '../utils/markdown.js'
 import { resolveMocPath } from '../utils/paths.js'
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
+import { capitalise } from '../utils/string.js'
 
 function today(): string {
   return new Date().toISOString().slice(0, 10)
-}
-
-function capitalise(word: string): string {
-  return word.charAt(0).toUpperCase() + word.slice(1)
-}
-
-async function atomicWrite(filePath: string, content: string): Promise<void> {
-  const dir = path.dirname(filePath)
-  const tmpPath = path.join(dir, `.tmp-${randomBytes(8).toString('hex')}`)
-  try {
-    await fs.mkdir(dir, { recursive: true })
-    await fs.writeFile(tmpPath, content, 'utf-8')
-    await fs.rename(tmpPath, filePath)
-  } catch (err) {
-    try {
-      await fs.unlink(tmpPath)
-    } catch {
-      // ignore — tmp file may not exist if writeFile failed
-    }
-    throw err
-  }
 }
 
 async function readFileOrEmpty(filePath: string): Promise<string> {
@@ -47,21 +23,23 @@ async function readFileOrEmpty(filePath: string): Promise<string> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /**
  * Applies a single add/remove update to a MOC file.
  *
  * - If the MOC does not exist, it is created.
  * - The 'updated' frontmatter field is set to today's date.
  * - Writes are performed atomically via a temp-file rename.
+ * - Remove operations are idempotent: if the wikilink is not present in
+ *   the file, the content is returned unchanged.
  */
 export async function applyMocUpdate(
   mocPath: string,
   update: MocUpdateEntry,
 ): Promise<void> {
+  if (!update.nodeId || update.nodeId.trim() === '') {
+    throw new Error('MocUpdateEntry.nodeId must not be empty')
+  }
+
   const raw = await readFileOrEmpty(mocPath)
   const { frontmatter, body } = parseFrontmatter(raw)
 
@@ -76,13 +54,14 @@ export async function applyMocUpdate(
   }
 
   const output = serializeFrontmatter(updatedFrontmatter, updatedBody)
+  await fs.mkdir(path.dirname(mocPath), { recursive: true })
   await atomicWrite(mocPath, output)
 }
 
 /**
  * Fully regenerates the MOC for a given domain from the provided node list.
  *
- * - Sorts nodes alphabetically by their `id` field.
+ * - Sorts nodes by `frontmatter.id` using locale-aware string comparison (localeCompare).
  * - Overwrites any existing content deterministically.
  * - Writes atomically.
  */
@@ -93,15 +72,13 @@ export async function regenerateMoc(
 ): Promise<void> {
   const mocPath = resolveMocPath(omgRoot, domain)
 
-  const sortedNodes = [...nodes].sort((a, b) => {
-    const idA = String(a.frontmatter.id ?? '')
-    const idB = String(b.frontmatter.id ?? '')
-    return idA.localeCompare(idB)
-  })
+  const sortedNodes = [...nodes].sort((a, b) =>
+    a.frontmatter.id.localeCompare(b.frontmatter.id)
+  )
 
   const header = `# ${capitalise(domain)}`
   const linkLines = sortedNodes
-    .map((node) => `- [[${String(node.frontmatter.id ?? '')}]]`)
+    .map((node) => `- [[${node.frontmatter.id}]]`)
     .join('\n')
 
   const body =
@@ -116,5 +93,6 @@ export async function regenerateMoc(
   }
 
   const output = serializeFrontmatter(frontmatter, body)
+  await fs.mkdir(path.dirname(mocPath), { recursive: true })
   await atomicWrite(mocPath, output)
 }

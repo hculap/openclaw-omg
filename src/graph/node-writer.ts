@@ -9,7 +9,6 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import type {
   GraphNode,
@@ -19,61 +18,64 @@ import type {
   NowUpdate,
   WriteContext,
 } from '../types.js'
-import { serializeFrontmatter } from '../utils/frontmatter.js'
+import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
+import { atomicWrite, isEnoent } from '../utils/fs.js'
 import { slugify } from '../utils/id.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Returns today's date in YYYY-MM-DD format.
- */
 function todayDateString(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-/**
- * Writes content to a temporary file, then atomically renames it to the
- * final path. Prevents partial writes from being observed by readers.
- */
-async function atomicWrite(filePath: string, content: string): Promise<void> {
-  const dir = dirname(filePath)
-  const tmpName = `.tmp-${randomBytes(4).toString('hex')}`
-  const tmpPath = join(dir, tmpName)
-
-  try {
-    await fs.writeFile(tmpPath, content, 'utf-8')
-    await fs.rename(tmpPath, filePath)
-  } catch (error) {
-    // Best-effort cleanup of the temp file if rename failed
-    await fs.unlink(tmpPath).catch(() => undefined)
-    throw new Error(
-      `Atomic write failed for ${filePath}: ${error instanceof Error ? error.message : String(error)}`
-    )
-  }
-}
-
-/**
- * Ensures a directory exists, creating it recursively if needed.
- */
 async function ensureDir(dirPath: string): Promise<void> {
   try {
     await fs.mkdir(dirPath, { recursive: true })
   } catch (error) {
     throw new Error(
-      `Failed to create directory ${dirPath}: ${error instanceof Error ? error.message : String(error)}`
+      `Failed to create directory ${dirPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     )
   }
 }
 
-/**
- * Checks whether a file exists at the given path.
- */
 async function fileExists(filePath: string): Promise<boolean> {
   try {
-    await fs.access(filePath)
-    return true
+    const stat = await fs.stat(filePath)
+    return stat.isFile()
+  } catch (err) {
+    if (isEnoent(err)) {
+      return false
+    }
+    throw err
+  }
+}
+
+/**
+ * Reads the `created` frontmatter field from an existing file.
+ * Returns null if the file does not exist (ENOENT) or if the field is absent/invalid.
+ * Throws for unexpected filesystem errors (e.g. EACCES, EIO).
+ */
+async function readExistingCreated(filePath: string): Promise<string | null> {
+  let raw: string
+  try {
+    raw = await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if (isEnoent(err)) {
+      return null
+    }
+    throw new Error(
+      `Failed to read ${filePath} for created timestamp: ${err instanceof Error ? (err as Error).message : String(err)}`,
+      { cause: err }
+    )
+  }
+  try {
+    const { frontmatter } = parseFrontmatter(raw)
+    const created = frontmatter['created']
+    return typeof created === 'string' ? created : null
   } catch {
-    return false
+    // Malformed frontmatter is recoverable — fall back to current time.
+    return null
   }
 }
 
@@ -104,7 +106,7 @@ async function resolveAvailablePath(
   }
 
   throw new Error(
-    `Could not find an available path for ${baseName}${ext} after 99 attempts`
+    `Could not find an available path for ${join(dir, baseName)}${ext} after 99 attempts`
   )
 }
 
@@ -113,31 +115,35 @@ async function resolveAvailablePath(
  * Excludes undefined optional fields to keep output clean.
  */
 function frontmatterToRecord(fm: NodeFrontmatter): Record<string, unknown> {
-  const record: Record<string, unknown> = {
+  return {
     id: fm.id,
     description: fm.description,
     type: fm.type,
     priority: fm.priority,
     created: fm.created,
     updated: fm.updated,
+    ...(fm.appliesTo !== undefined && { appliesTo: fm.appliesTo }),
+    ...(fm.sources !== undefined && { sources: fm.sources }),
+    ...(fm.links !== undefined && { links: fm.links }),
+    ...(fm.tags !== undefined && { tags: fm.tags }),
+    ...(fm.supersedes !== undefined && { supersedes: fm.supersedes }),
+    ...(fm.compressionLevel !== undefined && { compressionLevel: fm.compressionLevel }),
   }
-
-  if (fm.appliesTo !== undefined) record['appliesTo'] = fm.appliesTo
-  if (fm.sources !== undefined) record['sources'] = fm.sources
-  if (fm.links !== undefined) record['links'] = fm.links
-  if (fm.tags !== undefined) record['tags'] = fm.tags
-  if (fm.supersedes !== undefined) record['supersedes'] = fm.supersedes
-  if (fm.compressionLevel !== undefined) record['compressionLevel'] = fm.compressionLevel
-
-  return record
 }
 
 /**
  * Builds a filename base from type, description, and today's date.
  * Format: {type}-{slug(description)}-{YYYY-MM-DD}
+ *
+ * @throws If description slugifies to an empty string.
  */
 function buildBaseFilename(type: string, description: string): string {
   const slug = slugify(description)
+  if (slug === '') {
+    throw new Error(
+      `Cannot build filename: description "${description}" produces an empty slug`
+    )
+  }
   const date = todayDateString()
   return `${type}-${slug}-${date}`
 }
@@ -172,7 +178,8 @@ async function writeNodeToDir(
  * Writes an observation node produced by the Observer to disk.
  *
  * All three operation kinds (create, update, supersede) produce a new file;
- * the kind is recorded in frontmatter by the caller before passing here.
+ * the `type` field within the frontmatter is set by the caller.
+ * The `operation.kind` discriminant is not read by this function.
  *
  * File location: {omgRoot}/nodes/{type}/{type}-{slug}-{YYYY-MM-DD}[-N].md
  */
@@ -203,8 +210,9 @@ export async function writeReflectionNode(
  *
  * File location: {omgRoot}/now.md
  *
- * Creates simple frontmatter with:
- *   type='now', id='omg/now', priority='high', created=now, updated=now
+ * Preserves the `created` timestamp from any existing now.md, falling back
+ * to the current time on first write. Sets `updated` to the current time.
+ * Populates `links` from recentNodeIds when non-empty.
  */
 export async function writeNowNode(
   nowUpdate: NowUpdate,
@@ -212,21 +220,22 @@ export async function writeNowNode(
   context: WriteContext
 ): Promise<GraphNode> {
   const now = new Date().toISOString()
+  const filePath = join(context.omgRoot, 'now.md')
+
+  const existingCreated = await readExistingCreated(filePath)
+  const created = existingCreated ?? now
 
   const frontmatter: NodeFrontmatter = {
     id: 'omg/now',
     description: 'Current state snapshot',
     type: 'now',
     priority: 'high',
-    created: now,
+    created,
     updated: now,
     ...(recentNodeIds.length > 0 ? { links: recentNodeIds } : {}),
   }
 
-  const dir = context.omgRoot
-  const filePath = join(dir, 'now.md')
-
-  await ensureDir(dir)
+  await ensureDir(dirname(filePath))
 
   const content = serializeFrontmatter(frontmatterToRecord(frontmatter), nowUpdate)
   await atomicWrite(filePath, content)

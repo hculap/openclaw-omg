@@ -241,6 +241,128 @@ describe('writeObservationNode', () => {
       const tmpFiles = files.filter((f) => f.startsWith('.tmp-'))
       expect(tmpFiles).toHaveLength(0)
     })
+
+    it('rejects with an error message when the underlying write fails', async () => {
+      const writeError = Object.assign(new Error('ENOSPC: no space left on device'), {
+        code: 'ENOSPC',
+      })
+      const writeSpy = vi.spyOn(memfs.promises, 'writeFile').mockRejectedValueOnce(writeError)
+
+      const operation: ObserverOperation = {
+        kind: 'create',
+        frontmatter: makeBaseFrontmatter(),
+        body: 'Body.',
+      }
+
+      await expect(writeObservationNode(operation, context)).rejects.toThrow('Atomic write failed')
+
+      writeSpy.mockRestore()
+    })
+  })
+
+  describe('ensureDir', () => {
+    it('rejects with an error message when directory creation fails', async () => {
+      const mkdirError = Object.assign(new Error('EPERM: operation not permitted'), {
+        code: 'EPERM',
+      })
+      const mkdirSpy = vi.spyOn(memfs.promises, 'mkdir').mockRejectedValueOnce(mkdirError)
+
+      const operation: ObserverOperation = {
+        kind: 'create',
+        frontmatter: makeBaseFrontmatter(),
+        body: 'Body.',
+      }
+
+      await expect(writeObservationNode(operation, context)).rejects.toThrow(
+        'Failed to create directory'
+      )
+
+      mkdirSpy.mockRestore()
+    })
+  })
+
+  describe('buildBaseFilename', () => {
+    it('rejects when description slugifies to an empty string', async () => {
+      const operation: ObserverOperation = {
+        kind: 'create',
+        frontmatter: makeBaseFrontmatter({ description: '!!! ???' }),
+        body: 'Body.',
+      }
+
+      await expect(writeObservationNode(operation, context)).rejects.toThrow('empty slug')
+    })
+  })
+
+  describe('frontmatterToRecord optional fields', () => {
+    it('includes all optional fields when present in frontmatter', async () => {
+      const fm = makeBaseFrontmatter({
+        links: ['omg/fact/other-node'],
+        tags: ['tag1', 'tag2'],
+        supersedes: ['omg/fact/old-node'],
+        compressionLevel: 2 as const,
+      })
+      const operation: ObserverOperation = { kind: 'create', frontmatter: fm, body: 'Body.' }
+
+      const node = await writeObservationNode(operation, context)
+
+      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+      const parsed = parseFrontmatter(raw)
+
+      expect(parsed.frontmatter['links']).toEqual(['omg/fact/other-node'])
+      expect(parsed.frontmatter['tags']).toEqual(['tag1', 'tag2'])
+      expect(parsed.frontmatter['supersedes']).toEqual(['omg/fact/old-node'])
+      expect(parsed.frontmatter['compressionLevel']).toBe(2)
+    })
+
+    it('omits optional fields when absent from frontmatter', async () => {
+      const operation: ObserverOperation = {
+        kind: 'create',
+        frontmatter: makeBaseFrontmatter(),
+        body: 'Body.',
+      }
+
+      const node = await writeObservationNode(operation, context)
+
+      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+      const parsed = parseFrontmatter(raw)
+
+      expect(parsed.frontmatter['links']).toBeUndefined()
+      expect(parsed.frontmatter['tags']).toBeUndefined()
+      expect(parsed.frontmatter['supersedes']).toBeUndefined()
+      expect(parsed.frontmatter['compressionLevel']).toBeUndefined()
+    })
+
+    it('includes appliesTo and sources when present in frontmatter', async () => {
+      const fm = makeBaseFrontmatter({
+        appliesTo: { sessionScope: 'chat-abc' },
+        sources: [{ sessionKey: 'chat-abc', kind: 'user', timestamp: 1234567890 }],
+      })
+      const operation: ObserverOperation = { kind: 'create', frontmatter: fm, body: 'Body.' }
+
+      const node = await writeObservationNode(operation, context)
+
+      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+      const parsed = parseFrontmatter(raw)
+
+      expect(parsed.frontmatter['appliesTo']).toEqual({ sessionScope: 'chat-abc' })
+      expect(Array.isArray(parsed.frontmatter['sources'])).toBe(true)
+    })
+
+    it('omits appliesTo and sources when absent from frontmatter', async () => {
+      const operation: ObserverOperation = {
+        kind: 'create',
+        frontmatter: makeBaseFrontmatter(),
+        body: 'Body.',
+      }
+
+      const node = await writeObservationNode(operation, context)
+
+      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+      const parsed = parseFrontmatter(raw)
+
+      expect(parsed.frontmatter['appliesTo']).toBeUndefined()
+      expect(parsed.frontmatter['sources']).toBeUndefined()
+    })
   })
 })
 
@@ -373,15 +495,53 @@ describe('writeNowNode', () => {
     expect(parsed.body).toBe(nowUpdate)
   })
 
-  it('sets created and updated timestamps in frontmatter', async () => {
-    const node = await writeNowNode('Update content.', [], context)
+  it('sets created and updated to the same ISO 8601 instant on first write', async () => {
+    await writeNowNode('Update content.', [], context)
 
     const raw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
     const parsed = parseFrontmatter(raw)
 
-    expect(typeof parsed.frontmatter['created']).toBe('string')
-    expect(typeof parsed.frontmatter['updated']).toBe('string')
-    expect((parsed.frontmatter['created'] as string).length).toBeGreaterThan(0)
+    const created = parsed.frontmatter['created'] as string
+    const updated = parsed.frontmatter['updated'] as string
+
+    // On first write (no existing file), both are set to the same 'now' instant
+    expect(created).toBe(updated)
+    // Valid ISO 8601 — round-tripping through Date preserves the string
+    expect(new Date(created).toISOString()).toBe(created)
+  })
+
+  it('preserves the original created timestamp on subsequent writes', async () => {
+    // First write — establishes the created timestamp
+    await writeNowNode('First update.', [], context)
+    const firstRaw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
+    const firstParsed = parseFrontmatter(firstRaw)
+    const originalCreated = firstParsed.frontmatter['created'] as string
+
+    // Second write — created must be preserved, updated must be >= created
+    await writeNowNode('Second update.', [], context)
+    const secondRaw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
+    const secondParsed = parseFrontmatter(secondRaw)
+
+    expect(secondParsed.frontmatter['created']).toBe(originalCreated)
+    expect(secondParsed.body).toBe('Second update.')
+  })
+
+  it('includes links field in written file when recentNodeIds is non-empty', async () => {
+    await writeNowNode('Update.', ['omg/fact/node-1', 'omg/fact/node-2'], context)
+
+    const raw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
+    const parsed = parseFrontmatter(raw)
+
+    expect(parsed.frontmatter['links']).toEqual(['omg/fact/node-1', 'omg/fact/node-2'])
+  })
+
+  it('omits links field in written file when recentNodeIds is empty', async () => {
+    await writeNowNode('Update.', [], context)
+
+    const raw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
+    const parsed = parseFrontmatter(raw)
+
+    expect(parsed.frontmatter['links']).toBeUndefined()
   })
 
   it('overwrites existing now.md on second write', async () => {

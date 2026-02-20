@@ -1,8 +1,24 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { randomBytes } from 'node:crypto'
 import type { OmgConfig } from '../config.js'
+import type { NodeType } from '../types.js'
+import { parseFrontmatter } from '../utils/frontmatter.js'
+import { atomicWrite, isEnoent } from '../utils/fs.js'
 import { resolveOmgRoot, resolveMocPath } from '../utils/paths.js'
+import { capitalise } from '../utils/string.js'
+
+// Subdirectories created under `nodes/` during scaffold. Intentionally omits
+// 'reflection' (stored under `reflections/`, not `nodes/`), and 'moc',
+// 'index', 'now' (stored at the root level — mocs/, index.md, now.md).
+// Must be kept in sync with write paths in node-writer.ts.
+const NODE_TYPE_DIRS: readonly NodeType[] = [
+  'identity',
+  'preference',
+  'project',
+  'decision',
+  'fact',
+  'episode',
+]
 
 const MOC_DOMAINS = [
   'identity',
@@ -13,21 +29,8 @@ const MOC_DOMAINS = [
   'reflections',
 ] as const
 
-const NODE_TYPE_DIRS = [
-  'identity',
-  'preference',
-  'project',
-  'decision',
-  'fact',
-  'episode',
-] as const
-
-function capitalise(str: string): string {
-  return str.charAt(0).toUpperCase() + str.slice(1)
-}
-
-function buildIndexFrontmatter(iso: string): string {
-  return `---\ntype: index\nid: omg/index\npriority: high\ncreated: ${iso}\nupdated: ${iso}\n---\n`
+function buildIndexFrontmatter(created: string, updated: string): string {
+  return `---\ntype: index\nid: omg/index\npriority: high\ncreated: ${created}\nupdated: ${updated}\n---\n`
 }
 
 function buildNowFrontmatter(iso: string): string {
@@ -40,36 +43,78 @@ function buildMocContent(domain: string, dateOnly: string): string {
 
 async function directoryExists(dirPath: string): Promise<boolean> {
   try {
-    await fs.access(dirPath)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath)
-    return true
-  } catch {
-    return false
+    const stat = await fs.stat(dirPath)
+    return stat.isDirectory()
+  } catch (err) {
+    if (isEnoent(err)) {
+      return false
+    }
+    throw err
   }
 }
 
 async function writeFileIfAbsent(filePath: string, content: string): Promise<void> {
-  const exists = await fileExists(filePath)
-  if (!exists) {
-    await fs.writeFile(filePath, content, 'utf-8')
+  try {
+    await fs.writeFile(filePath, content, { encoding: 'utf-8', flag: 'wx' })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      return
+    }
+    throw new Error(
+      `Failed to write scaffold file ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    )
+  }
+}
+
+async function listMocFiles(mocsDir: string): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(mocsDir)
+    return entries.filter((entry) => entry.endsWith('.md')).sort()
+  } catch (err) {
+    if (isEnoent(err)) {
+      return []
+    }
+    throw new Error(
+      `Failed to read MOC directory ${mocsDir}: ${(err as Error).message ?? String(err)}`,
+      { cause: err }
+    )
+  }
+}
+
+async function readExistingCreated(indexPath: string): Promise<string | null> {
+  let raw: string
+  try {
+    raw = await fs.readFile(indexPath, 'utf-8')
+  } catch (err) {
+    if (isEnoent(err)) {
+      return null
+    }
+    throw new Error(
+      `Failed to read ${indexPath} for created timestamp: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    )
+  }
+  try {
+    const { frontmatter } = parseFrontmatter(raw)
+    const created = frontmatter['created']
+    return typeof created === 'string' ? created : null
+  } catch {
+    // Malformed frontmatter is recoverable — fall back to current time.
+    return null
   }
 }
 
 /**
  * Scaffolds the OMG graph directory structure if it does not already exist.
  *
- * Idempotent: if omgRoot already exists the function returns immediately
- * without modifying any existing files. When creating for the first time,
- * each individual file is also checked before writing so partial scaffolds
- * are handled safely.
+ * Non-destructive: if omgRoot already exists the function returns immediately
+ * without modifying any existing files. Note that once omgRoot exists, this
+ * function assumes the internal structure is complete — a partially initialised
+ * structure within an existing root is not repaired.
+ *
+ * When creating for the first time, each individual file is also checked before
+ * writing so partial scaffolds within a newly created root are handled safely.
  *
  * @param workspaceDir - Absolute path to the workspace root.
  * @param config - The parsed OMG configuration.
@@ -88,17 +133,27 @@ export async function scaffoldGraphIfNeeded(
   const iso = new Date().toISOString()
   const dateOnly = iso.slice(0, 10)
 
-  await fs.mkdir(omgRoot, { recursive: true })
-  await fs.mkdir(path.join(omgRoot, 'mocs'), { recursive: true })
-  await fs.mkdir(path.join(omgRoot, 'reflections'), { recursive: true })
+  const dirsToCreate = [
+    omgRoot,
+    path.join(omgRoot, 'mocs'),
+    path.join(omgRoot, 'reflections'),
+    ...NODE_TYPE_DIRS.map((nodeDir) => path.join(omgRoot, 'nodes', nodeDir)),
+  ]
 
-  for (const nodeDir of NODE_TYPE_DIRS) {
-    await fs.mkdir(path.join(omgRoot, 'nodes', nodeDir), { recursive: true })
+  for (const dir of dirsToCreate) {
+    try {
+      await fs.mkdir(dir, { recursive: true })
+    } catch (err) {
+      throw new Error(
+        `Failed to create scaffold directory ${dir}: ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err }
+      )
+    }
   }
 
   await writeFileIfAbsent(
     path.join(omgRoot, 'index.md'),
-    `${buildIndexFrontmatter(iso)}# OMG Index\n`
+    `${buildIndexFrontmatter(iso, iso)}# OMG Index\n`
   )
 
   await writeFileIfAbsent(
@@ -116,36 +171,36 @@ export async function scaffoldGraphIfNeeded(
  * Regenerates the index.md file for the OMG graph, listing all MOC files
  * as wikilinks and reflecting the current node count.
  *
+ * Preserves the `created` timestamp from the existing index.md if present,
+ * falling back to the current time on first generation.
+ *
  * The write is atomic: content is first written to a temporary file in
- * omgRoot, then renamed to index.md so readers never see a partial file.
+ * the same directory as index.md, then renamed to index.md so readers
+ * never see a partial file.
  *
  * @param omgRoot - Absolute path to the OMG storage root.
  * @param nodeCount - The current total number of knowledge nodes in the graph.
  */
 export async function regenerateIndex(omgRoot: string, nodeCount: number): Promise<void> {
   const mocsDir = path.join(omgRoot, 'mocs')
+  const indexPath = path.join(omgRoot, 'index.md')
 
-  let mocFiles: string[] = []
-  try {
-    const entries = await fs.readdir(mocsDir)
-    mocFiles = entries
-      .filter((entry) => entry.endsWith('.md'))
-      .sort()
-  } catch {
-    mocFiles = []
-  }
+  const mocFiles = await listMocFiles(mocsDir)
 
   const wikilinks = mocFiles
     .map((file) => `- [[${file.replace(/\.md$/, '')}]]`)
     .join('\n')
 
   const iso = new Date().toISOString()
+  const existingCreated = await readExistingCreated(indexPath)
+  const created = existingCreated ?? iso
 
   const content = [
     '---',
     'type: index',
     'id: omg/index',
     'priority: high',
+    `created: ${created}`,
     `updated: ${iso}`,
     '---',
     '# OMG Index',
@@ -158,19 +213,12 @@ export async function regenerateIndex(omgRoot: string, nodeCount: number): Promi
     '',
   ].join('\n')
 
-  const tmpName = `.tmp-${randomBytes(6).toString('hex')}.md`
-  const tmpPath = path.join(omgRoot, tmpName)
-  const indexPath = path.join(omgRoot, 'index.md')
-
   try {
-    await fs.writeFile(tmpPath, content, 'utf-8')
-    await fs.rename(tmpPath, indexPath)
+    await atomicWrite(indexPath, content)
   } catch (error) {
-    try {
-      await fs.unlink(tmpPath)
-    } catch {
-      // ignore cleanup errors
-    }
-    throw new Error(`Failed to regenerate index at ${indexPath}: ${String(error)}`)
+    throw new Error(
+      `Failed to regenerate index at ${indexPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
+    )
   }
 }
