@@ -390,3 +390,44 @@ export interface GraphContextSlice {
   /** Estimated token count for this slice. An approximation — not a hard guarantee. */
   readonly estimatedTokens: number
 }
+
+// ---------------------------------------------------------------------------
+// Graph write types (Phase 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Context shared by all graph write operations.
+ * Provides the resolved storage root and the current session key.
+ */
+export interface WriteContext {
+  /** Absolute path to the OMG graph root (e.g. "/workspace/memory/omg"). */
+  readonly omgRoot: string
+  /** Identifier of the current conversation session. */
+  readonly sessionKey: string
+}
+
+/**
+ * Data required to write a new reflection node to disk.
+ * Produced by the Reflector after a reflection pass.
+ */
+export interface ReflectionNodeData {
+  readonly frontmatter: NodeFrontmatter
+  readonly body: string
+  /** IDs of the observation nodes that contributed to this reflection. */
+  readonly sourceNodeIds: readonly string[]
+}
+
+/**
+ * Markdown body content for the [[omg/now]] singleton node.
+ * The now node is always overwritten in full on each Observer run.
+ */
+export type NowUpdate = string
+
+/**
+ * A single add or remove operation on a MOC (Map of Content) file.
+ */
+export interface MocUpdateEntry {
+  readonly action: 'add' | 'remove'
+  /** Wikilink target to add or remove (e.g. "omg/identity/preferred-name-2026-02-20"). */
+  readonly nodeId: string
+}
