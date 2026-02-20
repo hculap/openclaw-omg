@@ -1,9 +1,23 @@
 import { describe, it, expect } from 'vitest'
-import { parseConfig, omgConfigSchema } from '../../src/config.js'
+import { parseConfig, omgConfigSchema, ConfigValidationError } from '../../src/config.js'
 import type { OmgConfig } from '../../src/config.js'
 
-describe('parseConfig', () => {
-  it('empty input → all defaults applied', () => {
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Asserts the function throws a ConfigValidationError mentioning `fieldPath`. */
+function expectFieldError(fn: () => unknown, fieldPath: string): void {
+  expect(fn).toThrow(ConfigValidationError)
+  expect(fn).toThrow(fieldPath)
+}
+
+// ---------------------------------------------------------------------------
+// Default values
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — defaults', () => {
+  it('empty object → all defaults applied', () => {
     const result = parseConfig({})
 
     expect(result.observer.model).toBeNull()
@@ -20,7 +34,7 @@ describe('parseConfig', () => {
     expect(result.storagePath).toBe('memory/omg')
   })
 
-  it('partial input → merged with defaults', () => {
+  it('partial input → unspecified fields get defaults', () => {
     const result = parseConfig({
       observer: { model: 'openai/gpt-4o-mini' },
       injection: { maxContextTokens: 8_000 },
@@ -33,69 +47,7 @@ describe('parseConfig', () => {
     expect(result.storagePath).toBe('memory/omg')
   })
 
-  it('model null → valid (inherit from OpenClaw)', () => {
-    const result = parseConfig({
-      observer: { model: null },
-      reflector: { model: null },
-    })
-
-    expect(result.observer.model).toBeNull()
-    expect(result.reflector.model).toBeNull()
-  })
-
-  it('valid model string format → accepted', () => {
-    const result = parseConfig({ observer: { model: 'anthropic/claude-3-5-haiku' } })
-    expect(result.observer.model).toBe('anthropic/claude-3-5-haiku')
-  })
-
-  it('invalid model string format → throws', () => {
-    expect(() => parseConfig({ observer: { model: 'invalid-no-slash' } })).toThrow()
-    expect(() => parseConfig({ observer: { model: 'UPPERCASE/Model' } })).not.toThrow()
-    expect(() => parseConfig({ observer: { model: '' } })).toThrow()
-    expect(() => parseConfig({ observer: { model: '/no-provider' } })).toThrow()
-    expect(() => parseConfig({ observer: { model: 'no-model/' } })).toThrow()
-  })
-
-  it('invalid cron schedule → throws', () => {
-    expect(() =>
-      parseConfig({ reflection: { cronSchedule: 'not-a-cron' } })
-    ).toThrow()
-    expect(() =>
-      parseConfig({ reflection: { cronSchedule: '0 3 * * * *' } })
-    ).toThrow()
-  })
-
-  it('valid cron schedules → accepted', () => {
-    expect(() =>
-      parseConfig({ reflection: { cronSchedule: '0 3 * * *' } })
-    ).not.toThrow()
-    expect(() =>
-      parseConfig({ reflection: { cronSchedule: '*/15 * * * *' } })
-    ).not.toThrow()
-    expect(() =>
-      parseConfig({ reflection: { cronSchedule: '0 0 1 1 0' } })
-    ).not.toThrow()
-  })
-
-  it('negative thresholds → throws', () => {
-    expect(() =>
-      parseConfig({ observation: { messageTokenThreshold: -1 } })
-    ).toThrow()
-    expect(() =>
-      parseConfig({ reflection: { observationTokenThreshold: -100 } })
-    ).toThrow()
-    expect(() =>
-      parseConfig({ injection: { maxContextTokens: 0 } })
-    ).toThrow()
-    expect(() =>
-      parseConfig({ injection: { maxMocs: -1 } })
-    ).toThrow()
-    expect(() =>
-      parseConfig({ injection: { maxNodes: 0 } })
-    ).toThrow()
-  })
-
-  it('unknown keys → stripped (not throw)', () => {
+  it('unknown keys → stripped silently', () => {
     const result = parseConfig({
       unknownTopLevel: 'should be stripped',
       observer: { model: null, unknownField: 'stripped too' },
@@ -104,37 +56,335 @@ describe('parseConfig', () => {
     expect((result as Record<string, unknown>)['unknownTopLevel']).toBeUndefined()
     expect(result.observer.model).toBeNull()
   })
+})
 
-  it('storagePath custom value → accepted', () => {
-    const result = parseConfig({ storagePath: 'custom/path/to/memory' })
-    expect(result.storagePath).toBe('custom/path/to/memory')
+// ---------------------------------------------------------------------------
+// Top-level input types
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — top-level input validation', () => {
+  it('null input → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig(null), '(root)')
   })
 
-  it('identity mode session-key → accepted', () => {
-    const result = parseConfig({ identity: { mode: 'session-key' } })
-    expect(result.identity.mode).toBe('session-key')
+  it('undefined input → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig(undefined), '(root)')
   })
 
-  it('identity mode invalid → throws', () => {
-    expect(() =>
-      parseConfig({ identity: { mode: 'invalid-mode' } })
-    ).toThrow()
+  it('string input → throws ConfigValidationError', () => {
+    expect(() => parseConfig('observer: {}')).toThrow(ConfigValidationError)
   })
 
-  it('pinnedNodes list → accepted', () => {
-    const result = parseConfig({ injection: { pinnedNodes: ['omg/identity-core', 'omg/preferences'] } })
-    expect(result.injection.pinnedNodes).toEqual(['omg/identity-core', 'omg/preferences'])
+  it('array input → throws ConfigValidationError', () => {
+    expect(() => parseConfig([])).toThrow(ConfigValidationError)
   })
 
-  it('omgConfigSchema is a Zod schema with parse method', () => {
-    expect(typeof omgConfigSchema.parse).toBe('function')
-    expect(typeof omgConfigSchema.safeParse).toBe('function')
+  it('number input → throws ConfigValidationError', () => {
+    expect(() => parseConfig(42)).toThrow(ConfigValidationError)
   })
 })
 
+// ---------------------------------------------------------------------------
+// Model field
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — model field', () => {
+  it('model null → valid (inherit from OpenClaw)', () => {
+    const result = parseConfig({ observer: { model: null }, reflector: { model: null } })
+    expect(result.observer.model).toBeNull()
+    expect(result.reflector.model).toBeNull()
+  })
+
+  it('lowercase model string → accepted', () => {
+    const result = parseConfig({ observer: { model: 'anthropic/claude-3-5-haiku' } })
+    expect(result.observer.model).toBe('anthropic/claude-3-5-haiku')
+  })
+
+  it('model with dots and colons → accepted', () => {
+    const result = parseConfig({ observer: { model: 'openai/gpt-4.1-mini' } })
+    expect(result.observer.model).toBe('openai/gpt-4.1-mini')
+  })
+
+  it('model without slash → throws ConfigValidationError on observer.model', () => {
+    expectFieldError(() => parseConfig({ observer: { model: 'invalid-no-slash' } }), 'observer.model')
+  })
+
+  it('empty model string → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ observer: { model: '' } }), 'observer.model')
+  })
+
+  it('model with no provider (leading slash) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ observer: { model: '/no-provider' } }), 'observer.model')
+  })
+
+  it('model with no name (trailing slash) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ observer: { model: 'no-model/' } }), 'observer.model')
+  })
+
+  it('uppercase model string → throws ConfigValidationError (model IDs must be lowercase)', () => {
+    expectFieldError(() => parseConfig({ observer: { model: 'UPPERCASE/Model' } }), 'observer.model')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cron schedule
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — cronSchedule', () => {
+  it('valid: daily at 3am → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 3 * * *' } })).not.toThrow()
+  })
+
+  it('valid: every 15 minutes → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '*/15 * * * *' } })).not.toThrow()
+  })
+
+  it('valid: all-numeric fields → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 0 1 1 0' } })).not.toThrow()
+  })
+
+  it('non-cron string → throws ConfigValidationError on reflection.cronSchedule', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: 'not-a-cron' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('6 fields → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '0 3 * * * *' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('out-of-range minute (99) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '99 3 * * *' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('out-of-range hour (25) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '0 25 * * *' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('all out-of-range values (99 99 99 99 99) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '99 99 99 99 99' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('named day abbreviation (MON) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '0 3 * * MON' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('zero step (*/0) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '*/0 * * * *' } }),
+      'reflection.cronSchedule'
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Numeric thresholds
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — numeric thresholds', () => {
+  it('negative messageTokenThreshold → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ observation: { messageTokenThreshold: -1 } }),
+      'observation.messageTokenThreshold'
+    )
+  })
+
+  it('zero messageTokenThreshold → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ observation: { messageTokenThreshold: 0 } }),
+      'observation.messageTokenThreshold'
+    )
+  })
+
+  it('messageTokenThreshold minimum boundary 1 → accepted', () => {
+    expect(
+      parseConfig({ observation: { messageTokenThreshold: 1 } }).observation.messageTokenThreshold
+    ).toBe(1)
+  })
+
+  it('float messageTokenThreshold → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ observation: { messageTokenThreshold: 1.5 } }),
+      'observation.messageTokenThreshold'
+    )
+  })
+
+  it('negative observationTokenThreshold → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { observationTokenThreshold: -100 } }),
+      'reflection.observationTokenThreshold'
+    )
+  })
+
+  it('negative maxContextTokens → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxContextTokens: 0 } }),
+      'injection.maxContextTokens'
+    )
+  })
+
+  it('negative maxMocs → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxMocs: -1 } }),
+      'injection.maxMocs'
+    )
+  })
+
+  it('maxMocs minimum boundary 1 → accepted', () => {
+    expect(parseConfig({ injection: { maxMocs: 1 } }).injection.maxMocs).toBe(1)
+  })
+
+  it('float maxMocs → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxMocs: 2.5 } }),
+      'injection.maxMocs'
+    )
+  })
+
+  it('zero maxNodes → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxNodes: 0 } }),
+      'injection.maxNodes'
+    )
+  })
+
+  it('maxNodes minimum boundary 1 → accepted', () => {
+    expect(parseConfig({ injection: { maxNodes: 1 } }).injection.maxNodes).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// triggerMode
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — triggerMode', () => {
+  it('triggerMode threshold → accepted', () => {
+    expect(
+      parseConfig({ observation: { triggerMode: 'threshold' } }).observation.triggerMode
+    ).toBe('threshold')
+  })
+
+  it('triggerMode manual → accepted', () => {
+    expect(
+      parseConfig({ observation: { triggerMode: 'manual' } }).observation.triggerMode
+    ).toBe('manual')
+  })
+
+  it('triggerMode invalid value → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ observation: { triggerMode: 'auto' } }),
+      'observation.triggerMode'
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// identity.mode
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — identity', () => {
+  it('identity mode session-key → accepted', () => {
+    expect(parseConfig({ identity: { mode: 'session-key' } }).identity.mode).toBe('session-key')
+  })
+
+  it('identity mode invalid → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ identity: { mode: 'invalid-mode' } }),
+      'identity.mode'
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// storagePath
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — storagePath', () => {
+  it('custom storage path → accepted', () => {
+    expect(parseConfig({ storagePath: 'custom/path/to/memory' }).storagePath).toBe('custom/path/to/memory')
+  })
+
+  it('empty storagePath → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: '' }), 'storagePath')
+  })
+
+  it('storagePath with traversal (..) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: '../escape' }), 'storagePath')
+    expectFieldError(() => parseConfig({ storagePath: 'memory/../escape' }), 'storagePath')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pinnedNodes
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — pinnedNodes', () => {
+  it('valid node ID list → accepted', () => {
+    const result = parseConfig({
+      injection: { pinnedNodes: ['omg/identity-core', 'omg/preferences'] },
+    })
+    expect(result.injection.pinnedNodes).toEqual(['omg/identity-core', 'omg/preferences'])
+  })
+
+  it('empty pinnedNodes array → accepted', () => {
+    expect(parseConfig({ injection: { pinnedNodes: [] } }).injection.pinnedNodes).toEqual([])
+  })
+
+  it('pinnedNodes with bare string (no slash) → throws ConfigValidationError', () => {
+    expect(() =>
+      parseConfig({ injection: { pinnedNodes: ['not-a-valid-id'] } })
+    ).toThrow(ConfigValidationError)
+  })
+
+  it('pinnedNodes with empty string entry → throws ConfigValidationError', () => {
+    expect(() =>
+      parseConfig({ injection: { pinnedNodes: [''] } })
+    ).toThrow(ConfigValidationError)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// omgConfigSchema export
+// ---------------------------------------------------------------------------
+
+describe('omgConfigSchema', () => {
+  it('safeParse returns success:false for invalid input without throwing', () => {
+    const result = omgConfigSchema.safeParse({ observer: { model: 'bad-no-slash' } })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues.length).toBeGreaterThan(0)
+      expect(result.error.issues[0]?.path).toContain('model')
+    }
+  })
+
+  it('safeParse returns success:true for valid input', () => {
+    const result = omgConfigSchema.safeParse({})
+    expect(result.success).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// OmgConfig type shape (compile-time checks via runtime assertions)
+// ---------------------------------------------------------------------------
+
 describe('OmgConfig type', () => {
-  it('type satisfies expected shape', () => {
-    // This is a compile-time check — if the type is wrong, tsc will fail
+  it('satisfies expected readonly shape', () => {
     const config: OmgConfig = parseConfig({})
 
     const _observer: string | null = config.observer.model
