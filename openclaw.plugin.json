@@ -1,0 +1,143 @@
+{
+  "id": "omg",
+  "name": "Observational Memory Graph",
+  "version": "0.1.0",
+  "description": "Wiki-linked knowledge graph for agent memory using observational memory patterns",
+  "skills": ["./skills/observational-memory-graph"],
+  "configSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "observer": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": ["string", "null"],
+            "description": "LLM model for the observer (null = inherit from OpenClaw agent config)",
+            "default": null,
+            "pattern": "^[a-z0-9-]+/[a-z0-9._:-]+$"
+          }
+        }
+      },
+      "reflector": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": ["string", "null"],
+            "description": "LLM model for the reflector (null = inherit from OpenClaw agent config)",
+            "default": null,
+            "pattern": "^[a-z0-9-]+/[a-z0-9._:-]+$"
+          }
+        }
+      },
+      "observation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "messageTokenThreshold": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 30000,
+            "description": "Token count of pending messages that triggers an observation run"
+          },
+          "triggerMode": {
+            "type": "string",
+            "enum": ["threshold", "manual"],
+            "default": "threshold",
+            "description": "How observation runs are triggered"
+          }
+        }
+      },
+      "reflection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "observationTokenThreshold": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 40000,
+            "description": "Cumulative observation tokens that triggers a reflection pass"
+          },
+          "cronSchedule": {
+            "type": "string",
+            "default": "0 3 * * *",
+            "description": "5-field cron schedule for scheduled reflection (e.g. '0 3 * * *' = 3am daily)"
+          }
+        }
+      },
+      "injection": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "maxContextTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 4000,
+            "description": "Maximum tokens to use for injected graph context"
+          },
+          "maxMocs": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 3,
+            "description": "Maximum number of MOC nodes to include in context injection"
+          },
+          "maxNodes": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 5,
+            "description": "Maximum number of regular nodes to include in context injection"
+          },
+          "pinnedNodes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "default": [],
+            "description": "Node IDs that are always included in context injection regardless of ranking"
+          }
+        }
+      },
+      "identity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["session-key"],
+            "default": "session-key",
+            "description": "Strategy for scoping identity nodes"
+          }
+        }
+      },
+      "storagePath": {
+        "type": "string",
+        "default": "memory/omg",
+        "description": "Path relative to the workspace root where OMG stores its graph files"
+      }
+    }
+  },
+  "uiHints": {
+    "observer.model": {
+      "label": "Observer model (null = inherit from OpenClaw)",
+      "sensitive": false
+    },
+    "reflector.model": {
+      "label": "Reflector model (null = inherit from OpenClaw)",
+      "sensitive": false
+    },
+    "reflection.cronSchedule": {
+      "label": "Reflection cron schedule",
+      "description": "Standard 5-field cron expression for scheduled reflection passes"
+    },
+    "observation.messageTokenThreshold": {
+      "label": "Observation trigger threshold (tokens)"
+    },
+    "injection.maxContextTokens": {
+      "label": "Max context tokens for graph injection"
+    },
+    "storagePath": {
+      "label": "Graph storage path"
+    }
+  }
+}
