@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { z } from 'zod'
 import { parseConfig, omgConfigSchema, ConfigValidationError } from '../../src/config.js'
 import type { OmgConfig } from '../../src/config.js'
 
@@ -47,14 +48,46 @@ describe('parseConfig — defaults', () => {
     expect(result.storagePath).toBe('memory/omg')
   })
 
-  it('unknown keys → stripped silently', () => {
-    const result = parseConfig({
-      unknownTopLevel: 'should be stripped',
-      observer: { model: null, unknownField: 'stripped too' },
-    })
-
+  it('unknown top-level and nested keys → stripped and reported via onUnknownKeys', () => {
+    let capturedKeys: readonly string[] = []
+    const result = parseConfig(
+      {
+        unknownTopLevel: 'should be stripped',
+        observer: { model: null, unknownField: 'stripped too' },
+      },
+      { onUnknownKeys: (keys) => { capturedKeys = keys } }
+    )
     expect((result as Record<string, unknown>)['unknownTopLevel']).toBeUndefined()
     expect(result.observer.model).toBeNull()
+    expect(capturedKeys).toContain('unknownTopLevel')
+    expect(capturedKeys).toContain('observer.unknownField')
+  })
+
+  it('clean input with no unknown keys → onUnknownKeys is not called', () => {
+    let called = false
+    parseConfig(
+      { observer: { model: 'openai/gpt-4o-mini' } },
+      { onUnknownKeys: () => { called = true } }
+    )
+    expect(called).toBe(false)
+  })
+
+  it('unknown key inside injection sub-object → captured by onUnknownKeys', () => {
+    let capturedKeys: readonly string[] = []
+    parseConfig(
+      { injection: { maxMocs: 3, unknownInjectionKey: true } },
+      { onUnknownKeys: (keys) => { capturedKeys = keys } }
+    )
+    expect(capturedKeys).toContain('injection.unknownInjectionKey')
+  })
+
+  it('throwing onUnknownKeys callback → error swallowed, valid config still returned', () => {
+    expect(() =>
+      parseConfig(
+        { unknownTopLevel: 'value' },
+        { onUnknownKeys: () => { throw new Error('callback error') } }
+      )
+    ).not.toThrow()
   })
 })
 
@@ -124,6 +157,14 @@ describe('parseConfig — model field', () => {
   it('uppercase model string → throws ConfigValidationError (model IDs must be lowercase)', () => {
     expectFieldError(() => parseConfig({ observer: { model: 'UPPERCASE/Model' } }), 'observer.model')
   })
+
+  it('uppercase reflector model → throws ConfigValidationError on reflector.model', () => {
+    expectFieldError(() => parseConfig({ reflector: { model: 'UPPERCASE/Model' } }), 'reflector.model')
+  })
+
+  it('model with multiple slashes → throws ConfigValidationError (only one slash allowed)', () => {
+    expectFieldError(() => parseConfig({ observer: { model: 'openai/gpt/4o-mini' } }), 'observer.model')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -191,6 +232,66 @@ describe('parseConfig — cronSchedule', () => {
       'reflection.cronSchedule'
     )
   })
+
+  it('valid: hour range within single decade (8-17) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 8-17 * * *' } })).not.toThrow()
+  })
+
+  it('valid: hour range spanning decades (8-20) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 8-20 * * *' } })).not.toThrow()
+  })
+
+  it('valid: full hour range (0-23) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 0-23 * * *' } })).not.toThrow()
+  })
+
+  it('valid: DOM range spanning decades (5-25) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 0 5-25 * *' } })).not.toThrow()
+  })
+
+  it('valid: month range spanning to two-digit months (6-12) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 0 * 6-12 *' } })).not.toThrow()
+  })
+
+  it('valid: full month range (1-12) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '0 0 * 1-12 *' } })).not.toThrow()
+  })
+
+  it('comma-separated list → throws ConfigValidationError (not supported)', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '0 9,17 * * *' } }),
+      'reflection.cronSchedule'
+    )
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '* * * * 1,5' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('valid: max-boundary values (59 23 31 12 7) → accepted', () => {
+    expect(() => parseConfig({ reflection: { cronSchedule: '59 23 31 12 7' } })).not.toThrow()
+  })
+
+  it('value-based step (1/5) → throws ConfigValidationError (only */N supported)', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '1/5 * * * *' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('DOM=0 (invalid, domain is 1-31) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '0 3 0 * *' } }),
+      'reflection.cronSchedule'
+    )
+  })
+
+  it('Month=0 (invalid, domain is 1-12) → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { cronSchedule: '0 3 * 0 *' } }),
+      'reflection.cronSchedule'
+    )
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -232,16 +333,70 @@ describe('parseConfig — numeric thresholds', () => {
     )
   })
 
-  it('negative maxContextTokens → throws ConfigValidationError', () => {
+  it('zero observationTokenThreshold → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { observationTokenThreshold: 0 } }),
+      'reflection.observationTokenThreshold'
+    )
+  })
+
+  it('float observationTokenThreshold → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { observationTokenThreshold: 1.5 } }),
+      'reflection.observationTokenThreshold'
+    )
+  })
+
+  it('observationTokenThreshold minimum boundary 1 → accepted', () => {
+    expect(
+      parseConfig({ reflection: { observationTokenThreshold: 1 } }).reflection.observationTokenThreshold
+    ).toBe(1)
+  })
+
+  it('float maxNodes → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxNodes: 1.5 } }),
+      'injection.maxNodes'
+    )
+  })
+
+  it('zero maxContextTokens → throws ConfigValidationError', () => {
     expectFieldError(
       () => parseConfig({ injection: { maxContextTokens: 0 } }),
       'injection.maxContextTokens'
     )
   })
 
+  it('negative maxContextTokens → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxContextTokens: -1 } }),
+      'injection.maxContextTokens'
+    )
+  })
+
+  it('float maxContextTokens → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxContextTokens: 1.5 } }),
+      'injection.maxContextTokens'
+    )
+  })
+
+  it('maxContextTokens minimum boundary 1 → accepted', () => {
+    expect(
+      parseConfig({ injection: { maxContextTokens: 1 } }).injection.maxContextTokens
+    ).toBe(1)
+  })
+
   it('negative maxMocs → throws ConfigValidationError', () => {
     expectFieldError(
       () => parseConfig({ injection: { maxMocs: -1 } }),
+      'injection.maxMocs'
+    )
+  })
+
+  it('zero maxMocs → throws ConfigValidationError (minimum is 1)', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { maxMocs: 0 } }),
       'injection.maxMocs'
     )
   })
@@ -327,6 +482,46 @@ describe('parseConfig — storagePath', () => {
   it('storagePath with traversal (..) → throws ConfigValidationError', () => {
     expectFieldError(() => parseConfig({ storagePath: '../escape' }), 'storagePath')
     expectFieldError(() => parseConfig({ storagePath: 'memory/../escape' }), 'storagePath')
+    expectFieldError(() => parseConfig({ storagePath: '..' }), 'storagePath')
+  })
+
+  it('absolute storagePath (unix) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: '/absolute/path' }), 'storagePath')
+    expectFieldError(() => parseConfig({ storagePath: '/etc/shadow' }), 'storagePath')
+  })
+
+  it('absolute storagePath (windows drive, uppercase) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: 'C:/windows/path' }), 'storagePath')
+  })
+
+  it('absolute storagePath (windows drive, lowercase) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: 'c:/windows/path' }), 'storagePath')
+  })
+
+  it('storagePath with ".." as a segment substring → accepted (not a traversal segment)', () => {
+    expect(() => parseConfig({ storagePath: 'memory/valid..name' })).not.toThrow()
+  })
+
+  it('storagePath with single-dot segment (.) → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: 'memory/./subdir' }), 'storagePath')
+    expectFieldError(() => parseConfig({ storagePath: '.' }), 'storagePath')
+  })
+
+  it('backslash path → throws ConfigValidationError (no backslashes allowed)', () => {
+    expectFieldError(() => parseConfig({ storagePath: 'memory\\omg' }), 'storagePath')
+  })
+
+  it('Windows UNC path → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: '\\\\server\\share\\omg' }), 'storagePath')
+  })
+
+  it('storagePath with trailing slash → throws ConfigValidationError', () => {
+    expectFieldError(() => parseConfig({ storagePath: 'memory/omg/' }), 'storagePath')
+  })
+
+  it('storagePath with .hidden segment → accepted (dot-prefix is not a traversal segment)', () => {
+    expect(() => parseConfig({ storagePath: 'memory/.hidden/sub' })).not.toThrow()
+    expect(parseConfig({ storagePath: 'memory/.hidden' }).storagePath).toBe('memory/.hidden')
   })
 })
 
@@ -357,6 +552,35 @@ describe('parseConfig — pinnedNodes', () => {
       parseConfig({ injection: { pinnedNodes: [''] } })
     ).toThrow(ConfigValidationError)
   })
+
+  it('pinnedNodes entry with uppercase namespace → throws ConfigValidationError', () => {
+    expect(() =>
+      parseConfig({ injection: { pinnedNodes: ['Omg/identity-core'] } })
+    ).toThrow(ConfigValidationError)
+  })
+
+  it('pinnedNodes entry with underscore in namespace → throws ConfigValidationError', () => {
+    expect(() =>
+      parseConfig({ injection: { pinnedNodes: ['omg_ns/identity'] } })
+    ).toThrow(ConfigValidationError)
+  })
+
+  it('pinnedNodes entry with leading hyphen in namespace → throws ConfigValidationError', () => {
+    expect(() =>
+      parseConfig({ injection: { pinnedNodes: ['-omg/identity-core'] } })
+    ).toThrow(ConfigValidationError)
+  })
+
+  it('pinnedNodes entry with leading hyphen in slug → throws ConfigValidationError', () => {
+    expect(() =>
+      parseConfig({ injection: { pinnedNodes: ['omg/-bad-slug'] } })
+    ).toThrow(ConfigValidationError)
+  })
+
+  it('pinnedNodes entry with underscore and dot in slug → accepted', () => {
+    const result = parseConfig({ injection: { pinnedNodes: ['omg/my_node.v2'] } })
+    expect(result.injection.pinnedNodes).toEqual(['omg/my_node.v2'])
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -376,6 +600,85 @@ describe('omgConfigSchema', () => {
   it('safeParse returns success:true for valid input', () => {
     const result = omgConfigSchema.safeParse({})
     expect(result.success).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ConfigValidationError structure
+// ---------------------------------------------------------------------------
+
+describe('ConfigValidationError', () => {
+  it('message starts with standard prefix', () => {
+    let err: ConfigValidationError | null = null
+    try { parseConfig({ observer: { model: 'bad' } }) }
+    catch (e) { if (e instanceof ConfigValidationError) err = e }
+    expect(err?.message).toMatch(/^OMG plugin configuration is invalid:/)
+  })
+
+  it('.issues contains structured ZodIssue objects with field path', () => {
+    let err: ConfigValidationError | null = null
+    try { parseConfig({ observer: { model: 'bad' } }) }
+    catch (e) { if (e instanceof ConfigValidationError) err = e }
+    expect(err?.issues).toHaveLength(1)
+    expect(err?.issues[0]?.path).toContain('model')
+  })
+
+  it('Error.cause is the original ZodError', () => {
+    let err: ConfigValidationError | null = null
+    try { parseConfig({ observer: { model: 'bad' } }) }
+    catch (e) { if (e instanceof ConfigValidationError) err = e }
+    expect(err?.cause).toBeInstanceOf(Error)
+    expect((err?.cause as { issues?: unknown })?.issues).toBeDefined()
+  })
+
+  it('multiple invalid fields → exactly 2 indented lines in message body', () => {
+    let err: ConfigValidationError | null = null
+    try {
+      parseConfig({
+        observer: { model: 'bad' },
+        observation: { messageTokenThreshold: -1 },
+      })
+    } catch (e) { if (e instanceof ConfigValidationError) err = e }
+    const indentedLines = err?.message.split('\n').filter((l) => l.startsWith('  '))
+    expect(indentedLines?.length).toBe(2)
+  })
+
+  it('(root) path label used when error is at the top level', () => {
+    let err: ConfigValidationError | null = null
+    try { parseConfig(null) }
+    catch (e) { if (e instanceof ConfigValidationError) err = e }
+    expect(err?.message).toContain('(root)')
+  })
+
+  it('instanceof check works correctly (prototype chain)', () => {
+    let err: unknown
+    try { parseConfig({ observer: { model: 'bad' } }) }
+    catch (e) { err = e }
+    expect(err).toBeInstanceOf(ConfigValidationError)
+    expect(err).toBeInstanceOf(Error)
+  })
+
+  it('.name is "ConfigValidationError"', () => {
+    let err: ConfigValidationError | null = null
+    try { parseConfig({ observer: { model: 'bad' } }) }
+    catch (e) { if (e instanceof ConfigValidationError) err = e }
+    expect(err?.name).toBe('ConfigValidationError')
+  })
+
+  it('zero-issues ZodError → throws an internal Error (not a ConfigValidationError)', () => {
+    let thrown: unknown
+    try { new ConfigValidationError(new z.ZodError([])) }
+    catch (e) { thrown = e }
+    expect(thrown).toBeInstanceOf(Error)
+    expect(thrown).not.toBeInstanceOf(ConfigValidationError)
+    expect((thrown as Error).message).toMatch(/[Ii]nternal bug/)
+  })
+
+  it('array field path renders with bracket notation (e.g. injection.pinnedNodes[0])', () => {
+    let err: ConfigValidationError | null = null
+    try { parseConfig({ injection: { pinnedNodes: ['bad-no-slash'] } }) }
+    catch (e) { if (e instanceof ConfigValidationError) err = e }
+    expect(err?.message).toContain('injection.pinnedNodes[0]')
   })
 })
 

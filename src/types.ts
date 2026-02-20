@@ -44,17 +44,25 @@ export type Priority = 'high' | 'medium' | 'low'
  * Use this for sorting and comparison rather than repeating the mapping
  * at every call site.
  */
-export const PRIORITY_ORDER: Record<Priority, number> = {
+export const PRIORITY_ORDER = {
   high: 3,
   medium: 2,
   low: 1,
-} as const
+} as const satisfies Record<Priority, number>
 
 /**
  * Compression level applied to a node's body during reflection.
  * 0 = no compression, 3 = maximum compression.
  */
 export type CompressionLevel = 0 | 1 | 2 | 3
+
+/** The set of valid `CompressionLevel` values as a const array — single source of truth. */
+const COMPRESSION_LEVELS = [0, 1, 2, 3] as const
+
+/** Returns true if `v` is a valid `CompressionLevel` value (0, 1, 2, or 3). */
+export function isCompressionLevel(v: unknown): v is CompressionLevel {
+  return typeof v === 'number' && (COMPRESSION_LEVELS as readonly number[]).includes(v)
+}
 
 // ---------------------------------------------------------------------------
 // Node Frontmatter
@@ -71,18 +79,14 @@ export interface NodeSource {
 }
 
 /**
- * Scope context for identity-bound nodes.
- * Applies only to nodes with `type === 'identity'`.
+ * Scope context for identity-bound nodes. At least one field must be present.
+ * By convention, only used on nodes with `type === 'identity'`.
+ * The type system does not enforce the identity-only restriction — it will be maintained by write logic
+ * (not yet implemented).
  */
-export interface NodeAppliesTo {
-  /** Identifier of the session scope (e.g. workspace or project key). */
-  readonly sessionScope?: string
-  /**
-   * Identifier of the user identity this node is scoped to.
-   * Distinct from `NodeSource.sessionKey` which identifies the originating session.
-   */
-  readonly identityKey?: string
-}
+export type NodeAppliesTo =
+  | { readonly sessionScope: string; readonly identityKey?: string }
+  | { readonly sessionScope?: string; readonly identityKey: string }
 
 /**
  * YAML frontmatter parsed from the top of each markdown node file.
@@ -95,7 +99,7 @@ export interface NodeFrontmatter {
   readonly priority: Priority
   /** ISO 8601 date string, e.g. "2024-01-15T10:30:00Z" */
   readonly created: string
-  /** ISO 8601 date string; must be >= created */
+  /** ISO 8601 date string; must be >= created (enforced by write logic, not this type) */
   readonly updated: string
   readonly appliesTo?: NodeAppliesTo
   readonly sources?: readonly NodeSource[]
@@ -104,6 +108,8 @@ export interface NodeFrontmatter {
   readonly tags?: readonly string[]
   /** IDs of nodes this node supersedes */
   readonly supersedes?: readonly string[]
+  /** Compression level recorded when this node was last rewritten by the Reflector. */
+  readonly compressionLevel?: CompressionLevel
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +182,10 @@ export interface ObserverOutput {
 
 /** A single node rewrite produced by the Reflector during a reflection pass. */
 export interface ReflectorNodeEdit {
-  /** ID of the node being rewritten. */
+  /**
+   * ID of the node being rewritten.
+   * Must equal `frontmatter.id` — enforced by `createReflectorOutput`.
+   */
   readonly targetId: string
   readonly frontmatter: NodeFrontmatter
   readonly body: string
@@ -184,14 +193,98 @@ export interface ReflectorNodeEdit {
   readonly compressionLevel: CompressionLevel
 }
 
-/** The full output of a Reflector reflection pass. */
+/** Discriminant for the three invariants checked by `createReflectorOutput`. */
+export type ReflectorInvariantKind = 'overlap' | 'id-mismatch' | 'negative-tokens'
+
+/**
+ * Thrown by `createReflectorOutput` when any of its three invariants are violated:
+ *   - `'overlap'`: a node ID appears in both `edits` and `deletions`.
+ *   - `'id-mismatch'`: an edit's `targetId` does not equal its `frontmatter.id`.
+ *   - `'negative-tokens'`: `tokensUsed` is less than 0.
+ *
+ * Inspect `kind` to programmatically distinguish violations.
+ * `overlappingIds` is populated only when `kind === 'overlap'`.
+ */
+export class ReflectorInvariantError extends Error {
+  readonly kind: ReflectorInvariantKind
+  /**
+   * IDs appearing in both `edits` and `deletions`.
+   * Populated when `kind === 'overlap'`; empty array otherwise.
+   */
+  readonly overlappingIds: readonly string[]
+
+  constructor(kind: ReflectorInvariantKind, message: string, overlappingIds: readonly string[] = []) {
+    super(message)
+    this.name = 'ReflectorInvariantError'
+    this.kind = kind
+    this.overlappingIds = overlappingIds
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+// Brand that forces construction through createReflectorOutput.
+// Zero runtime cost — the field exists only in the type system.
+declare const __reflectorOutputBrand: unique symbol
+
+/**
+ * The full output of a Reflector reflection pass.
+ *
+ * Invariants enforced by `createReflectorOutput`:
+ *   - A node ID must not appear in both `edits` and `deletions`.
+ *   - Each `edit.targetId` must equal `edit.frontmatter.id`.
+ *   - `tokensUsed` must be >= 0.
+ *
+ * Construct exclusively via `createReflectorOutput` — direct object literals
+ * are rejected by the TypeScript compiler due to the opaque brand field.
+ */
 export interface ReflectorOutput {
-  /** Node rewrites produced during this pass. A node must not appear in both edits and deletions. */
+  readonly [__reflectorOutputBrand]: true
+  /** Node rewrites produced during this pass. */
   readonly edits: readonly ReflectorNodeEdit[]
   /** IDs of nodes the Reflector recommends deleting (stale/superseded). */
   readonly deletions: readonly string[]
-  /** Tokens consumed by this reflection run. */
+  /** Tokens consumed by this reflection run. Must be >= 0. */
   readonly tokensUsed: number
+}
+
+/**
+ * Creates a validated `ReflectorOutput`, enforcing three invariants:
+ *   1. No node ID appears in both `edits` and `deletions`.
+ *   2. Each `edit.targetId` equals `edit.frontmatter.id`.
+ *   3. `tokensUsed` is >= 0.
+ *
+ * @throws {ReflectorInvariantError} if any invariant is violated.
+ *   Inspect `err.kind` to distinguish between `'overlap'`, `'id-mismatch'`, and `'negative-tokens'`.
+ */
+export function createReflectorOutput(
+  edits: readonly ReflectorNodeEdit[],
+  deletions: readonly string[],
+  tokensUsed: number
+): ReflectorOutput {
+  if (tokensUsed < 0) {
+    throw new ReflectorInvariantError(
+      'negative-tokens',
+      `ReflectorOutput invariant violation: tokensUsed must be >= 0, got ${tokensUsed}`
+    )
+  }
+  const idMismatches = edits.filter((e) => e.frontmatter.id !== e.targetId)
+  if (idMismatches.length > 0) {
+    const details = idMismatches.map((e) => `${e.targetId}≠${e.frontmatter.id}`).join(', ')
+    throw new ReflectorInvariantError(
+      'id-mismatch',
+      `ReflectorOutput invariant violation: edit targetId/frontmatter.id mismatch: [${details}]`
+    )
+  }
+  const editIds = new Set(edits.map((e) => e.targetId))
+  const overlap = deletions.filter((id) => editIds.has(id))
+  if (overlap.length > 0) {
+    throw new ReflectorInvariantError(
+      'overlap',
+      `ReflectorOutput invariant violation: node(s) [${overlap.join(', ')}] appear in both edits and deletions`,
+      overlap
+    )
+  }
+  return { edits, deletions, tokensUsed } as ReflectorOutput
 }
 
 // ---------------------------------------------------------------------------
@@ -208,12 +301,73 @@ export interface OmgSessionState {
   readonly lastObservedAtMs: number
   /** Accumulated token count of messages not yet processed by the Observer. Resets after each observation run. */
   readonly pendingMessageTokens: number
-  /** Cumulative tokens processed across all Observer runs in this session. Monotonically increasing. */
+  /**
+   * Cumulative tokens processed across all Observer runs in this session.
+   * Monotonically increasing — never decreases when producing a new state
+   * object. The non-decrease invariant is enforced by the session state
+   * update logic, not by this type.
+   */
   readonly totalObservationTokens: number
   /** 0-based index of the last message included in the previous Observer run. */
   readonly observationBoundaryMessageIndex: number
   /** Current total count of nodes in the graph. */
   readonly nodeCount: number
+}
+
+/**
+ * Thrown by `createOmgSessionState` when any field violates its invariant.
+ */
+export class OmgSessionStateError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'OmgSessionStateError'
+    Object.setPrototypeOf(this, new.target.prototype)
+  }
+}
+
+/**
+ * Creates a validated `OmgSessionState`, enforcing:
+ *   - All five numeric fields are >= 0.
+ *   - `totalObservationTokens` has not decreased relative to `previousTotalObservationTokens`
+ *     (if provided), guarding the monotonicity invariant.
+ *
+ * @throws {OmgSessionStateError} if any invariant is violated.
+ */
+export function createOmgSessionState(
+  fields: {
+    readonly lastObservedAtMs: number
+    readonly pendingMessageTokens: number
+    readonly totalObservationTokens: number
+    readonly observationBoundaryMessageIndex: number
+    readonly nodeCount: number
+  },
+  previousTotalObservationTokens?: number
+): OmgSessionState {
+  if (fields.lastObservedAtMs < 0) {
+    throw new OmgSessionStateError(`lastObservedAtMs must be >= 0, got ${fields.lastObservedAtMs}`)
+  }
+  if (fields.pendingMessageTokens < 0) {
+    throw new OmgSessionStateError(`pendingMessageTokens must be >= 0, got ${fields.pendingMessageTokens}`)
+  }
+  if (fields.totalObservationTokens < 0) {
+    throw new OmgSessionStateError(`totalObservationTokens must be >= 0, got ${fields.totalObservationTokens}`)
+  }
+  if (fields.observationBoundaryMessageIndex < 0) {
+    throw new OmgSessionStateError(`observationBoundaryMessageIndex must be >= 0, got ${fields.observationBoundaryMessageIndex}`)
+  }
+  if (fields.nodeCount < 0) {
+    throw new OmgSessionStateError(`nodeCount must be >= 0, got ${fields.nodeCount}`)
+  }
+  if (
+    previousTotalObservationTokens !== undefined &&
+    fields.totalObservationTokens < previousTotalObservationTokens
+  ) {
+    throw new OmgSessionStateError(
+      `totalObservationTokens must not decrease: ` +
+      `got ${fields.totalObservationTokens}, previous was ${previousTotalObservationTokens}`
+    )
+  }
+  return { ...fields }
 }
 
 // ---------------------------------------------------------------------------
@@ -227,12 +381,12 @@ export interface OmgSessionState {
 export interface GraphContextSlice {
   /** Markdown-formatted content of the index node, ready for injection into a system prompt. */
   readonly index: string
-  /** MOC (Map of Content) nodes included in this slice. All items have `frontmatter.type === 'moc'`. */
+  /** MOC (Map of Content) nodes included in this slice. All items have `frontmatter.type === 'moc'` (maintained by the context assembler, not enforced by this type). */
   readonly mocs: readonly GraphNode[]
   /** Regular knowledge nodes included in this slice (non-moc, non-index, non-now). */
   readonly nodes: readonly GraphNode[]
   /** The [[omg/now]] node, if present. */
   readonly nowNode: GraphNode | null
-  /** Estimated total tokens for this slice. An approximation — not a hard guarantee. */
-  readonly totalTokens: number
+  /** Estimated token count for this slice. An approximation — not a hard guarantee. */
+  readonly estimatedTokens: number
 }

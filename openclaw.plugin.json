@@ -15,7 +15,7 @@
             "type": ["string", "null"],
             "description": "LLM model for the observer (null = inherit from OpenClaw agent config). Must be lowercase 'provider/model-name'.",
             "default": null,
-            "pattern": "^[a-z0-9-]+/[a-z0-9._:-]+$"
+            "pattern": "^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._:-]*$"
           }
         }
       },
@@ -26,7 +26,7 @@
             "type": ["string", "null"],
             "description": "LLM model for the reflector (null = inherit from OpenClaw agent config). Must be lowercase 'provider/model-name'.",
             "default": null,
-            "pattern": "^[a-z0-9-]+/[a-z0-9._:-]+$"
+            "pattern": "^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._:-]*$"
           }
         }
       },
@@ -88,7 +88,7 @@
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[a-z0-9-]+/[a-z0-9._-]+$",
+              "pattern": "^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]*$",
               "description": "Node ID in 'namespace/slug' format (e.g. 'omg/identity-core')"
             },
             "default": [],
