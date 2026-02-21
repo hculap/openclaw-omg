@@ -245,6 +245,7 @@ describe('createOmgSessionState', () => {
     lastObservedAtMs: 1_000,
     pendingMessageTokens: 500,
     totalObservationTokens: 10_000,
+    lastReflectionTotalTokens: 0,
     observationBoundaryMessageIndex: 42,
     nodeCount: 15,
     lastObservationNodeIds: [] as readonly string[],
@@ -259,18 +260,21 @@ describe('createOmgSessionState', () => {
       lastObservedAtMs: 0,
       pendingMessageTokens: 0,
       totalObservationTokens: 0,
+      lastReflectionTotalTokens: 0,
       observationBoundaryMessageIndex: 0,
       nodeCount: 0,
       lastObservationNodeIds: [],
     })
     expect(state.lastObservedAtMs).toBe(0)
     expect(state.totalObservationTokens).toBe(0)
+    expect(state.lastReflectionTotalTokens).toBe(0)
   })
 
   it.each([
     ['lastObservedAtMs', { ...valid, lastObservedAtMs: -1 }],
     ['pendingMessageTokens', { ...valid, pendingMessageTokens: -1 }],
     ['totalObservationTokens', { ...valid, totalObservationTokens: -1 }],
+    ['lastReflectionTotalTokens', { ...valid, lastReflectionTotalTokens: -1 }],
     ['observationBoundaryMessageIndex', { ...valid, observationBoundaryMessageIndex: -1 }],
     ['nodeCount', { ...valid, nodeCount: -1 }],
   ])('negative %s → throws OmgSessionStateError mentioning the field', (field, fields) => {

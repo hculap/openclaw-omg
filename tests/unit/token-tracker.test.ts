@@ -8,6 +8,7 @@ function defaultState(overrides: Partial<OmgSessionState> = {}): OmgSessionState
     lastObservedAtMs: 0,
     pendingMessageTokens: 0,
     totalObservationTokens: 0,
+    lastReflectionTotalTokens: 0,
     observationBoundaryMessageIndex: 0,
     nodeCount: 0,
     lastObservationNodeIds: [],
@@ -134,6 +135,20 @@ describe('shouldTriggerReflection', () => {
   it('returns true when above threshold', () => {
     const config = parseConfig({ reflection: { observationTokenThreshold: 40_000 } })
     const state = defaultState({ totalObservationTokens: 50_000 })
+    expect(shouldTriggerReflection(state, config)).toBe(true)
+  })
+
+  it('returns false when delta since last reflection is below threshold even if cumulative is high', () => {
+    const config = parseConfig({ reflection: { observationTokenThreshold: 40_000 } })
+    // Cumulative is 80k but last reflection was at 50k → delta = 30k < 40k threshold
+    const state = defaultState({ totalObservationTokens: 80_000, lastReflectionTotalTokens: 50_000 })
+    expect(shouldTriggerReflection(state, config)).toBe(false)
+  })
+
+  it('returns true when delta since last reflection meets threshold', () => {
+    const config = parseConfig({ reflection: { observationTokenThreshold: 40_000 } })
+    // Cumulative is 90k, last reflection was at 50k → delta = 40k >= 40k threshold
+    const state = defaultState({ totalObservationTokens: 90_000, lastReflectionTotalTokens: 50_000 })
     expect(shouldTriggerReflection(state, config)).toBe(true)
   })
 })

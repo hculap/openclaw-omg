@@ -81,6 +81,7 @@ export const nodeFrontmatterSchema = z
       .number()
       .refine(isCompressionLevel, { message: 'compressionLevel must be 0, 1, 2, or 3' })
       .optional(),
+    archived: z.boolean().optional(),
   })
   .strip()
   .refine((f) => f.updated >= f.created, {

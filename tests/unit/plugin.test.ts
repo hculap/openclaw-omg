@@ -22,6 +22,7 @@ function makeMockApi(config: Record<string, unknown> = {}): PluginApi & { on: Re
     workspaceDir: '/workspace',
     generate: vi.fn(),
     on: vi.fn(),
+    scheduleCron: vi.fn(),
   }
 }
 
@@ -34,10 +35,10 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('register — hook registration', () => {
-  it('registers exactly three hooks', () => {
+  it('registers exactly four hooks', () => {
     const api = makeMockApi()
     register(api)
-    expect(api.on).toHaveBeenCalledTimes(3)
+    expect(api.on).toHaveBeenCalledTimes(4)
   })
 
   it('registers before_agent_start hook', () => {
@@ -56,6 +57,12 @@ describe('register — hook registration', () => {
     const api = makeMockApi()
     register(api)
     expect(api.on).toHaveBeenCalledWith('tool_result_persist', expect.any(Function))
+  })
+
+  it('registers gateway_start hook', () => {
+    const api = makeMockApi()
+    register(api)
+    expect(api.on).toHaveBeenCalledWith('gateway_start', expect.any(Function))
   })
 })
 

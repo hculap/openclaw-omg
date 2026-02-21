@@ -128,6 +128,7 @@ function frontmatterToRecord(fm: NodeFrontmatter): Record<string, unknown> {
     ...(fm.tags !== undefined && { tags: fm.tags }),
     ...(fm.supersedes !== undefined && { supersedes: fm.supersedes }),
     ...(fm.compressionLevel !== undefined && { compressionLevel: fm.compressionLevel }),
+    ...(fm.archived !== undefined && { archived: fm.archived }),
   }
 }
 

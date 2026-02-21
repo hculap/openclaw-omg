@@ -22,6 +22,7 @@ function validState(): OmgSessionState {
     lastObservedAtMs: 1_000_000,
     pendingMessageTokens: 500,
     totalObservationTokens: 3000,
+    lastReflectionTotalTokens: 0,
     observationBoundaryMessageIndex: 5,
     nodeCount: 12,
     lastObservationNodeIds: ['omg/fact/alpha', 'omg/fact/beta'],
@@ -42,6 +43,7 @@ describe('getDefaultSessionState', () => {
     expect(state.lastObservedAtMs).toBe(0)
     expect(state.pendingMessageTokens).toBe(0)
     expect(state.totalObservationTokens).toBe(0)
+    expect(state.lastReflectionTotalTokens).toBe(0)
     expect(state.observationBoundaryMessageIndex).toBe(0)
     expect(state.nodeCount).toBe(0)
   })
