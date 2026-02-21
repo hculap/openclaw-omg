@@ -120,14 +120,14 @@ const reflectorSchema = z
 
 /**
  * Controls when the Observer agent runs during a conversation.
- * The Observer is triggered when `pendingMessageTokens` exceeds
- * `messageTokenThreshold`, or manually via `triggerMode: 'manual'`.
+ * The Observer is triggered automatically based on `triggerMode`.
  */
 const observationSchema = z
   .object({
     /**
      * Accumulated token count of unprocessed messages that triggers an observation run.
      * Lower values = more frequent observation (higher LLM cost).
+     * Only used when `triggerMode` is `"threshold"`.
      */
     messageTokenThreshold: z
       .number()
@@ -137,9 +137,10 @@ const observationSchema = z
     /**
      * How observation runs are triggered:
      * - "threshold" — automatically when messageTokenThreshold is reached (default)
+     * - "every-turn" — after every agent turn regardless of token count (dev/test mode)
      * - "manual" — only when explicitly invoked via the observational-memory-graph skill
      */
-    triggerMode: z.enum(['threshold', 'manual']).default('threshold'),
+    triggerMode: z.enum(['threshold', 'every-turn', 'manual']).default('threshold'),
   })
   .strip()
 

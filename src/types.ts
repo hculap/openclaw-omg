@@ -312,8 +312,10 @@ export interface OmgSessionState {
   readonly totalObservationTokens: number
   /** 0-based index of the last message included in the previous Observer run. */
   readonly observationBoundaryMessageIndex: number
-  /** Current total count of nodes in the graph. */
+  /** Cumulative count of nodes written by the Observer across all turns in this session. May diverge from the live graph size after deletions or state resets. */
   readonly nodeCount: number
+  /** IDs of nodes written during the most recent Observer run. Empty if no observation has run. */
+  readonly lastObservationNodeIds: readonly string[]
 }
 
 /**
@@ -342,6 +344,7 @@ export function createOmgSessionState(
     readonly totalObservationTokens: number
     readonly observationBoundaryMessageIndex: number
     readonly nodeCount: number
+    readonly lastObservationNodeIds: readonly string[]
   },
   previousTotalObservationTokens?: number
 ): OmgSessionState {
