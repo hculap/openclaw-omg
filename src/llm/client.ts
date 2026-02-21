@@ -1,0 +1,72 @@
+/**
+ * LLM client interface and factory for the OMG plugin.
+ *
+ * Uses an injected callback pattern so that OpenClaw's model resolution
+ * (auth profiles, provider selection) remains under OpenClaw's control.
+ * In Phase 6 the plugin entry point injects OpenClaw's generation function;
+ * for tests a mock generateFn is passed directly — no SDK required.
+ */
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Token usage reported by an LLM call. */
+export interface LlmUsage {
+  readonly inputTokens: number
+  readonly outputTokens: number
+}
+
+/** The resolved response from a single LLM generation call. */
+export interface LlmResponse {
+  readonly content: string
+  readonly usage: LlmUsage
+}
+
+/** Parameters accepted by a generation call. */
+export interface LlmGenerateParams {
+  readonly system: string
+  readonly user: string
+  readonly maxTokens: number
+}
+
+/**
+ * Injectable generation callback.
+ * In production, wraps OpenClaw's `runEmbeddedPiAgent` with
+ * `resolveDefaultModelForAgent`. In tests, use a simple mock.
+ */
+export type GenerateFn = (params: LlmGenerateParams) => Promise<LlmResponse>
+
+/** Client handle returned by {@link createLlmClient}. */
+export interface LlmClient {
+  generate(params: LlmGenerateParams): Promise<LlmResponse>
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates an {@link LlmClient} backed by `generateFn`.
+ *
+ * Errors thrown by `generateFn` are caught and re-thrown as a new `Error`
+ * whose message includes the model name, making log entries actionable.
+ *
+ * @param model  Model identifier, used only for error messages and logging.
+ * @param generateFn  The underlying generation callback.
+ */
+export function createLlmClient(model: string, generateFn: GenerateFn): LlmClient {
+  return {
+    async generate(params: LlmGenerateParams): Promise<LlmResponse> {
+      try {
+        const raw = await generateFn(params)
+        return { content: raw.content, usage: raw.usage }
+      } catch (err) {
+        throw new Error(
+          `LLM call failed (model: ${model}): ${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        )
+      }
+    },
+  }
+}
