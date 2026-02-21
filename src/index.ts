@@ -41,3 +41,30 @@ export { runObservation } from './observer/observer.js'
 export { parseObserverOutput } from './observer/parser.js'
 export { buildObserverSystemPrompt, buildObserverUserPrompt } from './observer/prompts.js'
 export type { ObserverUserPromptParams } from './observer/prompts.js'
+
+export { selectContext } from './context/selector.js'
+export { renderContextBlock } from './context/renderer.js'
+export type { SelectionParams } from './context/selector.js'
+
+export { loadSessionState, saveSessionState, getDefaultSessionState } from './state/session-state.js'
+export { accumulateTokens, shouldTriggerObservation, shouldTriggerReflection } from './state/token-tracker.js'
+
+export { agentEnd } from './hooks/agent-end.js'
+export { beforeAgentStart } from './hooks/before-agent-start.js'
+export { toolResultPersist } from './hooks/tool-result-persist.js'
+export type {
+  AgentEndEvent,
+  AgentEndContext,
+} from './hooks/agent-end.js'
+export type {
+  BeforeAgentStartEvent,
+  BeforeAgentStartContext,
+  BeforeAgentStartResult,
+} from './hooks/before-agent-start.js'
+export type {
+  ToolResultPersistEvent,
+  ToolResultPersistResult,
+} from './hooks/tool-result-persist.js'
+
+export { register } from './plugin.js'
+export type { PluginApi, PluginHookContext } from './plugin.js'

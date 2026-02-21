@@ -14,6 +14,19 @@ export function isEnoent(err: unknown): boolean {
 }
 
 /**
+ * Reads a file as UTF-8 text, returning null if the file does not exist.
+ * Rethrows any error that is not ENOENT.
+ */
+export async function readFileOrNull(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if (isEnoent(err)) return null
+    throw err
+  }
+}
+
+/**
  * Writes content to a temporary file in the same directory as filePath,
  * then atomically renames it to filePath. Prevents partial writes from
  * being observed by readers.

@@ -247,6 +247,7 @@ describe('createOmgSessionState', () => {
     totalObservationTokens: 10_000,
     observationBoundaryMessageIndex: 42,
     nodeCount: 15,
+    lastObservationNodeIds: [] as readonly string[],
   }
 
   it('returns the validated state for all-positive fields', () => {
@@ -260,6 +261,7 @@ describe('createOmgSessionState', () => {
       totalObservationTokens: 0,
       observationBoundaryMessageIndex: 0,
       nodeCount: 0,
+      lastObservationNodeIds: [],
     })
     expect(state.lastObservedAtMs).toBe(0)
     expect(state.totalObservationTokens).toBe(0)
