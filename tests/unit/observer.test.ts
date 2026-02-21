@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { runObservation } from '../../src/observer/observer.js'
-import type { ObservationParams, Message, NodeIndexEntry } from '../../src/types.js'
+import type { ObservationParams, Message, NodeIndexEntry, ObserverOutput } from '../../src/types.js'
 import type { LlmClient, LlmResponse } from '../../src/llm/client.js'
 import { parseConfig } from '../../src/config.js'
+
+vi.mock('../../src/observer/parser.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/observer/parser.js')>()
+  return { ...actual }
+})
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -137,51 +142,67 @@ describe('runObservation', () => {
       expect(userPrompt).toContain('ws-123')
     })
 
-    it('filters out operations that fail the post-validation type check', async () => {
-      // The parser rejects unknown types, so the only way to reach the post-validator
-      // is with a parser bug. We verify the filter runs by confirming all returned
-      // operations have valid node types.
-      const output = await runObservation(makeParams())
-      expect(output.operations.every((op) => typeof op.frontmatter.type === 'string')).toBe(true)
+    it('filters out operations whose node type slipped through the parser (post-validation)', async () => {
+      // Simulate a parser bug: inject an operation with an invalid type that the
+      // parser should have rejected. The post-validator in the observer must catch it.
+      const parserModule = await import('../../src/observer/parser.js')
+      const badOutput: ObserverOutput = {
+        operations: [
+          {
+            kind: 'create',
+            frontmatter: {
+              id: 'omg/unknown/test',
+              description: 'Test',
+              type: 'not-a-valid-type' as never,
+              priority: 'medium',
+              created: new Date().toISOString(),
+              updated: new Date().toISOString(),
+            },
+            body: 'Test body',
+          },
+        ],
+        nowUpdate: null,
+        mocUpdates: [],
+      }
+      const parseSpy = vi.spyOn(parserModule, 'parseObserverOutput').mockReturnValue(badOutput)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      try {
+        const output = await runObservation(makeParams())
+
+        // Post-validator must filter out the bad operation
+        expect(output.operations).toHaveLength(0)
+
+        // Must log the rejection with the invalid type and id
+        const rejectionLog = errorSpy.mock.calls.find((args) =>
+          typeof args[0] === 'string' && args[0].includes('not-a-valid-type'),
+        )
+        expect(rejectionLog).toBeDefined()
+      } finally {
+        parseSpy.mockRestore()
+        errorSpy.mockRestore()
+      }
     })
   })
 
   describe('error handling', () => {
-    it('does not throw when the LLM client throws', async () => {
+    it('throws when the LLM client throws', async () => {
       const client: LlmClient = {
         generate: vi.fn().mockRejectedValue(new Error('Network error')),
       }
 
-      await expect(runObservation(makeParams({ llmClient: client }))).resolves.toBeDefined()
+      await expect(runObservation(makeParams({ llmClient: client }))).rejects.toThrow('Network error')
     })
 
-    it('returns empty output when the LLM client throws', async () => {
-      const client: LlmClient = {
-        generate: vi.fn().mockRejectedValue(new Error('timeout')),
-      }
-
-      const output = await runObservation(makeParams({ llmClient: client }))
-
-      expect(output.operations).toHaveLength(0)
-      expect(output.nowUpdate).toBeNull()
-      expect(output.mocUpdates).toHaveLength(0)
-    })
-
-    it('logs the full error object when the LLM client throws', async () => {
-      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const originalError = new Error('Network timeout')
+    it('wraps the LLM error and preserves the original as cause', async () => {
+      const originalError = new Error('timeout')
       const client: LlmClient = {
         generate: vi.fn().mockRejectedValue(originalError),
       }
 
-      try {
-        await runObservation(makeParams({ llmClient: client }))
-        const lastCall = spy.mock.calls[spy.mock.calls.length - 1]!
-        // The full error object must be passed (not just the message string)
-        expect(lastCall.some((arg) => arg === originalError || (arg instanceof Error && arg.cause === originalError))).toBe(true)
-      } finally {
-        spy.mockRestore()
-      }
+      const err = await runObservation(makeParams({ llmClient: client })).catch((e) => e)
+      expect(err).toBeInstanceOf(Error)
+      expect(err.cause).toBe(originalError)
     })
 
     it('does not throw when the LLM returns garbage text', async () => {
@@ -207,26 +228,54 @@ describe('runObservation', () => {
   })
 
   describe('token logging', () => {
-    it('logs token usage via console.log (not console.error)', async () => {
+    it('logs token usage via console.log (not console.warn or console.error)', async () => {
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
         await runObservation(makeParams())
 
         const tokenLog = logSpy.mock.calls.find((args) =>
-          typeof args[0] === 'string' && args[0].includes('tokens used'),
+          typeof args[0] === 'string' && args[0].includes('[omg] Observer: tokens used'),
         )
         expect(tokenLog).toBeDefined()
 
-        // Must NOT appear in console.error
+        // Must NOT appear on warn or error
+        const tokenWarn = warnSpy.mock.calls.find((args) =>
+          typeof args[0] === 'string' && (args[0] as string).includes('tokens used'),
+        )
+        expect(tokenWarn).toBeUndefined()
+
         const tokenError = errorSpy.mock.calls.find((args) =>
           typeof args[0] === 'string' && (args[0] as string).includes('tokens used'),
         )
         expect(tokenError).toBeUndefined()
       } finally {
         logSpy.mockRestore()
+        warnSpy.mockRestore()
         errorSpy.mockRestore()
       }
+    })
+  })
+
+  describe('LLM error context', () => {
+    it('includes messageCount and nodeIndexSize in the error message', async () => {
+      const client: LlmClient = {
+        generate: vi.fn().mockRejectedValue(new Error('timeout')),
+      }
+
+      const messages = [
+        { role: 'user' as const, content: 'msg 1' },
+        { role: 'assistant' as const, content: 'msg 2' },
+      ]
+      const index = [{ id: 'omg/project/x', description: 'X' }]
+
+      const err = await runObservation(
+        makeParams({ llmClient: client, unobservedMessages: messages, existingNodeIndex: index }),
+      ).catch((e) => e)
+
+      expect(err.message).toContain('messageCount: 2')
+      expect(err.message).toContain('nodeIndexSize: 1')
     })
   })
 })

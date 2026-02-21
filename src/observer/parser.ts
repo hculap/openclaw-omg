@@ -2,9 +2,9 @@
  * XML parser for the Observer LLM output.
  *
  * Converts raw LLM text (expected to be XML) into an {@link ObserverOutput}.
- * Never throws. On any parse failure, logs the problem and returns an empty
- * ObserverOutput — operations that cannot be reliably parsed are dropped
- * rather than fabricated from heuristics.
+ * `parseObserverOutput` never throws. On any parse failure, logs the problem
+ * and returns an empty ObserverOutput — operations that cannot be reliably
+ * parsed are dropped rather than fabricated from heuristics.
  */
 
 import { XMLParser } from 'fast-xml-parser'
@@ -21,11 +21,11 @@ import { extractWikilinks } from '../utils/markdown.js'
 // Constants
 // ---------------------------------------------------------------------------
 
-const EMPTY_OUTPUT: ObserverOutput = {
-  operations: [],
+export const EMPTY_OUTPUT: ObserverOutput = Object.freeze({
+  operations: Object.freeze([]) as readonly ObserverOperation[],
   nowUpdate: null,
-  mocUpdates: [],
-}
+  mocUpdates: Object.freeze([]) as readonly string[],
+})
 
 const VALID_ACTIONS = new Set(['create', 'update', 'supersede'])
 const VALID_PRIORITIES = new Set<string>(['high', 'medium', 'low'])
@@ -50,10 +50,13 @@ const xmlParser = new XMLParser({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function coercePriority(raw: unknown): Priority {
+function coercePriority(raw: unknown, opId?: string): Priority {
   if (typeof raw === 'string' && VALID_PRIORITIES.has(raw)) {
     return raw as Priority
   }
+  console.warn(
+    `[omg] Observer parser: unknown priority "${String(raw)}" — defaulting to "medium"${opId ? ` (id="${opId}")` : ''}`,
+  )
   return 'medium'
 }
 
@@ -77,11 +80,21 @@ function buildFrontmatter(op: Record<string, unknown>, now: string): NodeFrontma
   const rawType = op['@_type']
   const rawPriority = op['@_priority']
 
-  if (!id || !description) return null
-  if (!isNodeType(rawType)) return null
+  if (!id || !description) {
+    console.warn(
+      `[omg] Observer parser: dropping operation — missing id or description (id="${String(op['id'])}", description="${String(op['description'])}")`,
+    )
+    return null
+  }
+  if (!isNodeType(rawType)) {
+    console.warn(
+      `[omg] Observer parser: dropping operation — unknown type "${String(rawType)}" (id="${id}")`,
+    )
+    return null
+  }
 
   const type = rawType
-  const priority = coercePriority(rawPriority)
+  const priority = coercePriority(rawPriority, id)
   const links = extractLinksFromRaw(op['links'])
   const tags = extractTagsFromRaw(op['tags'])
 
@@ -103,7 +116,12 @@ function buildFrontmatter(op: Record<string, unknown>, now: string): NodeFrontma
 function parseOperation(op: Record<string, unknown>, now: string): ObserverOperation | null {
   const action = typeof op['@_action'] === 'string' ? op['@_action'] : ''
 
-  if (!VALID_ACTIONS.has(action)) return null
+  if (!VALID_ACTIONS.has(action)) {
+    console.warn(
+      `[omg] Observer parser: dropping operation — unknown action "${action}"`,
+    )
+    return null
+  }
 
   const frontmatter = buildFrontmatter(op, now)
   if (frontmatter === null) return null
@@ -116,7 +134,12 @@ function parseOperation(op: Record<string, unknown>, now: string): ObserverOpera
 
   // update / supersede both need a target-id
   const targetId = typeof op['target-id'] === 'string' ? op['target-id'].trim() : ''
-  if (!targetId) return null
+  if (!targetId) {
+    console.warn(
+      `[omg] Observer parser: dropping "${action}" operation — missing target-id (id="${frontmatter.id}")`,
+    )
+    return null
+  }
 
   if (action === 'update') {
     return { kind: 'update', targetId, frontmatter, body }
@@ -146,7 +169,13 @@ function parseMocUpdates(mocUpdatesNode: unknown): readonly string[] {
     const domain = typeof (moc as Record<string, unknown>)['@_domain'] === 'string'
       ? ((moc as Record<string, unknown>)['@_domain'] as string).trim()
       : ''
-    if (!domain || seen.has(domain)) continue
+    if (!domain) {
+      console.warn(
+        `[omg] Observer parser: dropping <moc> entry — missing or empty domain attribute (raw: ${JSON.stringify(moc)})`,
+      )
+      continue
+    }
+    if (seen.has(domain)) continue
     seen.add(domain)
     results.push(domain)
   }
@@ -165,8 +194,8 @@ function parseMocUpdates(mocUpdatesNode: unknown): readonly string[] {
  *   - XML parsing fails (parse error is logged).
  *   - The `<observations>` root element is absent (logged).
  *
- * Individual operations that fail field validation are silently dropped and
- * their count is logged as a warning so callers can detect schema drift.
+ * Individual operations that fail field validation are dropped; each rejection
+ * is logged at warn level with the specific field and value so callers can detect schema drift.
  */
 export function parseObserverOutput(raw: string): ObserverOutput {
   if (typeof raw !== 'string') {

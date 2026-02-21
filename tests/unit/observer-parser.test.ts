@@ -219,6 +219,27 @@ describe('parseObserverOutput — valid XML', () => {
     expect(prefCount).toBe(1)
   })
 
+  it('drops and warns about <moc> entries with no domain attribute', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const xml = makeXml(`
+        <operations></operations>
+        <moc-updates>
+          <moc action="add" />
+          <moc domain="projects" action="add" />
+        </moc-updates>
+      `)
+      const output = parseObserverOutput(xml)
+      expect(output.mocUpdates).toEqual(['projects'])
+      const warnCall = warnSpy.mock.calls.find((args) =>
+        typeof args[0] === 'string' && args[0].includes('missing or empty domain'),
+      )
+      expect(warnCall).toBeDefined()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('returns empty mocUpdates when <moc-updates> is absent', () => {
     const xml = makeXml(`<operations></operations>`)
     const output = parseObserverOutput(xml)
@@ -275,10 +296,11 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalidType'))
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 1'))
   })
 
-  it('skips an operation with an invalid action', () => {
+  it('skips an operation with an invalid action and logs the rejected action', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="delete" type="fact" priority="high"',
       `<id>omg/fact/x</id><description>desc</description><content>body</content>`,
@@ -286,9 +308,10 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"delete"'))
   })
 
-  it('skips an update operation with missing target-id', () => {
+  it('skips an update operation with missing target-id and logs the operation id', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="update" type="fact" priority="medium"',
       `<id>omg/fact/x</id><description>desc</description><content>body</content>`,
@@ -296,9 +319,10 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing target-id'))
   })
 
-  it('skips a supersede operation with missing target-id', () => {
+  it('skips a supersede operation with missing target-id and logs the operation id', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="supersede" type="preference" priority="high"',
       `<id>omg/preference/new</id><description>new desc</description><content>body</content>`,
@@ -306,9 +330,10 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing target-id'))
   })
 
-  it('skips an operation with missing id', () => {
+  it('skips an operation with missing id and logs the rejection reason', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="create" type="fact" priority="medium"',
       `<description>desc</description><content>body</content>`,
@@ -316,9 +341,10 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing id or description'))
   })
 
-  it('skips an operation with missing description', () => {
+  it('skips an operation with missing description and logs the rejection reason', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="create" type="fact" priority="medium"',
       `<id>omg/fact/x</id><content>body</content>`,
@@ -326,6 +352,17 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing id or description'))
+  })
+
+  it('logs a warning with the unknown priority value when coercing to medium', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'action="create" type="fact" priority="urgent"',
+      `<id>omg/fact/x</id><description>Some fact</description><content>body</content>`,
+    )}</operations>`)
+
+    parseObserverOutput(xml)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"urgent"'))
   })
 
   it('still returns valid operations when mixed with invalid ones', () => {

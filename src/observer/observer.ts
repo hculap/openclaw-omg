@@ -2,23 +2,17 @@
  * Observer orchestrator.
  *
  * Coordinates the full observation cycle: prompt building → LLM call → parsing → validation.
- * Never throws — all error paths return an empty ObserverOutput.
+ * LLM errors propagate to the caller; parse errors return an empty ObserverOutput.
  */
 
 import type { ObserverOutput, ObservationParams } from '../types.js'
 import { isNodeType } from '../types.js'
 import { buildObserverSystemPrompt, buildObserverUserPrompt } from './prompts.js'
-import { parseObserverOutput } from './parser.js'
+import { parseObserverOutput, EMPTY_OUTPUT } from './parser.js'
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const EMPTY_OUTPUT: ObserverOutput = {
-  operations: [],
-  nowUpdate: null,
-  mocUpdates: [],
-}
 
 /** Maximum tokens to request from the LLM for the observation response. */
 const OBSERVER_MAX_TOKENS = 4096
@@ -33,13 +27,16 @@ const OBSERVER_MAX_TOKENS = 4096
  * Flow:
  *   1. Short-circuit if there are no unobserved messages.
  *   2. Build system and user prompts.
- *   3. Call the LLM client.
+ *   3. Call the LLM client (errors propagate to the caller).
  *   4. Parse the response into ObserverOutput.
  *   5. Post-validate operations: re-filter any whose node type fails `isNodeType`,
  *      defending against parser bugs that might slip an invalid type through.
  *   6. Return the validated output.
  *
- * Never throws. Returns an empty ObserverOutput on any error path.
+ * Returns an empty ObserverOutput when messages is empty.
+ * Throws if the LLM call fails — the error is a plain {@link Error} whose message is
+ * prefixed with the model name (e.g. `"LLM call failed (model: …): …"`) and whose
+ * `cause` property holds the original error. Callers must catch and handle LLM errors.
  */
 export async function runObservation(params: ObservationParams): Promise<ObserverOutput> {
   const { unobservedMessages, existingNodeIndex, nowNode, llmClient, sessionContext } = params
@@ -60,8 +57,10 @@ export async function runObservation(params: ObservationParams): Promise<Observe
   try {
     response = await llmClient.generate({ system, user, maxTokens: OBSERVER_MAX_TOKENS })
   } catch (err) {
-    console.error('[omg] Observer: LLM call failed — returning empty output', err)
-    return { ...EMPTY_OUTPUT }
+    throw new Error(
+      `[omg] Observer: LLM call failed (messageCount: ${unobservedMessages.length}, nodeIndexSize: ${existingNodeIndex.length}): ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    )
   }
 
   console.log(
