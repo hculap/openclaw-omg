@@ -35,7 +35,8 @@ const OBSERVER_MAX_TOKENS = 4096
  *   2. Build system and user prompts.
  *   3. Call the LLM client.
  *   4. Parse the response into ObserverOutput.
- *   5. Post-validate operations (belt-and-suspenders type check).
+ *   5. Post-validate operations: re-filter any whose node type fails `isNodeType`,
+ *      defending against parser bugs that might slip an invalid type through.
  *   6. Return the validated output.
  *
  * Never throws. Returns an empty ObserverOutput on any error path.
@@ -59,21 +60,26 @@ export async function runObservation(params: ObservationParams): Promise<Observe
   try {
     response = await llmClient.generate({ system, user, maxTokens: OBSERVER_MAX_TOKENS })
   } catch (err) {
-    console.error('[omg] Observer: LLM call failed —', err instanceof Error ? err.message : String(err))
+    console.error('[omg] Observer: LLM call failed — returning empty output', err)
     return { ...EMPTY_OUTPUT }
   }
 
-  console.error(
+  console.log(
     `[omg] Observer: tokens used — input: ${response.usage.inputTokens}, output: ${response.usage.outputTokens}`,
   )
 
   const output = parseObserverOutput(response.content)
 
-  // Belt-and-suspenders: filter any operations whose node type slipped through
-  // the parser's own validation (e.g. due to upstream parser bugs).
-  const validatedOperations = output.operations.filter((op) =>
-    isNodeType(op.frontmatter.type),
-  )
+  // Belt-and-suspenders: re-filter any operation whose node type slipped through
+  // the parser's own validation (e.g. due to a parser bug). Logs at error level
+  // because triggering this path indicates a bug that must be investigated.
+  const validatedOperations = output.operations.filter((op) => {
+    if (isNodeType(op.frontmatter.type)) return true
+    console.error(
+      `[omg] Observer: post-validation rejected operation with unknown type "${String(op.frontmatter.type)}" (id: "${op.frontmatter.id}") — this indicates a parser bug`,
+    )
+    return false
+  })
 
   return {
     ...output,

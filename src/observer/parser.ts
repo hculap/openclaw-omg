@@ -2,8 +2,9 @@
  * XML parser for the Observer LLM output.
  *
  * Converts raw LLM text (expected to be XML) into an {@link ObserverOutput}.
- * Never throws — any parse failure returns an empty or partially-populated
- * ObserverOutput, with a console.warn for degraded-mode fallback.
+ * Never throws. On any parse failure, logs the problem and returns an empty
+ * ObserverOutput — operations that cannot be reliably parsed are dropped
+ * rather than fabricated from heuristics.
  */
 
 import { XMLParser } from 'fast-xml-parser'
@@ -70,7 +71,7 @@ function extractLinksFromRaw(raw: unknown): readonly string[] {
 }
 
 /** Build a minimal NodeFrontmatter from parsed XML operation fields. */
-function buildFrontmatter(op: Record<string, unknown>): NodeFrontmatter | null {
+function buildFrontmatter(op: Record<string, unknown>, now: string): NodeFrontmatter | null {
   const id = typeof op['id'] === 'string' ? op['id'].trim() : ''
   const description = typeof op['description'] === 'string' ? op['description'].trim() : ''
   const rawType = op['@_type']
@@ -81,8 +82,6 @@ function buildFrontmatter(op: Record<string, unknown>): NodeFrontmatter | null {
 
   const type = rawType
   const priority = coercePriority(rawPriority)
-  const now = new Date().toISOString()
-
   const links = extractLinksFromRaw(op['links'])
   const tags = extractTagsFromRaw(op['tags'])
 
@@ -101,12 +100,12 @@ function buildFrontmatter(op: Record<string, unknown>): NodeFrontmatter | null {
 }
 
 /** Parse a single `<operation>` element into an ObserverOperation. */
-function parseOperation(op: Record<string, unknown>): ObserverOperation | null {
+function parseOperation(op: Record<string, unknown>, now: string): ObserverOperation | null {
   const action = typeof op['@_action'] === 'string' ? op['@_action'] : ''
 
   if (!VALID_ACTIONS.has(action)) return null
 
-  const frontmatter = buildFrontmatter(op)
+  const frontmatter = buildFrontmatter(op, now)
   if (frontmatter === null) return null
 
   const body = typeof op['content'] === 'string' ? op['content'].trim() : ''
@@ -129,8 +128,9 @@ function parseOperation(op: Record<string, unknown>): ObserverOperation | null {
 
 /**
  * Parse `<moc-updates>` into a list of MOC domain IDs that need regenerating.
- * The action attribute (add/remove) from the XML guides the hook layer; here
- * we surface just the domain names so the caller knows which MOCs are affected.
+ * Only the domain names are surfaced here; the add/remove action attribute
+ * from the XML is intentionally dropped (the hook layer determines membership
+ * changes from the full operation set, not from this list).
  */
 function parseMocUpdates(mocUpdatesNode: unknown): readonly string[] {
   if (mocUpdatesNode === null || typeof mocUpdatesNode !== 'object') return []
@@ -154,67 +154,33 @@ function parseMocUpdates(mocUpdatesNode: unknown): readonly string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Fallback: plain-text line parser
-// ---------------------------------------------------------------------------
-
-/**
- * Last-resort fallback when XML parsing fails entirely.
- * Scans lines for bullet points or emoji-prefixed lines and treats each as
- * an episode node at medium priority.
- */
-function fallbackParse(raw: string): ObserverOutput {
-  console.warn('[omg] Observer parser: XML parsing failed, attempting plain-text fallback')
-
-  const lines = raw.split('\n')
-  const operations: ObserverOperation[] = []
-
-  for (const line of lines) {
-    const trimmed = line.trim()
-    // Match lines starting with "- " or an emoji (basic heuristic)
-    if (!trimmed.startsWith('- ') && !/^\p{Emoji}/u.test(trimmed)) continue
-    const text = trimmed.startsWith('- ') ? trimmed.slice(2).trim() : trimmed
-    if (!text) continue
-
-    const slug = text
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .replace(/\s+/g, '-')
-      .slice(0, 60)
-
-    if (!slug) continue
-
-    const now = new Date().toISOString()
-    operations.push({
-      kind: 'create',
-      frontmatter: {
-        id: `omg/episode/${slug}`,
-        description: text,
-        type: 'episode',
-        priority: 'medium',
-        created: now,
-        updated: now,
-      },
-      body: text,
-    })
-  }
-
-  return { ...EMPTY_OUTPUT, operations }
-}
-
-// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
 /**
  * Parses the raw LLM output string into an {@link ObserverOutput}.
  *
- * Never throws. On complete parse failure, returns an empty ObserverOutput.
- * On partial XML failure, attempts the plain-text fallback.
+ * Never throws. Returns an empty ObserverOutput when:
+ *   - The input is empty or not a string.
+ *   - XML parsing fails (parse error is logged).
+ *   - The `<observations>` root element is absent (logged).
+ *
+ * Individual operations that fail field validation are silently dropped and
+ * their count is logged as a warning so callers can detect schema drift.
  */
 export function parseObserverOutput(raw: string): ObserverOutput {
-  if (typeof raw !== 'string' || raw.trim() === '') {
+  if (typeof raw !== 'string') {
+    console.error('[omg] Observer parser: received non-string input — this is a bug in the LLM client layer')
     return { ...EMPTY_OUTPUT }
   }
+  if (raw.trim() === '') {
+    console.warn('[omg] Observer parser: LLM returned an empty response — no operations will be extracted')
+    return { ...EMPTY_OUTPUT }
+  }
+
+  // Capture a single timestamp for all operations in this parse call so every
+  // node from one observation cycle shares the same created/updated value.
+  const now = new Date().toISOString()
 
   // Extract the XML block — the LLM may wrap it in ``` fences or add preamble text.
   const xmlMatch = raw.match(/<observations[\s\S]*?<\/observations>/)
@@ -224,19 +190,24 @@ export function parseObserverOutput(raw: string): ObserverOutput {
   try {
     const result = xmlParser.parse(xmlSource) as Record<string, unknown>
     if (typeof result !== 'object' || result === null) {
-      return fallbackParse(raw)
+      console.error('[omg] Observer parser: XMLParser returned a non-object result — returning empty output')
+      return { ...EMPTY_OUTPUT }
     }
     parsed = result
-  } catch {
-    return fallbackParse(raw)
+  } catch (err) {
+    console.error(
+      '[omg] Observer parser: XMLParser.parse() threw — returning empty output.',
+      err instanceof Error ? err.message : String(err),
+    )
+    return { ...EMPTY_OUTPUT }
   }
 
   const root = parsed['observations'] as Record<string, unknown> | undefined
   if (root === undefined || root === null) {
-    return fallbackParse(raw)
+    console.error('[omg] Observer parser: <observations> root element not found — returning empty output')
+    return { ...EMPTY_OUTPUT }
   }
 
-  // --- Operations ---
   const operations: ObserverOperation[] = []
   const opsNode = root['operations'] as Record<string, unknown> | undefined
 
@@ -244,22 +215,28 @@ export function parseObserverOutput(raw: string): ObserverOutput {
     const rawOps = opsNode['operation']
     const opArray = Array.isArray(rawOps) ? rawOps : []
 
+    let skippedCount = 0
     for (const op of opArray) {
       if (op === null || typeof op !== 'object') continue
-      const parsed = parseOperation(op as Record<string, unknown>)
-      if (parsed !== null) {
-        operations.push(parsed)
+      const parsedOp = parseOperation(op as Record<string, unknown>, now)
+      if (parsedOp !== null) {
+        operations.push(parsedOp)
+      } else {
+        skippedCount++
       }
+    }
+    if (skippedCount > 0) {
+      console.warn(
+        `[omg] Observer parser: skipped ${skippedCount} operation(s) — invalid action, type, or missing required fields`,
+      )
     }
   }
 
-  // --- Now update ---
   const rawNow = root['now-update']
   const nowUpdate = typeof rawNow === 'string' && rawNow.trim().length > 0
     ? rawNow.trim()
     : null
 
-  // --- MOC updates ---
   const mocUpdates = parseMocUpdates(root['moc-updates'])
 
   return { operations, nowUpdate, mocUpdates }

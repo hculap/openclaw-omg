@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { parseObserverOutput } from '../../src/observer/parser.js'
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ describe('parseObserverOutput — valid XML', () => {
     expect(output.operations[1]!.kind).toBe('update')
   })
 
-  it('defaults priority to medium when attribute is missing or invalid', () => {
+  it('defaults priority to medium when attribute is missing', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="create" type="fact"',
       `<id>omg/fact/x</id>
@@ -99,6 +99,27 @@ describe('parseObserverOutput — valid XML', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations[0]!.frontmatter.priority).toBe('medium')
+  })
+
+  it('defaults priority to medium when priority attribute is an unrecognised value', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'action="create" type="fact" priority="urgent"',
+      `<id>omg/fact/x</id>
+       <description>Some fact</description>
+       <content>body</content>`,
+    )}</operations>`)
+
+    const output = parseObserverOutput(xml)
+    expect(output.operations[0]!.frontmatter.priority).toBe('medium')
+  })
+
+  it('all operations from one parse call share the same created/updated timestamp', () => {
+    const xml = makeXml(`<operations>${VALID_CREATE}${VALID_UPDATE}</operations>`)
+    const output = parseObserverOutput(xml)
+
+    expect(output.operations).toHaveLength(2)
+    expect(output.operations[0]!.frontmatter.created).toBe(output.operations[1]!.frontmatter.created)
+    expect(output.operations[0]!.frontmatter.updated).toBe(output.operations[1]!.frontmatter.updated)
   })
 
   it('sets created and updated to ISO 8601 timestamps', () => {
@@ -173,6 +194,18 @@ describe('parseObserverOutput — valid XML', () => {
     expect(output.mocUpdates).toContain('projects')
   })
 
+  it('parses a single <moc> element as an array (isArray guard)', () => {
+    const xml = makeXml(`
+      <operations></operations>
+      <moc-updates>
+        <moc domain="preferences" action="add" />
+      </moc-updates>
+    `)
+    const output = parseObserverOutput(xml)
+    expect(output.mocUpdates).toHaveLength(1)
+    expect(output.mocUpdates[0]).toBe('preferences')
+  })
+
   it('deduplicates repeated MOC domains', () => {
     const xml = makeXml(`
       <operations></operations>
@@ -200,10 +233,9 @@ describe('parseObserverOutput — valid XML', () => {
        <content>Content with &quot;quotes&quot; and &amp; ampersand.</content>`,
     )}</operations>`)
 
-    // Should not throw; content/description decoded properly
-    expect(() => parseObserverOutput(xml)).not.toThrow()
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(1)
+    expect(output.operations[0]!.frontmatter.description).toContain('AT&T fact')
   })
 
   it('returns empty operations array for empty <operations> block', () => {
@@ -222,11 +254,20 @@ describe('parseObserverOutput — valid XML', () => {
 })
 
 // ---------------------------------------------------------------------------
-// Invalid operations: skipped gracefully
+// Invalid operations: skipped with warning
 // ---------------------------------------------------------------------------
 
 describe('parseObserverOutput — invalid operations skipped', () => {
-  it('skips an operation with an invalid node type', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+  })
+
+  it('skips an operation with an invalid node type and logs a warning', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'action="create" type="invalidType" priority="high"',
       `<id>omg/fact/x</id><description>desc</description><content>body</content>`,
@@ -234,6 +275,7 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 1'))
   })
 
   it('skips an operation with an invalid action', () => {
@@ -297,6 +339,17 @@ describe('parseObserverOutput — invalid operations skipped', () => {
     expect(output.operations).toHaveLength(1)
     expect(output.operations[0]!.kind).toBe('create')
   })
+
+  it('logs a warning with the count of skipped operations', () => {
+    const badOp = makeOperation(
+      'action="create" type="not-a-type" priority="high"',
+      `<id>omg/fact/bad</id><description>bad</description><content>body</content>`,
+    )
+    const xml = makeXml(`<operations>${badOp}${badOp}${VALID_CREATE}</operations>`)
+
+    parseObserverOutput(xml)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 2'))
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -304,6 +357,18 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseObserverOutput — malformed input', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>
+  let warnSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    errorSpy.mockRestore()
+    warnSpy.mockRestore()
+  })
+
   it('does not throw on malformed XML', () => {
     expect(() => parseObserverOutput('<observations><unclosed')).not.toThrow()
   })
@@ -316,26 +381,30 @@ describe('parseObserverOutput — malformed input', () => {
     expect(() => parseObserverOutput('')).not.toThrow()
   })
 
-  it('returns empty output for completely invalid XML input', () => {
-    const output = parseObserverOutput('this is not xml')
-    // Fallback parser may produce some episode nodes or return empty
-    // Either way, it must not throw and must return a valid ObserverOutput shape
-    expect(output).toHaveProperty('operations')
-    expect(output).toHaveProperty('nowUpdate')
-    expect(output).toHaveProperty('mocUpdates')
-  })
-
-  it('returns empty output for an empty string', () => {
+  it('returns empty output for empty string and logs a warning', () => {
     const output = parseObserverOutput('')
     expect(output.operations).toHaveLength(0)
     expect(output.nowUpdate).toBeNull()
     expect(output.mocUpdates).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('empty response'))
   })
 
-  it('returns a valid ObserverOutput shape even on total failure', () => {
+  it('returns empty output when <observations> root is missing and logs an error', () => {
+    const output = parseObserverOutput('<result><nothing/></result>')
+    expect(output.operations).toHaveLength(0)
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('<observations>'))
+  })
+
+  it('returns a valid ObserverOutput shape on any failure', () => {
     const output = parseObserverOutput('<<< totally broken >>>')
     expect(Array.isArray(output.operations)).toBe(true)
     expect(output.nowUpdate === null || typeof output.nowUpdate === 'string').toBe(true)
     expect(Array.isArray(output.mocUpdates)).toBe(true)
+  })
+
+  it('logs an error (not warn) when XMLParser.parse() throws', () => {
+    // Force a parse failure by feeding something that looks XML-ish but breaks the parser
+    parseObserverOutput('<observations')
+    expect(errorSpy).toHaveBeenCalled()
   })
 })

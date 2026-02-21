@@ -67,6 +67,77 @@ describe('createLlmClient', () => {
     })
   })
 
+  describe('maxTokens validation', () => {
+    it('throws before calling generateFn when maxTokens is zero', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue(RESPONSE)
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate({ ...PARAMS, maxTokens: 0 })).rejects.toThrow(
+        'maxTokens must be a positive integer',
+      )
+      expect(generateFn).not.toHaveBeenCalled()
+    })
+
+    it('throws before calling generateFn when maxTokens is negative', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue(RESPONSE)
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate({ ...PARAMS, maxTokens: -1 })).rejects.toThrow(
+        'maxTokens must be a positive integer',
+      )
+    })
+
+    it('throws before calling generateFn when maxTokens is a float', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue(RESPONSE)
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate({ ...PARAMS, maxTokens: 1.5 })).rejects.toThrow(
+        'maxTokens must be a positive integer',
+      )
+    })
+
+    it('includes the model name in the maxTokens validation error', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue(RESPONSE)
+      const client = createLlmClient('openai/gpt-4o', generateFn)
+
+      await expect(client.generate({ ...PARAMS, maxTokens: 0 })).rejects.toThrow(
+        '(model: openai/gpt-4o)',
+      )
+    })
+  })
+
+  describe('token count validation', () => {
+    it('throws when generateFn returns negative inputTokens', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue({
+        content: 'ok',
+        usage: { inputTokens: -1, outputTokens: 5 },
+      })
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate(PARAMS)).rejects.toThrow('negative token counts')
+    })
+
+    it('throws when generateFn returns negative outputTokens', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue({
+        content: 'ok',
+        usage: { inputTokens: 10, outputTokens: -1 },
+      })
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate(PARAMS)).rejects.toThrow('negative token counts')
+    })
+
+    it('accepts zero token counts (e.g. cached responses)', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue({
+        content: 'ok',
+        usage: { inputTokens: 0, outputTokens: 0 },
+      })
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate(PARAMS)).resolves.toMatchObject({ content: 'ok' })
+    })
+  })
+
   describe('error wrapping', () => {
     it('wraps an Error thrown by generateFn with the model name in the message', async () => {
       const originalError = new Error('Network timeout')
@@ -84,6 +155,15 @@ describe('createLlmClient', () => {
 
       await expect(client.generate(PARAMS)).rejects.toThrow(
         'LLM call failed (model: test-model): raw string error',
+      )
+    })
+
+    it('wraps a null throwable without throwing itself', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockRejectedValue(null)
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate(PARAMS)).rejects.toThrow(
+        'LLM call failed (model: test-model): null',
       )
     })
 

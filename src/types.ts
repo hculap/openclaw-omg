@@ -467,7 +467,11 @@ export interface ObservationParams {
   readonly existingNodeIndex: readonly NodeIndexEntry[]
   /** Current body of the [[omg/now]] node, or null if it doesn't exist yet. */
   readonly nowNode: string | null
-  /** Resolved plugin configuration. */
+  /**
+   * Resolved plugin configuration.
+   * Not used by the Observer in Phase 3 — reserved for Phase 4 model selection
+   * (config.observer.model will determine which model the LLM client uses).
+   */
   readonly config: OmgConfig
   /** LLM client to call for generation. */
   readonly llmClient: LlmClient

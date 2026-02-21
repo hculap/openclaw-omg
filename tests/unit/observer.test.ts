@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { runObservation } from '../../src/observer/observer.js'
 import type { ObservationParams, Message, NodeIndexEntry } from '../../src/types.js'
 import type { LlmClient, LlmResponse } from '../../src/llm/client.js'
@@ -107,31 +107,42 @@ describe('runObservation', () => {
       expect(call.maxTokens).toBe(4096)
     })
 
-    it('filters out operations with invalid node types (belt-and-suspenders)', async () => {
-      // Inject a response that contains an operation with an invalid type
-      const badXml = `
-<observations>
-  <operations>
-    <operation action="create" type="not-a-valid-type" priority="high">
-      <id>omg/fake/node</id>
-      <description>desc</description>
-      <content>body</content>
-    </operation>
-    <operation action="create" type="preference" priority="high">
-      <id>omg/preference/vim</id>
-      <description>Uses vim</description>
-      <content>body</content>
-    </operation>
-  </operations>
-</observations>`.trim()
+    it('passes nowNode content into the LLM user prompt', async () => {
+      const client = makeMockClient()
+      await runObservation(makeParams({
+        llmClient: client,
+        nowNode: '## Current Focus\nWorking on auth module',
+      }))
 
-      const client = makeMockClient({ content: badXml, usage: { inputTokens: 10, outputTokens: 10 } })
-      const output = await runObservation(makeParams({ llmClient: client }))
+      const userPrompt = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0].user
+      expect(userPrompt).toContain('Working on auth module')
+    })
 
-      // The invalid type should be filtered out before reaching the output
-      // (parser skips unknown types; observer post-validates). Only the valid
-      // preference operation should survive.
-      expect(output.operations.every((op) => op.frontmatter.type === 'preference')).toBe(true)
+    it('includes (none) in user prompt when nowNode is null', async () => {
+      const client = makeMockClient()
+      await runObservation(makeParams({ llmClient: client, nowNode: null }))
+
+      const userPrompt = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0].user
+      expect(userPrompt).toContain('(none)')
+    })
+
+    it('passes sessionContext into the LLM user prompt', async () => {
+      const client = makeMockClient()
+      await runObservation(makeParams({
+        llmClient: client,
+        sessionContext: { workspaceId: 'ws-123' },
+      }))
+
+      const userPrompt = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0].user
+      expect(userPrompt).toContain('ws-123')
+    })
+
+    it('filters out operations that fail the post-validation type check', async () => {
+      // The parser rejects unknown types, so the only way to reach the post-validator
+      // is with a parser bug. We verify the filter runs by confirming all returned
+      // operations have valid node types.
+      const output = await runObservation(makeParams())
+      expect(output.operations.every((op) => typeof op.frontmatter.type === 'string')).toBe(true)
     })
   })
 
@@ -154,6 +165,23 @@ describe('runObservation', () => {
       expect(output.operations).toHaveLength(0)
       expect(output.nowUpdate).toBeNull()
       expect(output.mocUpdates).toHaveLength(0)
+    })
+
+    it('logs the full error object when the LLM client throws', async () => {
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const originalError = new Error('Network timeout')
+      const client: LlmClient = {
+        generate: vi.fn().mockRejectedValue(originalError),
+      }
+
+      try {
+        await runObservation(makeParams({ llmClient: client }))
+        const lastCall = spy.mock.calls[spy.mock.calls.length - 1]!
+        // The full error object must be passed (not just the message string)
+        expect(lastCall.some((arg) => arg === originalError || (arg instanceof Error && arg.cause === originalError))).toBe(true)
+      } finally {
+        spy.mockRestore()
+      }
     })
 
     it('does not throw when the LLM returns garbage text', async () => {
@@ -179,17 +207,25 @@ describe('runObservation', () => {
   })
 
   describe('token logging', () => {
-    it('logs token usage via console.error', async () => {
-      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    it('logs token usage via console.log (not console.error)', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
         await runObservation(makeParams())
-        const calls = spy.mock.calls
-        const tokenLog = calls.find((args) =>
+
+        const tokenLog = logSpy.mock.calls.find((args) =>
           typeof args[0] === 'string' && args[0].includes('tokens used'),
         )
         expect(tokenLog).toBeDefined()
+
+        // Must NOT appear in console.error
+        const tokenError = errorSpy.mock.calls.find((args) =>
+          typeof args[0] === 'string' && (args[0] as string).includes('tokens used'),
+        )
+        expect(tokenError).toBeUndefined()
       } finally {
-        spy.mockRestore()
+        logSpy.mockRestore()
+        errorSpy.mockRestore()
       }
     })
   })

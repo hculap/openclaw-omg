@@ -14,7 +14,7 @@ describe('buildObserverSystemPrompt', () => {
     expect(prompt.length).toBeGreaterThan(0)
   })
 
-  it('includes all NodeType names', () => {
+  it('includes all NodeType names (derived from NODE_TYPES at call time)', () => {
     const prompt = buildObserverSystemPrompt()
     for (const type of NODE_TYPES) {
       expect(prompt).toContain(type)
@@ -190,5 +190,23 @@ describe('buildObserverUserPrompt', () => {
     expect(prompt).toContain('## Existing Node Index')
     expect(prompt).toContain('## Current Now Node')
     expect(prompt).toContain('## Messages to Observe')
+  })
+
+  it('orders sections: index → now node → messages → session context', () => {
+    const prompt = buildObserverUserPrompt({
+      existingNodeIndex: makeIndex(['omg/fact/x', 'X']),
+      nowNode: 'now content',
+      messages: makeMessages('msg'),
+      sessionContext: { key: 'val' },
+    })
+
+    const indexPos = prompt.indexOf('## Existing Node Index')
+    const nowPos = prompt.indexOf('## Current Now Node')
+    const msgPos = prompt.indexOf('## Messages to Observe')
+    const ctxPos = prompt.indexOf('## Session Context')
+
+    expect(indexPos).toBeLessThan(nowPos)
+    expect(nowPos).toBeLessThan(msgPos)
+    expect(msgPos).toBeLessThan(ctxPos)
   })
 })
