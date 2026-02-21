@@ -112,6 +112,8 @@ export interface NodeFrontmatter {
   readonly supersedes?: readonly string[]
   /** Compression level recorded when this node was last rewritten by the Reflector. */
   readonly compressionLevel?: CompressionLevel
+  /** When true, the Reflector has soft-deleted this node. Archived nodes are excluded from context injection. */
+  readonly archived?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +312,13 @@ export interface OmgSessionState {
    * update logic, not by this type.
    */
   readonly totalObservationTokens: number
+  /**
+   * Value of `totalObservationTokens` at the time of the most recent
+   * reflection pass. Used to compute the delta since the last reflection,
+   * preventing the reflection trigger from firing on every subsequent turn
+   * once the cumulative threshold is exceeded.
+   */
+  readonly lastReflectionTotalTokens: number
   /** 0-based index of the last message included in the previous Observer run. */
   readonly observationBoundaryMessageIndex: number
   /** Cumulative count of nodes written by the Observer across all turns in this session. May diverge from the live graph size after deletions or state resets. */
@@ -342,6 +351,7 @@ export function createOmgSessionState(
     readonly lastObservedAtMs: number
     readonly pendingMessageTokens: number
     readonly totalObservationTokens: number
+    readonly lastReflectionTotalTokens: number
     readonly observationBoundaryMessageIndex: number
     readonly nodeCount: number
     readonly lastObservationNodeIds: readonly string[]
@@ -356,6 +366,9 @@ export function createOmgSessionState(
   }
   if (fields.totalObservationTokens < 0) {
     throw new OmgSessionStateError(`totalObservationTokens must be >= 0, got ${fields.totalObservationTokens}`)
+  }
+  if (fields.lastReflectionTotalTokens < 0) {
+    throw new OmgSessionStateError(`lastReflectionTotalTokens must be >= 0, got ${fields.lastReflectionTotalTokens}`)
   }
   if (fields.observationBoundaryMessageIndex < 0) {
     throw new OmgSessionStateError(`observationBoundaryMessageIndex must be >= 0, got ${fields.observationBoundaryMessageIndex}`)
@@ -435,6 +448,21 @@ export interface MocUpdateEntry {
   readonly action: 'add' | 'remove'
   /** Wikilink target to add or remove (e.g. "omg/identity/preferred-name-2026-02-20"). */
   readonly nodeId: string
+}
+
+/**
+ * A field-level update the Reflector can apply to an existing graph node
+ * without replacing the entire node.
+ */
+export interface NodeUpdateEntry {
+  /** ID of the node to update. */
+  readonly targetId: string
+  /** The frontmatter field or body section to modify. */
+  readonly field: 'description' | 'priority' | 'body' | 'tags' | 'links'
+  /** How to apply the value: overwrite, append, or remove a member. */
+  readonly action: 'set' | 'add' | 'remove'
+  /** The value to set/add/remove. */
+  readonly value: string
 }
 
 // ---------------------------------------------------------------------------

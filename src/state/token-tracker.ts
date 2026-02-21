@@ -48,11 +48,16 @@ export function shouldTriggerObservation(state: OmgSessionState, config: OmgConf
 }
 
 /**
- * Returns true if a reflection pass should be triggered based on the cumulative
- * observation token count.
+ * Returns true if a reflection pass should be triggered based on the
+ * observation tokens accumulated *since the last reflection pass*.
+ *
+ * Uses a delta comparison (`totalObservationTokens - lastReflectionTotalTokens`)
+ * rather than the raw cumulative total so that reflection does not re-trigger
+ * on every subsequent turn once the cumulative threshold has been crossed.
  *
  * Pure function — no side effects.
  */
 export function shouldTriggerReflection(state: OmgSessionState, config: OmgConfig): boolean {
-  return state.totalObservationTokens >= config.reflection.observationTokenThreshold
+  const tokensSinceLastReflection = state.totalObservationTokens - state.lastReflectionTotalTokens
+  return tokensSinceLastReflection >= config.reflection.observationTokenThreshold
 }

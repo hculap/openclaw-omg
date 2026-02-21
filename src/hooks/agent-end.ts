@@ -5,6 +5,7 @@ import { createOmgSessionState } from '../types.js'
 import { loadSessionState, saveSessionState, getDefaultSessionState } from '../state/session-state.js'
 import { accumulateTokens, shouldTriggerObservation, shouldTriggerReflection } from '../state/token-tracker.js'
 import { runObservation } from '../observer/observer.js'
+import { runReflection } from '../reflector/reflector.js'
 import { writeObservationNode, writeNowNode } from '../graph/node-writer.js'
 import { applyMocUpdate, regenerateMoc } from '../graph/moc-manager.js'
 import { listAllNodes } from '../graph/node-reader.js'
@@ -171,6 +172,7 @@ async function tryRunObservation(
         lastObservedAtMs: Date.now(),
         pendingMessageTokens: 0,
         totalObservationTokens: state.totalObservationTokens + tokensUsed,
+        lastReflectionTotalTokens: state.lastReflectionTotalTokens,
         observationBoundaryMessageIndex: messages.length,
         nodeCount: state.nodeCount + writtenIds.length,
         lastObservationNodeIds: writtenIds,
@@ -182,12 +184,18 @@ async function tryRunObservation(
     return state
   }
 
-  // Check for reflection (Phase 5 placeholder)
+  // Trigger reflection if enough new observation tokens have accumulated since
+  // the last reflection pass. After the pass (successful or not) we advance the
+  // watermark so reflection does not re-fire on the very next turn.
   if (shouldTriggerReflection(updatedState, config)) {
-    console.error(
-      `[omg] agent_end [${sessionKey}]: reflection threshold reached but not yet implemented (Phase 5). ` +
-      `totalObservationTokens=${updatedState.totalObservationTokens}. Graph compression is being skipped.`
+    const allNodes = await listAllNodes(omgRoot)
+    const observationNodes = allNodes.filter(
+      (n) => n.frontmatter.type !== 'reflection' && !n.frontmatter.archived
     )
+    await runReflection({ observationNodes, config, llmClient, omgRoot, sessionKey })
+      .catch((err) => console.error(`[omg] agent_end [${sessionKey}]: reflection failed:`, err))
+    // Advance the watermark regardless of outcome — prevents infinite re-triggering.
+    updatedState = { ...updatedState, lastReflectionTotalTokens: updatedState.totalObservationTokens }
   }
 
   return updatedState

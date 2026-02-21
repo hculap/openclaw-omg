@@ -17,6 +17,7 @@ import { createLlmClient } from './llm/client.js'
 import { agentEnd } from './hooks/agent-end.js'
 import { beforeAgentStart } from './hooks/before-agent-start.js'
 import { toolResultPersist } from './hooks/tool-result-persist.js'
+import { registerCronJobs } from './cron/register.js'
 import type { Message } from './types.js'
 import type { GenerateFn } from './llm/client.js'
 
@@ -83,6 +84,20 @@ export interface PluginApi {
       event: { toolName: string; result: unknown }
     ) => { referencedNodeIds: readonly string[] } | undefined
   ): void
+
+  /** Register a handler for the `gateway_start` lifecycle hook, called once when the gateway initialises. */
+  on(hook: 'gateway_start', handler: () => Promise<void>): void
+
+  /**
+   * Schedules a recurring cron job.
+   * OpenClaw deduplicates jobs by `jobId` — calling this multiple times with
+   * the same `jobId` replaces the previous registration.
+   *
+   * @param jobId     Stable identifier for this job (used for deduplication and logging).
+   * @param schedule  5-field cron expression (e.g. "0 3 * * *").
+   * @param handler   Async function to execute on each tick. Errors are logged by the host.
+   */
+  scheduleCron(jobId: string, schedule: string, handler: () => Promise<void>): void
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +136,15 @@ export function register(api: PluginApi): void {
   )
 
   api.on('tool_result_persist', (event) => toolResultPersist(event))
+
+  const cronCtx = { workspaceDir, config, llmClient }
+  api.on('gateway_start', async () => {
+    try {
+      registerCronJobs(api, config, cronCtx)
+    } catch (err) {
+      console.error('[omg] gateway_start: failed to register cron jobs — background reflection will not run:', err)
+    }
+  })
 }
 
 export default register
