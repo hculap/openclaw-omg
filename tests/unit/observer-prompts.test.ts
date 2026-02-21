@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { buildObserverSystemPrompt, buildObserverUserPrompt } from '../../src/observer/prompts.js'
 import { NODE_TYPES } from '../../src/types.js'
 import type { NodeIndexEntry, Message } from '../../src/types.js'
@@ -178,6 +178,29 @@ describe('buildObserverUserPrompt', () => {
     })
 
     expect(prompt).not.toContain('Session Context')
+  })
+
+  it('omits session context and logs an error when serialization fails', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const circular: Record<string, unknown> = {}
+    circular['self'] = circular
+
+    try {
+      const prompt = buildObserverUserPrompt({
+        existingNodeIndex: [],
+        nowNode: null,
+        messages: makeMessages('Hello'),
+        sessionContext: circular,
+      })
+
+      expect(prompt).not.toContain('Session Context')
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining('could not be serialized'),
+        expect.anything(),
+      )
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 
   it('contains all required section headers', () => {

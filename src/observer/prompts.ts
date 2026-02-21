@@ -199,7 +199,15 @@ export function buildObserverUserPrompt(params: ObserverUserPromptParams): strin
 
   // --- Session Context (optional) ---
   if (sessionContext !== undefined && Object.keys(sessionContext).length > 0) {
-    parts.push(`## Session Context\n${JSON.stringify(sessionContext, null, 2)}`)
+    let serialized: string | null = null
+    try {
+      serialized = JSON.stringify(sessionContext, null, 2)
+    } catch (err) {
+      console.error('[omg] Observer: sessionContext could not be serialized — omitting from prompt', err)
+    }
+    if (serialized !== null) {
+      parts.push(`## Session Context\n${serialized}`)
+    }
   }
 
   return parts.join('\n\n')

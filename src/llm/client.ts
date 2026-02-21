@@ -70,22 +70,23 @@ export function createLlmClient(model: string, generateFn: GenerateFn): LlmClien
         )
       }
 
+      let raw: LlmResponse
       try {
-        const raw = await generateFn(params)
-
-        if (raw.usage.inputTokens < 0 || raw.usage.outputTokens < 0) {
-          throw new Error(
-            `LLM response has negative token counts (inputTokens: ${raw.usage.inputTokens}, outputTokens: ${raw.usage.outputTokens})`,
-          )
-        }
-
-        return { content: raw.content, usage: raw.usage }
+        raw = await generateFn(params)
       } catch (err) {
         throw new Error(
           `LLM call failed (model: ${model}): ${err instanceof Error ? err.message : String(err)}`,
           { cause: err },
         )
       }
+
+      if (raw.usage.inputTokens < 0 || raw.usage.outputTokens < 0) {
+        throw new Error(
+          `LLM response validation failed (model: ${model}): negative token counts (inputTokens: ${raw.usage.inputTokens}, outputTokens: ${raw.usage.outputTokens})`,
+        )
+      }
+
+      return { content: raw.content, usage: raw.usage }
     },
   }
 }

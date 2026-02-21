@@ -117,6 +117,26 @@ describe('createLlmClient', () => {
       await expect(client.generate(PARAMS)).rejects.toThrow('negative token counts')
     })
 
+    it('includes the specific token values in the validation error', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue({
+        content: 'ok',
+        usage: { inputTokens: -3, outputTokens: 7 },
+      })
+      const client = createLlmClient('test-model', generateFn)
+
+      await expect(client.generate(PARAMS)).rejects.toThrow('inputTokens: -3')
+    })
+
+    it('includes the model name in the token validation error', async () => {
+      const generateFn = vi.fn<GenerateFn>().mockResolvedValue({
+        content: 'ok',
+        usage: { inputTokens: -1, outputTokens: 5 },
+      })
+      const client = createLlmClient('openai/gpt-4o', generateFn)
+
+      await expect(client.generate(PARAMS)).rejects.toThrow('(model: openai/gpt-4o)')
+    })
+
     it('throws when generateFn returns negative outputTokens', async () => {
       const generateFn = vi.fn<GenerateFn>().mockResolvedValue({
         content: 'ok',
