@@ -27,6 +27,17 @@ export type {
   ReflectorOutput,
   OmgSessionState,
   GraphContextSlice,
+  NodeIndexEntry,
+  Message,
+  ObservationParams,
 } from './types.js'
 
 export { parseNodeFrontmatter, nodeFrontmatterSchema, FrontmatterValidationError } from './frontmatter.js'
+
+export { createLlmClient } from './llm/client.js'
+export type { LlmClient, LlmResponse, LlmUsage, LlmGenerateParams, GenerateFn } from './llm/client.js'
+
+export { runObservation } from './observer/observer.js'
+export { parseObserverOutput } from './observer/parser.js'
+export { buildObserverSystemPrompt, buildObserverUserPrompt } from './observer/prompts.js'
+export type { ObserverUserPromptParams } from './observer/prompts.js'

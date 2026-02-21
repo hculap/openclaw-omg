@@ -2,6 +2,8 @@
  * Core types for the Observational Memory Graph (OMG) plugin.
  * All types are immutable (readonly where appropriate).
  */
+import type { LlmClient } from './llm/client.js'
+import type { OmgConfig } from './config.js'
 
 // ---------------------------------------------------------------------------
 // Enums / Unions
@@ -430,4 +432,49 @@ export interface MocUpdateEntry {
   readonly action: 'add' | 'remove'
   /** Wikilink target to add or remove (e.g. "omg/identity/preferred-name-2026-02-20"). */
   readonly nodeId: string
+}
+
+// ---------------------------------------------------------------------------
+// Observer input types (Phase 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lightweight index entry for a single node in the graph.
+ * Sent to the Observer LLM so it can reference existing nodes by ID
+ * without transmitting full node bodies.
+ */
+export interface NodeIndexEntry {
+  readonly id: string
+  readonly description: string
+}
+
+/**
+ * A single conversation message to be observed.
+ */
+export interface Message {
+  readonly role: 'user' | 'assistant'
+  readonly content: string
+}
+
+/**
+ * Full set of inputs for a single Observer run.
+ * Passed to {@link runObservation} by the hook layer.
+ */
+export interface ObservationParams {
+  /** Messages not yet analysed by a previous Observer run. */
+  readonly unobservedMessages: readonly Message[]
+  /** Compact index of nodes already in the graph. */
+  readonly existingNodeIndex: readonly NodeIndexEntry[]
+  /** Current body of the [[omg/now]] node, or null if it doesn't exist yet. */
+  readonly nowNode: string | null
+  /**
+   * Resolved plugin configuration.
+   * Not used by the Observer in Phase 3 — reserved for Phase 4 model selection
+   * (config.observer.model will determine which model the LLM client uses).
+   */
+  readonly config: OmgConfig
+  /** LLM client to call for generation. */
+  readonly llmClient: LlmClient
+  /** Optional session-level metadata forwarded to the LLM user prompt. */
+  readonly sessionContext?: Record<string, unknown>
 }
