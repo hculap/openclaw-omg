@@ -27,6 +27,7 @@ import type { GraphNode, ObserverOutput } from '../types.js'
 // ---------------------------------------------------------------------------
 
 /** Source selection for CLI invocation. */
+/** @deprecated Use `config.bootstrap.sources` instead. Kept for CLI backward-compat. */
 export type BootstrapSource = 'memory' | 'logs' | 'sqlite' | 'all'
 
 /** Parameters for {@link runBootstrap}. */
@@ -43,7 +44,9 @@ export interface BootstrapParams {
    */
   readonly force?: boolean
   /**
-   * Which sources to include. Defaults to 'all'.
+   * Which sources to include.
+   * @deprecated Pass source overrides via `config.bootstrap.sources` instead.
+   * When set, overrides config.bootstrap.sources for that specific source.
    */
   readonly source?: BootstrapSource
 }
@@ -164,17 +167,20 @@ async function processChunk(
   }
 
   // Phase 3: update MOCs
+  // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
+  // Tags are semantic keywords; the MOC link is the reliable domain membership signal.
   if (observerOutput.mocUpdates.length > 0) {
     try {
       const allNodes = await listAllNodes(omgRoot)
       for (const domain of observerOutput.mocUpdates) {
-        const domainNodes = allNodes.filter((n) => n.frontmatter.tags?.includes(domain))
+        const mocId = `omg/moc-${domain}`
+        const domainNodes = allNodes.filter((n) => n.frontmatter.links?.includes(mocId))
         if (domainNodes.length > 0) {
           await regenerateMoc(domain, domainNodes, omgRoot)
         } else {
           const mocPath = resolveMocPath(omgRoot, domain)
           const domainWrittenIds = writtenNodes
-            .filter((n) => n.frontmatter.tags?.includes(domain))
+            .filter((n) => n.frontmatter.links?.includes(mocId))
             .map((n) => n.frontmatter.id)
           for (const id of domainWrittenIds) {
             await applyMocUpdate(mocPath, { action: 'add', nodeId: id })
@@ -221,7 +227,7 @@ const DEFAULT_CONCURRENCY = 3
  * Fire-and-forget safe: never throws (all errors are caught and logged).
  */
 export async function runBootstrap(params: BootstrapParams): Promise<BootstrapResult> {
-  const { workspaceDir, config, llmClient, force = false, source = 'all' } = params
+  const { workspaceDir, config, llmClient, force = false, source } = params
   const omgRoot = resolveOmgRoot(workspaceDir, config)
 
   // Check sentinel (skip if force)
@@ -232,21 +238,29 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
     }
   }
 
+  // Resolve which sources to use.
+  // config.bootstrap.sources is the canonical config; the deprecated `source`
+  // param can override individual flags for CLI invocations.
+  const srcs = config.bootstrap.sources
+  const useMemory = source === 'memory' || source === 'all' || (source === undefined && srcs.workspaceMemory)
+  const useLogs   = source === 'logs'   || source === 'all' || (source === undefined && srcs.openclawLogs)
+  const useSqlite = source === 'sqlite' || source === 'all' || (source === undefined && srcs.openclawSessions)
+
   // Gather source entries
   const [memoryEntries, logEntries, sqliteEntries] = await Promise.all([
-    source === 'memory' || source === 'all'
+    useMemory
       ? readWorkspaceMemory(workspaceDir, config.storagePath).catch((err) => {
           console.error('[omg] bootstrap: workspace memory read failed:', err)
           return []
         })
       : Promise.resolve([]),
-    source === 'logs' || source === 'all'
+    useLogs
       ? readOpenclawLogs().catch((err) => {
           console.error('[omg] bootstrap: openclaw logs read failed:', err)
           return []
         })
       : Promise.resolve([]),
-    source === 'sqlite' || source === 'all'
+    useSqlite
       ? readSqliteChunks(workspaceDir).catch((err) => {
           console.error('[omg] bootstrap: sqlite chunks read failed:', err)
           return []

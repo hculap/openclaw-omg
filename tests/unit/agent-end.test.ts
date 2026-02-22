@@ -179,6 +179,73 @@ describe('agentEnd — observation with node output', () => {
 })
 
 // ---------------------------------------------------------------------------
+// agentEnd — MOC update via links (not tags)
+// ---------------------------------------------------------------------------
+
+describe('agentEnd — MOC update uses links, not tags', () => {
+  it('creates MOC file for a domain when written node links to omg/moc-{domain}', async () => {
+    // Observer returns a node linked to [[omg/moc-preferences]] and a mocUpdate for "preferences"
+    const xml = `<observations>
+<operations>
+<operation action="create" type="fact" priority="medium">
+  <id>omg/pref-dark-mode</id>
+  <description>User prefers dark mode</description>
+  <content>The user has expressed a preference for dark mode in editors.</content>
+  <links>[[omg/moc-preferences]]</links>
+</operation>
+</operations>
+<moc-updates>
+<moc domain="preferences" action="add" />
+</moc-updates>
+</observations>`
+
+    const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
+    const llmClient = makeMockLlmClient(xml)
+
+    await agentEnd(
+      { success: true },
+      { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, messages: makeMessages(2), config, llmClient }
+    )
+
+    const { fs } = await import('memfs')
+    // MOC file must exist — the link-based matching should have triggered applyMocUpdate or regenerateMoc
+    const mocPath = `${OMG_ROOT}/mocs/moc-preferences.md`
+    expect(fs.existsSync(mocPath)).toBe(true)
+  })
+
+  it('does NOT create MOC file when node has matching tag but no link to omg/moc-{domain}', async () => {
+    // Node has tags: ["preferences"] but no links → old (broken) behavior would have matched,
+    // new (correct) behavior must NOT match and must NOT create/update the MOC.
+    const xml = `<observations>
+<operations>
+<operation action="create" type="fact" priority="medium">
+  <id>omg/pref-tag-only</id>
+  <description>Node tagged preferences but no MOC link</description>
+  <content>This node has the preferences tag but does not link to the MOC.</content>
+  <tags>preferences</tags>
+</operation>
+</operations>
+<moc-updates>
+<moc domain="preferences" action="add" />
+</moc-updates>
+</observations>`
+
+    const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
+    const llmClient = makeMockLlmClient(xml)
+
+    await agentEnd(
+      { success: true },
+      { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, messages: makeMessages(2), config, llmClient }
+    )
+
+    const { fs } = await import('memfs')
+    // No link → no MOC file should be created
+    const mocPath = `${OMG_ROOT}/mocs/moc-preferences.md`
+    expect(fs.existsSync(mocPath)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // agentEnd — error resilience
 // ---------------------------------------------------------------------------
 

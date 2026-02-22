@@ -129,17 +129,20 @@ export async function tryRunObservation(
 
   // Phase 3: update MOCs
   try {
-    // Apply MOC updates — read the graph once after all writes, not once per domain
+    // Apply MOC updates — read the graph once after all writes, not once per domain.
+    // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
+    // Tags are semantic keywords; the MOC link is the reliable domain membership signal.
     const updatedNodes = await listAllNodes(omgRoot)
     for (const domain of observerOutput.mocUpdates) {
-      const domainNodes = updatedNodes.filter((n) => n.frontmatter.tags?.includes(domain))
+      const mocId = `omg/moc-${domain}`
+      const domainNodes = updatedNodes.filter((n) => n.frontmatter.links?.includes(mocId))
       if (domainNodes.length > 0) {
         await regenerateMoc(domain, domainNodes, omgRoot)
       } else {
-        // No nodes tagged with this domain exist yet — add only written nodes that belong here
+        // No nodes link to this MOC yet — add only the written nodes that belong here
         const mocPath = resolveMocPath(omgRoot, domain)
         const domainWrittenIds = writtenNodes
-          .filter((n) => n.frontmatter.tags?.includes(domain))
+          .filter((n) => n.frontmatter.links?.includes(mocId))
           .map((n) => n.frontmatter.id)
         for (const id of domainWrittenIds) {
           await applyMocUpdate(mocPath, { action: 'add', nodeId: id })
