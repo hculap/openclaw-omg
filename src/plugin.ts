@@ -346,17 +346,9 @@ function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
   // 3–6. Direct API fallbacks (only used when gateway endpoint is unreachable)
   const directFallback = resolveDirectFallbackFn(api, model)
 
-  // Patterns that indicate the gateway returned an error response body (HTTP 200
-  // but content is a gateway-level error, not a real LLM response).
-  const GATEWAY_ERROR_PATTERNS = [
-    'API rate limit reached',
-    'rate limit',
-    'Too Many Requests',
-  ]
-
-  // Return a wrapper that tries gateway first, falls back to direct on failure.
-  // gatewayFailures counts consecutive failures — after 3 in a row we switch
-  // permanently to direct. On gateway success the counter resets.
+  // Return a wrapper that tries gateway first, falls back to direct on network/
+  // connectivity failures only. Rate limits and model errors are re-thrown so
+  // callers can handle them — they do NOT indicate the gateway is unavailable.
   let gatewayFailures = 0
   const GATEWAY_FAILURE_THRESHOLD = 3
 
@@ -364,24 +356,19 @@ function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
     if (gatewayFailures < GATEWAY_FAILURE_THRESHOLD) {
       try {
         const result = await gatewayFn(params)
-        // Detect gateway error responses that come back as HTTP 200 with an
-        // error string in the content (e.g. "⚠️ API rate limit reached").
-        const lc = result.content.toLowerCase()
-        const isGatewayError = GATEWAY_ERROR_PATTERNS.some((p) => lc.includes(p.toLowerCase()))
-        if (isGatewayError) {
-          gatewayFailures++
-          console.error(`[omg] Gateway returned error in body (failure ${gatewayFailures}/${GATEWAY_FAILURE_THRESHOLD}): "${result.content.slice(0, 80)}"`)
-          if (gatewayFailures >= GATEWAY_FAILURE_THRESHOLD) {
-            console.error('[omg] Gateway unhealthy — switching to direct API fallback permanently for this session')
-          }
-        } else {
-          gatewayFailures = 0 // reset on success
-          return result
-        }
+        gatewayFailures = 0 // reset on success
+        return result
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        // Connection refused or 404 = endpoint not enabled; switch to fallback
-        if (msg.includes('ECONNREFUSED') || msg.includes('(404)') || msg.includes('fetch failed')) {
+        // Connection/network errors = gateway unreachable; switch to fallback
+        if (
+          msg.includes('ECONNREFUSED') ||
+          msg.includes('ECONNRESET') ||
+          msg.includes('ETIMEDOUT') ||
+          msg.includes('ENOTFOUND') ||
+          msg.includes('(404)') ||
+          msg.includes('fetch failed')
+        ) {
           gatewayFailures = GATEWAY_FAILURE_THRESHOLD // permanent switch
           console.error(`[omg] Gateway /v1/chat/completions not available — switching to direct API fallback`)
         } else {
@@ -411,7 +398,8 @@ function resolvePluginConfig(api: PluginApi): ReturnType<typeof parseConfig> | n
         )?.['omg'] as Record<string, unknown>
       )?.['config'] ?? api.config
     return parseConfig(rawPluginConfig)
-  } catch {
+  } catch (err) {
+    console.error('[omg] resolvePluginConfig: failed to parse plugin config:', err)
     return null
   }
 }
@@ -546,7 +534,7 @@ export function register(api: PluginApi): void {
               .catch((err) => console.error('[omg] before_prompt_build: bootstrap failed:', err))
           }
         })
-        .catch(() => { /* listAllNodes failure: skip bootstrap silently */ })
+        .catch((err) => console.error('[omg] before_prompt_build: node listing failed, skipping bootstrap:', err))
     }
 
     const sessionKey = ctx.sessionKey ?? 'default'
@@ -611,10 +599,15 @@ export function register(api: PluginApi): void {
       console.error('[omg] gateway_start: failed to register cron jobs — background reflection will not run:', err)
     }
 
-    // Fire-and-forget bootstrap on first start (graph is empty, no sentinel).
+    // Fire-and-forget bootstrap on first start if no sentinel exists.
+    // Use sentinel presence (not node count) — scaffold writes index.md/now.md
+    // so nodes.length is never 0 after scaffold. runBootstrap skips internally
+    // if sentinel exists, but checking here avoids the async overhead.
     const omgRoot = resolveOmgRoot(workspaceDir, config)
-    const nodes = await listAllNodes(omgRoot).catch(() => [])
-    if (nodes.length === 0) {
+    const { readSentinel } = await import('./bootstrap/sentinel.js')
+    const sentinel = await readSentinel(omgRoot).catch(() => null)
+    console.error(`[omg] gateway_start: sentinel=${sentinel ? 'exists' : 'missing'}, will bootstrap=${sentinel === null}`)
+    if (sentinel === null) {
       runBootstrap({ workspaceDir, config, llmClient, force: false })
         .catch((err) => console.error('[omg] gateway_start: bootstrap failed:', err))
     }
