@@ -51,6 +51,7 @@ export { accumulateTokens, shouldTriggerObservation, shouldTriggerReflection } f
 
 export { agentEnd } from './hooks/agent-end.js'
 export { beforeAgentStart } from './hooks/before-agent-start.js'
+export { beforeCompaction } from './hooks/before-compaction.js'
 export { toolResultPersist } from './hooks/tool-result-persist.js'
 export type {
   AgentEndEvent,
@@ -62,9 +63,15 @@ export type {
   BeforeAgentStartResult,
 } from './hooks/before-agent-start.js'
 export type {
+  BeforeCompactionEvent,
+  BeforeCompactionContext,
+} from './hooks/before-compaction.js'
+export type {
   ToolResultPersistEvent,
   ToolResultPersistResult,
 } from './hooks/tool-result-persist.js'
 
-export { register } from './plugin.js'
-export type { PluginApi, PluginHookContext } from './plugin.js'
+export { scaffoldGraphIfNeeded } from './scaffold.js'
+
+export { register, plugin } from './plugin.js'
+export type { PluginApi, PluginHookContext, OpenClawPluginDefinition } from './plugin.js'

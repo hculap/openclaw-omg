@@ -1,23 +1,26 @@
 /**
  * plugin.ts — OpenClaw plugin entry point for the OMG (Observational Memory Graph) plugin.
  *
- * Exports a `register(api)` function that wires the three lifecycle hooks:
- *   - `before_agent_start` — injects relevant graph context before the agent runs
- *   - `agent_end`          — triggers observation after each agent turn
+ * Exports a `register(api)` function that wires the lifecycle hooks:
+ *   - `before_prompt_build` — injects relevant graph context before the agent runs
+ *   - `agent_end`           — triggers observation after each agent turn
+ *   - `before_compaction`   — forces observation before history is compacted
  *   - `tool_result_persist` — tags memory_search results with referenced node IDs
  *
  * OpenClaw plugins can export either a function `(api) => void` or an object
  * with `{ id, name, configSchema, register(api) { ... } }`. This module
- * exports the named `register` function for explicit wiring and a default
- * export for OpenClaw's auto-discovery.
+ * exports the named `register` function for explicit wiring, a `plugin` object
+ * for OpenClaw's auto-discovery, and a default export for backward compatibility.
  */
 
-import { parseConfig } from './config.js'
+import { parseConfig, omgConfigSchema } from './config.js'
 import { createLlmClient } from './llm/client.js'
 import { agentEnd } from './hooks/agent-end.js'
 import { beforeAgentStart } from './hooks/before-agent-start.js'
+import { beforeCompaction } from './hooks/before-compaction.js'
 import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
+import { scaffoldGraphIfNeeded } from './scaffold.js'
 import type { Message } from './types.js'
 import type { GenerateFn } from './llm/client.js'
 
@@ -31,7 +34,7 @@ export interface PluginHookContext {
   readonly sessionKey: string
   /**
    * Conversation messages accumulated so far in this session.
-   * Only present on `agent_end` hooks.
+   * Only present on `agent_end` and `before_compaction` hooks.
    */
   readonly messages?: readonly Message[]
 }
@@ -59,9 +62,9 @@ export interface PluginApi {
    */
   readonly generate: GenerateFn
 
-  /** Register a handler for the `before_agent_start` lifecycle hook. */
+  /** Register a handler for the `before_prompt_build` lifecycle hook. */
   on(
-    hook: 'before_agent_start',
+    hook: 'before_prompt_build',
     handler: (
       event: { prompt: string },
       ctx: PluginHookContext
@@ -73,6 +76,15 @@ export interface PluginApi {
     hook: 'agent_end',
     handler: (
       event: { success: boolean },
+      ctx: Required<PluginHookContext>
+    ) => Promise<void>
+  ): void
+
+  /** Register a handler for the `before_compaction` lifecycle hook. */
+  on(
+    hook: 'before_compaction',
+    handler: (
+      event: Record<string, never>,
       ctx: Required<PluginHookContext>
     ) => Promise<void>
   ): void
@@ -101,6 +113,21 @@ export interface PluginApi {
 }
 
 // ---------------------------------------------------------------------------
+// OpenClawPluginDefinition
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured plugin definition for OpenClaw's auto-discovery mechanism.
+ * Plugins that export this interface are recognised and loaded automatically.
+ */
+export interface OpenClawPluginDefinition {
+  readonly id: string
+  readonly name: string
+  readonly configSchema: typeof omgConfigSchema
+  register(api: PluginApi): void
+}
+
+// ---------------------------------------------------------------------------
 // Plugin registration
 // ---------------------------------------------------------------------------
 
@@ -116,12 +143,16 @@ export function register(api: PluginApi): void {
   const config = parseConfig(api.config)
   const { workspaceDir } = api
 
+  void scaffoldGraphIfNeeded(workspaceDir, config).catch((err) =>
+    console.error('[omg] scaffold failed:', err)
+  )
+
   // Model label used only for error-message attribution; actual model
   // selection is owned by the host via api.generate.
   const observerModel = config.observer.model ?? '(inherited)'
   const llmClient = createLlmClient(observerModel, api.generate)
 
-  api.on('before_agent_start', (event, ctx) =>
+  api.on('before_prompt_build', (event, ctx) =>
     beforeAgentStart(event, { workspaceDir, sessionKey: ctx.sessionKey, config })
   )
 
@@ -130,6 +161,16 @@ export function register(api: PluginApi): void {
       workspaceDir,
       sessionKey: ctx.sessionKey,
       messages: ctx.messages,
+      config,
+      llmClient,
+    })
+  )
+
+  api.on('before_compaction', (_event, ctx) =>
+    beforeCompaction(_event, {
+      workspaceDir,
+      sessionKey: ctx.sessionKey,
+      messages: ctx.messages ?? [],
       config,
       llmClient,
     })
@@ -145,6 +186,21 @@ export function register(api: PluginApi): void {
       console.error('[omg] gateway_start: failed to register cron jobs — background reflection will not run:', err)
     }
   })
+}
+
+// ---------------------------------------------------------------------------
+// Plugin definition object
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured plugin definition for OpenClaw auto-discovery.
+ * Preferred export over the bare `register` function.
+ */
+export const plugin: OpenClawPluginDefinition = {
+  id: 'omg',
+  name: 'Observational Memory Graph',
+  configSchema: omgConfigSchema,
+  register,
 }
 
 export default register
