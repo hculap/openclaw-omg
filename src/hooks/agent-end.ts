@@ -69,7 +69,7 @@ export async function agentEnd(event: AgentEndEvent, ctx: AgentEndContext): Prom
  *
  * Never throws.
  */
-async function tryRunObservation(
+export async function tryRunObservation(
   messages: readonly Message[],
   state: OmgSessionState,
   config: OmgConfig,

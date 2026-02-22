@@ -3,15 +3,22 @@ import type { PluginApi } from '../../src/plugin.js'
 
 vi.mock('../../src/hooks/agent-end.js', () => ({
   agentEnd: vi.fn().mockResolvedValue(undefined),
+  tryRunObservation: vi.fn().mockResolvedValue(undefined),
 }))
 vi.mock('../../src/hooks/before-agent-start.js', () => ({
   beforeAgentStart: vi.fn().mockResolvedValue(undefined),
+}))
+vi.mock('../../src/hooks/before-compaction.js', () => ({
+  beforeCompaction: vi.fn().mockResolvedValue(undefined),
 }))
 vi.mock('../../src/hooks/tool-result-persist.js', () => ({
   toolResultPersist: vi.fn().mockReturnValue(undefined),
 }))
 vi.mock('../../src/llm/client.js', () => ({
   createLlmClient: vi.fn().mockReturnValue({ generate: vi.fn() }),
+}))
+vi.mock('../../src/scaffold.js', () => ({
+  scaffoldGraphIfNeeded: vi.fn().mockResolvedValue(undefined),
 }))
 
 const { register } = await import('../../src/plugin.js')
@@ -35,22 +42,28 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('register — hook registration', () => {
-  it('registers exactly four hooks', () => {
+  it('registers exactly five hooks', () => {
     const api = makeMockApi()
     register(api)
-    expect(api.on).toHaveBeenCalledTimes(4)
+    expect(api.on).toHaveBeenCalledTimes(5)
   })
 
-  it('registers before_agent_start hook', () => {
+  it('registers before_prompt_build hook', () => {
     const api = makeMockApi()
     register(api)
-    expect(api.on).toHaveBeenCalledWith('before_agent_start', expect.any(Function))
+    expect(api.on).toHaveBeenCalledWith('before_prompt_build', expect.any(Function))
   })
 
   it('registers agent_end hook', () => {
     const api = makeMockApi()
     register(api)
     expect(api.on).toHaveBeenCalledWith('agent_end', expect.any(Function))
+  })
+
+  it('registers before_compaction hook', () => {
+    const api = makeMockApi()
+    register(api)
+    expect(api.on).toHaveBeenCalledWith('before_compaction', expect.any(Function))
   })
 
   it('registers tool_result_persist hook', () => {

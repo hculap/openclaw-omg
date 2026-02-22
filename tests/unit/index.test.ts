@@ -18,6 +18,9 @@ describe('src/index.ts public API surface', () => {
       'parseNodeFrontmatter',
       'nodeFrontmatterSchema',
       'FrontmatterValidationError',
+      'scaffoldGraphIfNeeded',
+      'beforeCompaction',
+      'plugin',
     ]
     for (const name of expectedValues) {
       expect(publicApi, `expected "${name}" to be exported`).toHaveProperty(name)
