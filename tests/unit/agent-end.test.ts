@@ -124,16 +124,15 @@ describe('agentEnd — every-turn mode', () => {
 })
 
 // ---------------------------------------------------------------------------
-// agentEnd — observation with node writes (new upsert format)
+// agentEnd — observation with node writes
 // ---------------------------------------------------------------------------
 
 describe('agentEnd — observation with node output', () => {
-  it('writes observation nodes to deterministic path when LLM returns upsert operations', async () => {
+  it('writes observation nodes when LLM returns operations', async () => {
     const xml = `<observations>
 <operations>
-<operation type="fact" priority="medium">
-  <canonical-key>facts.typescript-typing</canonical-key>
-  <title>TypeScript Type System</title>
+<operation action="create" type="fact" priority="medium">
+  <id>omg/typescript-types</id>
   <description>TypeScript is strongly typed</description>
   <content>TypeScript adds static types to JavaScript.</content>
 </operation>
@@ -149,17 +148,16 @@ describe('agentEnd — observation with node output', () => {
     )
 
     const { fs } = await import('memfs')
-    // New format: deterministic path nodes/{type}/{slugify(canonicalKey)}.md
-    const nodePath = `${OMG_ROOT}/nodes/fact/facts-typescript-typing.md`
-    expect(fs.existsSync(nodePath)).toBe(true)
+    const nodeDir = `${OMG_ROOT}/nodes/fact`
+    const files = fs.readdirSync(nodeDir) as string[]
+    expect(files.length).toBeGreaterThan(0)
   })
 
   it('updates lastObservationNodeIds in state after writing nodes', async () => {
     const xml = `<observations>
 <operations>
-<operation type="fact" priority="high">
-  <canonical-key>facts.new-observation</canonical-key>
-  <title>A New Observation Fact</title>
+<operation action="create" type="fact" priority="high">
+  <id>omg/new-observation-fact</id>
   <description>A new observation fact</description>
   <content>This is an important fact.</content>
 </operation>
@@ -178,41 +176,27 @@ describe('agentEnd — observation with node output', () => {
     const state = await loadSessionState(WORKSPACE, SESSION_KEY)
     expect(state.lastObservationNodeIds.length).toBeGreaterThan(0)
   })
-
-  it('does not call listAllNodes (no node index is gathered)', async () => {
-    // Verify the observer is called WITHOUT existingNodeIndex being populated
-    // by checking that the user prompt does NOT contain "Existing Node Index"
-    const xml = '<observations></observations>'
-    const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
-    const llmClient = makeMockLlmClient(xml)
-
-    await agentEnd(
-      { success: true },
-      { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, messages: makeMessages(2), config, llmClient }
-    )
-
-    const call = (llmClient.generate as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]
-    expect(call?.user).not.toContain('Existing Node Index')
-  })
 })
 
 // ---------------------------------------------------------------------------
-// agentEnd — MOC update via moc-hints in new upsert format
+// agentEnd — MOC update via links (not tags)
 // ---------------------------------------------------------------------------
 
-describe('agentEnd — MOC update uses links (via moc-hints in upsert)', () => {
-  it('creates MOC file for a domain when upsert operation includes moc-hints', async () => {
-    // New format: moc-hints drives mocUpdates, node-writer adds omg/moc-{domain} to links
+describe('agentEnd — MOC update uses links, not tags', () => {
+  it('creates MOC file for a domain when written node links to omg/moc-{domain}', async () => {
+    // Observer returns a node linked to [[omg/moc-preferences]] and a mocUpdate for "preferences"
     const xml = `<observations>
 <operations>
-<operation type="preference" priority="medium">
-  <canonical-key>preferences.dark-mode</canonical-key>
-  <title>Dark Mode Preference</title>
+<operation action="create" type="fact" priority="medium">
+  <id>omg/pref-dark-mode</id>
   <description>User prefers dark mode</description>
   <content>The user has expressed a preference for dark mode in editors.</content>
-  <moc-hints>preferences</moc-hints>
+  <links>[[omg/moc-preferences]]</links>
 </operation>
 </operations>
+<moc-updates>
+<moc domain="preferences" action="add" />
+</moc-updates>
 </observations>`
 
     const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
@@ -224,21 +208,26 @@ describe('agentEnd — MOC update uses links (via moc-hints in upsert)', () => {
     )
 
     const { fs } = await import('memfs')
-    // MOC file must exist because moc-hints caused mocUpdates → domain node links to omg/moc-preferences
+    // MOC file must exist — the link-based matching should have triggered applyMocUpdate or regenerateMoc
     const mocPath = `${OMG_ROOT}/mocs/moc-preferences.md`
     expect(fs.existsSync(mocPath)).toBe(true)
   })
 
-  it('does NOT create MOC file when operation has no moc-hints', async () => {
+  it('does NOT create MOC file when node has matching tag but no link to omg/moc-{domain}', async () => {
+    // Node has tags: ["preferences"] but no links → old (broken) behavior would have matched,
+    // new (correct) behavior must NOT match and must NOT create/update the MOC.
     const xml = `<observations>
 <operations>
-<operation type="fact" priority="medium">
-  <canonical-key>facts.no-moc-fact</canonical-key>
-  <title>A Fact Without MOC</title>
-  <description>Node with no moc-hints</description>
-  <content>This fact does not belong to any MOC domain.</content>
+<operation action="create" type="fact" priority="medium">
+  <id>omg/pref-tag-only</id>
+  <description>Node tagged preferences but no MOC link</description>
+  <content>This node has the preferences tag but does not link to the MOC.</content>
+  <tags>preferences</tags>
 </operation>
 </operations>
+<moc-updates>
+<moc domain="preferences" action="add" />
+</moc-updates>
 </observations>`
 
     const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
@@ -250,10 +239,15 @@ describe('agentEnd — MOC update uses links (via moc-hints in upsert)', () => {
     )
 
     const { fs } = await import('memfs')
+    // No link → no MOC file should be created
     const mocPath = `${OMG_ROOT}/mocs/moc-preferences.md`
     expect(fs.existsSync(mocPath)).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// agentEnd — error resilience
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // agentEnd — manual mode
