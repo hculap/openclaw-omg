@@ -240,6 +240,19 @@ export const omgConfigSchema = z
     injection: injectionSchema.default({}),
     identity: identitySchema,
     /**
+     * Absolute path to the workspace root directory.
+     * When provided, overrides the value supplied by the OpenClaw host API.
+     * Use this when OpenClaw does not pass workspaceDir through the plugin API
+     * (e.g. when the plugin is registered as a global gateway-level plugin).
+     *
+     * Example: "/Users/alice/Projects/MyProject"
+     */
+    workspaceDir: z
+      .string()
+      .min(1, 'workspaceDir must not be empty')
+      .optional(),
+
+    /**
      * Relative path from the workspace root where OMG stores its graph files.
      * Must be a non-empty relative path with no traversal components (no "." or "..").
      */

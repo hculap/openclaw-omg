@@ -1,5 +1,5 @@
 {
-  "name": "@openclaw/plugin-omg",
+  "name": "@openclaw/omg",
   "version": "0.1.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -14,7 +14,11 @@
     "yaml": "^2.4.5",
     "zod": "^3.23.8"
   },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
+  },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^25.3.0",
     "@vitest/coverage-v8": "^2.0.5",
     "memfs": "^4.11.1",
@@ -23,5 +27,10 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
   }
 }

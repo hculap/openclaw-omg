@@ -73,5 +73,8 @@ export type {
 
 export { scaffoldGraphIfNeeded } from './scaffold.js'
 
+export { runBootstrap } from './bootstrap/bootstrap.js'
+export type { BootstrapParams, BootstrapResult, BootstrapSource } from './bootstrap/bootstrap.js'
+
 export { register, plugin } from './plugin.js'
 export type { PluginApi, PluginHookContext, OpenClawPluginDefinition } from './plugin.js'

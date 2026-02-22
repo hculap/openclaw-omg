@@ -11,6 +11,19 @@ vi.mock('../../src/scaffold.js', () => ({
   scaffoldGraphIfNeeded: scaffoldMock,
 }))
 
+vi.mock('../../src/bootstrap/bootstrap.js', () => ({
+  runBootstrap: vi.fn().mockResolvedValue({ ran: false, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }),
+}))
+vi.mock('../../src/graph/node-reader.js', () => ({
+  listAllNodes: vi.fn().mockResolvedValue([]),
+}))
+vi.mock('../../src/utils/paths.js', () => ({
+  resolveOmgRoot: vi.fn().mockReturnValue('/workspace/memory/omg'),
+  resolveMocPath: vi.fn().mockReturnValue('/workspace/memory/omg/mocs/moc-test.md'),
+  resolveNodePath: vi.fn().mockReturnValue('/workspace/memory/omg/nodes/fact/fact-test.md'),
+  resolveStatePath: vi.fn().mockReturnValue('/workspace/.omg-state/session.json'),
+}))
+
 vi.mock('../../src/hooks/agent-end.js', () => ({
   agentEnd: vi.fn().mockResolvedValue(undefined),
   tryRunObservation: vi.fn().mockResolvedValue(undefined),
@@ -37,13 +50,14 @@ const { plugin } = await import('../../src/plugin.js')
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeMockApi(config: Record<string, unknown> = {}): PluginApi & { on: ReturnType<typeof vi.fn> } {
+function makeMockApi(config: Record<string, unknown> = {}): PluginApi & { on: ReturnType<typeof vi.fn>; registerCli: ReturnType<typeof vi.fn> } {
   return {
     config,
     workspaceDir: '/workspace',
     generate: vi.fn(),
     on: vi.fn(),
     scheduleCron: vi.fn(),
+    registerCli: vi.fn(),
   }
 }
 
@@ -133,17 +147,124 @@ describe('plugin.register — idempotency', () => {
 // ---------------------------------------------------------------------------
 
 describe('plugin.register — scaffoldGraphIfNeeded', () => {
-  it('calls scaffoldGraphIfNeeded once per register() call', async () => {
-    const api1 = makeMockApi()
-    const api2 = makeMockApi()
+  it('calls scaffoldGraphIfNeeded when gateway_start fires', async () => {
+    const api = makeMockApi()
+    plugin.register(api)
 
-    plugin.register(api1)
-    plugin.register(api2)
+    // Extract the gateway_start handler registered via api.on and invoke it
+    const gwCall = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args: unknown[]) => args[0] === 'gateway_start'
+    )
+    const gwHandler = gwCall?.[1] as (() => Promise<void>) | undefined
+    expect(gwHandler).toBeDefined()
 
-    // scaffoldGraphIfNeeded is called via a void promise — flush microtasks
+    await gwHandler!()
+
+    expect(scaffoldMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// registerCli
+// ---------------------------------------------------------------------------
+
+describe('plugin.register — registerCli', () => {
+  it('calls registerCli when it is a function', () => {
+    const api = makeMockApi()
+    plugin.register(api)
+    expect(api.registerCli).toHaveBeenCalledTimes(1)
+  })
+
+  it('passes commands: ["omg bootstrap"] to registerCli', () => {
+    const api = makeMockApi()
+    plugin.register(api)
+    expect(api.registerCli).toHaveBeenCalledWith(
+      expect.any(Function),
+      { commands: ['omg bootstrap'] }
+    )
+  })
+
+  it('does not throw when registerCli is absent (old host version)', () => {
+    const api = makeMockApi()
+    const { registerCli: _unused, ...apiWithoutCli } = api
+    expect(() => plugin.register(apiWithoutCli as PluginApi)).not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// before_prompt_build bootstrap trigger
+// ---------------------------------------------------------------------------
+
+describe('plugin.register — before_prompt_build bootstrap trigger', () => {
+  it('triggers runBootstrap fire-and-forget on first before_prompt_build when graph is empty', async () => {
+    const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
+    const { listAllNodes } = await import('../../src/graph/node-reader.js')
+    vi.mocked(listAllNodes).mockResolvedValueOnce([])
+
+    const api = makeMockApi()
+    plugin.register(api)
+
+    const handler = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args: unknown[]) => args[0] === 'before_prompt_build'
+    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
+    expect(handler).toBeDefined()
+
+    await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
+    // Give fire-and-forget a microtask to run
+    await Promise.resolve()
     await Promise.resolve()
 
-    expect(scaffoldMock).toHaveBeenCalledTimes(2)
+    expect(runBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({ force: false })
+    )
+  })
+
+  it('does NOT trigger runBootstrap again on the second before_prompt_build call', async () => {
+    const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
+    const { listAllNodes } = await import('../../src/graph/node-reader.js')
+    vi.mocked(listAllNodes).mockResolvedValue([])
+    vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ran: true, chunksProcessed: 1, chunksSucceeded: 1, nodesWritten: 2
+    })
+
+    const api = makeMockApi()
+    plugin.register(api)
+
+    const handler = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args: unknown[]) => args[0] === 'before_prompt_build'
+    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
+
+    await handler!({ prompt: 'turn 1' }, { sessionKey: 'sess-1' })
+    await Promise.resolve()
+    await Promise.resolve()
+    const callsAfterFirst = vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mock.calls.length
+
+    await handler!({ prompt: 'turn 2' }, { sessionKey: 'sess-1' })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst)
+  })
+
+  it('does NOT trigger runBootstrap when graph is non-empty', async () => {
+    const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
+    const { listAllNodes } = await import('../../src/graph/node-reader.js')
+    vi.mocked(listAllNodes).mockResolvedValueOnce([
+      { id: 'omg/some-node' } as Parameters<typeof listAllNodes>[0] extends string ? Awaited<ReturnType<typeof listAllNodes>>[number] : never
+    ] as Awaited<ReturnType<typeof listAllNodes>>)
+
+    const api = makeMockApi()
+    plugin.register(api)
+
+    const handler = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args: unknown[]) => args[0] === 'before_prompt_build'
+    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
+
+    await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(runBootstrap).not.toHaveBeenCalled()
   })
 })
 

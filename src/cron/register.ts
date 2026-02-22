@@ -18,6 +18,10 @@ import { createCronDefinitions, type CronContext } from './definitions.js'
  * @param ctx    Context shared by all cron handlers.
  */
 export function registerCronJobs(api: PluginApi, config: OmgConfig, ctx: CronContext): void {
+  if (typeof api.scheduleCron !== 'function') {
+    console.warn('[omg] registerCronJobs: api.scheduleCron is not available — cron jobs will not run')
+    return
+  }
   const definitions = createCronDefinitions(ctx)
   for (const def of definitions) {
     api.scheduleCron(def.id, def.schedule, def.handler)
