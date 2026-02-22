@@ -57,7 +57,10 @@ export async function scaffoldGraphIfNeeded(workspaceDir: string, config: OmgCon
       const src = path.join(TEMPLATES_DIR, filename)
       const raw = await fs.readFile(src, 'utf8')
       const content = raw.replaceAll('{{DATE}}', date)
-      await fs.writeFile(path.join(omgRoot, filename), content, 'utf8')
+      const dest = filename.startsWith('moc-')
+        ? path.join(omgRoot, 'mocs', filename)
+        : path.join(omgRoot, filename)
+      await fs.writeFile(dest, content, 'utf8')
     })
   )
 }

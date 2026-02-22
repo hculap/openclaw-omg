@@ -2,6 +2,7 @@ import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import type { Message } from '../types.js'
 import { loadSessionState, saveSessionState, getDefaultSessionState } from '../state/session-state.js'
+import { accumulateTokens } from '../state/token-tracker.js'
 import { tryRunObservation } from './agent-end.js'
 import { resolveOmgRoot } from '../utils/paths.js'
 
@@ -9,9 +10,7 @@ import { resolveOmgRoot } from '../utils/paths.js'
 // Public API
 // ---------------------------------------------------------------------------
 
-export interface BeforeCompactionEvent {
-  readonly success?: boolean
-}
+export type BeforeCompactionEvent = Record<string, never>
 
 export interface BeforeCompactionContext {
   readonly workspaceDir: string
@@ -49,15 +48,20 @@ export async function beforeCompaction(
     )
   }
 
+  // Accumulate tokens so observationBoundaryMessageIndex reflects the full
+  // session history, not just the slice since the last agent_end cycle.
+  const accumulatedState = accumulateTokens(messages, state)
+
   const finalState = await tryRunObservation(
-    messages, state, config, llmClient, omgRoot, writeContext, sessionKey
+    messages, accumulatedState, config, llmClient, omgRoot, writeContext, sessionKey
   )
 
   try {
     await saveSessionState(workspaceDir, sessionKey, finalState)
   } catch (err) {
     console.error(
-      `[omg] before_compaction [${sessionKey}]: CRITICAL — failed to persist session state after forced observation:`,
+      `[omg] before_compaction [${sessionKey}]: CRITICAL — failed to persist session state after forced observation. ` +
+      'The observation will be re-run on the next agent_end, which may create duplicate graph nodes.',
       err
     )
   }
