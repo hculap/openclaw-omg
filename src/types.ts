@@ -495,6 +495,94 @@ export interface NodeUpdateEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Extract / Merge types (Phase 5 — split observer)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single knowledge candidate extracted by the Extract phase.
+ * Structurally mirrors the upsert variant of ObserverOperation but is
+ * decoupled from the legacy discriminated union.
+ */
+export interface ExtractCandidate {
+  readonly type: NodeType
+  readonly canonicalKey: string
+  readonly title: string
+  readonly description: string
+  readonly body: string
+  readonly priority: Priority
+  readonly mocHints?: readonly string[]
+  readonly linkKeys?: readonly string[]
+  readonly tags?: readonly string[]
+}
+
+/**
+ * Structured patch for the [[omg/now]] node.
+ * Rendered deterministically in code — not free-form LLM markdown.
+ */
+export interface NowPatch {
+  readonly focus: string
+  readonly openLoops: readonly string[]
+  readonly suggestedLinks: readonly string[]
+}
+
+/** Full output of a single Extract phase run. */
+export interface ExtractOutput {
+  readonly candidates: readonly ExtractCandidate[]
+  readonly nowPatch: NowPatch | null
+  readonly mocUpdates: readonly string[]
+}
+
+/** Input parameters for {@link runExtract}. */
+export interface ExtractParams {
+  readonly unobservedMessages: readonly Message[]
+  readonly nowNode: string | null
+  readonly config: OmgConfig
+  readonly llmClient: LlmClient
+  readonly sessionContext?: Record<string, unknown>
+}
+
+/**
+ * Decision returned by the Merge phase for a single candidate.
+ *
+ * - `keep_separate` — write the candidate as a new node (default / no merge)
+ * - `merge`         — append content to an existing node
+ * - `alias`         — add an alias key to an existing node (no body change)
+ */
+export type MergeAction =
+  | { readonly action: 'keep_separate' }
+  | { readonly action: 'merge'; readonly targetNodeId: string; readonly bodyAppend?: string }
+  | { readonly action: 'alias'; readonly targetNodeId: string; readonly aliasKey: string }
+
+/** A scored existing node considered as a merge target for an ExtractCandidate. */
+export interface ScoredMergeTarget {
+  readonly nodeId: string
+  readonly entry: import('./graph/registry.js').RegistryNodeEntry
+  readonly localScore: number
+  readonly semanticScore: number
+  readonly finalScore: number
+}
+
+/**
+ * Bridges an ExtractCandidate to an ObserverOperation (upsert kind).
+ * Used by the compat wrapper and by the agent-end hook when merge decides
+ * to keep a candidate separate.
+ */
+export function candidateToUpsertOperation(candidate: ExtractCandidate): ObserverOperation {
+  return {
+    kind: 'upsert',
+    canonicalKey: candidate.canonicalKey,
+    type: candidate.type,
+    title: candidate.title,
+    description: candidate.description,
+    body: candidate.body,
+    priority: candidate.priority,
+    ...(candidate.mocHints && candidate.mocHints.length > 0 ? { mocHints: candidate.mocHints } : {}),
+    ...(candidate.linkKeys && candidate.linkKeys.length > 0 ? { linkKeys: candidate.linkKeys } : {}),
+    ...(candidate.tags && candidate.tags.length > 0 ? { tags: candidate.tags } : {}),
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Observer input types (Phase 3)
 // ---------------------------------------------------------------------------
 

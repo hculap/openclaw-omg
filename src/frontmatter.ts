@@ -8,10 +8,12 @@ import { formatZodErrors } from './error-utils.js'
 // ---------------------------------------------------------------------------
 
 /**
- * Validates OMG node IDs in "namespace/slug" format (e.g. "omg/identity-core").
+ * Validates OMG node IDs.
+ * Accepts 2-segment legacy format ("omg/identity-core") and
+ * 3-segment deterministic format ("omg/fact/facts-pref-dark-mode").
  * Mirrors the pattern used in `config.ts` for `pinnedNodes`.
  */
-const NODE_ID_RE = /^[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9._-]*$/
+const NODE_ID_RE = /^[a-z0-9][a-z0-9-]*(?:\/[a-z0-9][a-z0-9._-]*){1,2}$/
 
 // ---------------------------------------------------------------------------
 // Sub-schemas

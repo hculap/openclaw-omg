@@ -25,7 +25,7 @@ import type {
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
 import { slugify, computeUid, computeNodeId, computeNodePath } from '../utils/id.js'
-import { registerNode, buildRegistryEntry } from './registry.js'
+import { registerNode, buildRegistryEntry, getRegistryEntry, updateRegistryEntry } from './registry.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -259,7 +259,13 @@ export async function writeObservationNode(
 ): Promise<GraphNode> {
   if (operation.kind === 'upsert') {
     const scope = context.scope ?? context.omgRoot
-    return writeNodeToDeterministicPath(context.omgRoot, operation, scope)
+    const node = await writeNodeToDeterministicPath(context.omgRoot, operation, scope)
+    try {
+      await registerNode(context.omgRoot, node.frontmatter.id, buildRegistryEntry(node, 'observation'))
+    } catch (err) {
+      console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id}:`, err)
+    }
+    return node
   }
 
   // Legacy path for create/update/supersede (backward compat)
@@ -335,4 +341,148 @@ export async function writeNowNode(
     console.error('[omg] node-writer: registry update failed for omg/now:', err)
   }
   return node
+}
+
+/**
+ * Appends additional content to the body of an existing observation node.
+ *
+ * Uses the AsyncMutex via registerNode to prevent race conditions.
+ * Updates the `updated` timestamp in frontmatter and the registry.
+ *
+ * @param omgRoot     Root of the OMG graph.
+ * @param nodeId      ID of the node to append to (e.g. "omg/preference/editor-theme").
+ * @param bodyAppend  Markdown content to append (separated by a blank line).
+ * @returns The updated GraphNode, or null if the node was not found in the registry.
+ */
+export async function appendToExistingNode(
+  omgRoot: string,
+  nodeId: string,
+  bodyAppend: string
+): Promise<GraphNode | null> {
+  const entry = await getRegistryEntry(omgRoot, nodeId)
+  if (!entry) {
+    console.warn(`[omg] node-writer: appendToExistingNode — node not found in registry: ${nodeId}`)
+    return null
+  }
+
+  const { filePath } = entry
+
+  let raw: string
+  try {
+    raw = await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if (isEnoent(err)) {
+      console.warn(`[omg] node-writer: appendToExistingNode — file not found: ${filePath}`)
+      return null
+    }
+    throw new Error(
+      `appendToExistingNode: failed to read ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    )
+  }
+
+  const { frontmatter: rawFm, body: existingBody } = parseFrontmatter(raw)
+  const now = new Date().toISOString()
+
+  const updatedFm: Record<string, unknown> = { ...rawFm, updated: now }
+  const updatedBody = bodyAppend.trim()
+    ? `${existingBody}\n\n${bodyAppend.trim()}`
+    : existingBody
+
+  const content = serializeFrontmatter(updatedFm, updatedBody)
+  await atomicWrite(filePath, content)
+
+  // Update registry updated timestamp
+  try {
+    await updateRegistryEntry(omgRoot, nodeId, { updated: now })
+  } catch (err) {
+    console.error(`[omg] node-writer: registry update failed for ${nodeId}:`, err)
+  }
+
+  // Reconstruct and return the updated node
+  const updatedFrontmatter: NodeFrontmatter = {
+    id: nodeId,
+    description: entry.description,
+    type: entry.type,
+    priority: entry.priority,
+    created: typeof rawFm['created'] === 'string' ? rawFm['created'] : now,
+    updated: now,
+    ...(entry.links !== undefined ? { links: entry.links } : {}),
+    ...(entry.tags !== undefined ? { tags: entry.tags } : {}),
+    ...(entry.canonicalKey !== undefined ? { canonicalKey: entry.canonicalKey } : {}),
+  }
+
+  return { frontmatter: updatedFrontmatter, body: updatedBody, filePath }
+}
+
+/**
+ * Adds an alias key to an existing observation node's frontmatter.
+ *
+ * Reads the existing node, merges the new aliasKey into frontmatter.aliases,
+ * and writes the file atomically. Updates the registry.
+ *
+ * @param omgRoot   Root of the OMG graph.
+ * @param nodeId    ID of the target node.
+ * @param aliasKey  The canonical key to add as an alias.
+ * @returns The updated GraphNode, or null if not found.
+ */
+export async function addAliasToNode(
+  omgRoot: string,
+  nodeId: string,
+  aliasKey: string
+): Promise<GraphNode | null> {
+  const entry = await getRegistryEntry(omgRoot, nodeId)
+  if (!entry) {
+    console.warn(`[omg] node-writer: addAliasToNode — node not found in registry: ${nodeId}`)
+    return null
+  }
+
+  const { filePath } = entry
+
+  let raw: string
+  try {
+    raw = await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if (isEnoent(err)) {
+      console.warn(`[omg] node-writer: addAliasToNode — file not found: ${filePath}`)
+      return null
+    }
+    throw new Error(
+      `addAliasToNode: failed to read ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    )
+  }
+
+  const { frontmatter: rawFm, body } = parseFrontmatter(raw)
+  const now = new Date().toISOString()
+
+  // Merge alias into existing aliases array (deduplicated)
+  const existingAliases = Array.isArray(rawFm['aliases']) ? (rawFm['aliases'] as string[]) : []
+  const aliases = [...new Set([...existingAliases, aliasKey])]
+
+  const updatedFm: Record<string, unknown> = { ...rawFm, updated: now, aliases }
+  const content = serializeFrontmatter(updatedFm, body)
+  await atomicWrite(filePath, content)
+
+  // Update registry updated timestamp
+  try {
+    await updateRegistryEntry(omgRoot, nodeId, { updated: now })
+  } catch (err) {
+    console.error(`[omg] node-writer: registry update failed for ${nodeId}:`, err)
+  }
+
+  const updatedFrontmatter: NodeFrontmatter = {
+    id: nodeId,
+    description: entry.description,
+    type: entry.type,
+    priority: entry.priority,
+    created: typeof rawFm['created'] === 'string' ? rawFm['created'] : now,
+    updated: now,
+    aliases,
+    ...(entry.links !== undefined ? { links: entry.links } : {}),
+    ...(entry.tags !== undefined ? { tags: entry.tags } : {}),
+    ...(entry.canonicalKey !== undefined ? { canonicalKey: entry.canonicalKey } : {}),
+  }
+
+  return { frontmatter: updatedFrontmatter, body, filePath }
 }

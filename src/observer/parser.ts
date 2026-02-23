@@ -12,6 +12,9 @@ import type {
   ObserverOutput,
   ObserverOperation,
   Priority,
+  ExtractOutput,
+  ExtractCandidate,
+  NowPatch,
 } from '../types.js'
 import { isNodeType } from '../types.js'
 
@@ -219,4 +222,179 @@ export function parseObserverOutput(raw: string): ObserverOutput {
   const mocUpdates = deriveMocUpdates(operations)
 
   return { operations, nowUpdate, mocUpdates }
+}
+
+// ---------------------------------------------------------------------------
+// Extract output parser (Phase 5 — split observer)
+// ---------------------------------------------------------------------------
+
+/** Empty ExtractOutput returned on any parse failure. */
+export const EMPTY_EXTRACT_OUTPUT: ExtractOutput = Object.freeze({
+  candidates: Object.freeze([]) as readonly ExtractCandidate[],
+  nowPatch: null,
+  mocUpdates: Object.freeze([]) as readonly string[],
+})
+
+/**
+ * Derives mocUpdates from candidates' mocHints (deduplicated).
+ */
+function deriveMocUpdatesFromCandidates(candidates: readonly ExtractCandidate[]): readonly string[] {
+  const seen = new Set<string>()
+  const results: string[] = []
+  for (const c of candidates) {
+    for (const hint of c.mocHints ?? []) {
+      if (!seen.has(hint)) {
+        seen.add(hint)
+        results.push(hint)
+      }
+    }
+  }
+  return results
+}
+
+/**
+ * Maps a parsed `<operation>` element to an ExtractCandidate.
+ * Same field extraction as parseOperation but returns ExtractCandidate.
+ */
+function parseCandidate(op: Record<string, unknown>): ExtractCandidate | null {
+  const canonicalKey = typeof op['canonical-key'] === 'string' ? op['canonical-key'].trim() : ''
+  const rawType = op['@_type']
+  const rawPriority = op['@_priority']
+
+  if (!canonicalKey) {
+    console.warn(
+      `[omg] Extract parser: dropping candidate — missing canonical-key (type="${String(rawType)}")`,
+    )
+    return null
+  }
+
+  if (!isNodeType(rawType)) {
+    console.warn(
+      `[omg] Extract parser: dropping candidate — unknown type "${String(rawType)}" (canonical-key="${canonicalKey}")`,
+    )
+    return null
+  }
+
+  const title = typeof op['title'] === 'string' ? op['title'].trim() : ''
+  const description = typeof op['description'] === 'string' ? op['description'].trim() : ''
+
+  if (!description) {
+    console.warn(
+      `[omg] Extract parser: dropping candidate — missing description (canonical-key="${canonicalKey}")`,
+    )
+    return null
+  }
+
+  const priority = coercePriority(rawPriority, canonicalKey)
+  const body = typeof op['content'] === 'string' ? op['content'].trim() : ''
+  const mocHints = extractCommaSeparated(op['moc-hints'])
+  const tags = extractCommaSeparated(op['tags'])
+  const linkKeys = extractCommaSeparated(op['links'])
+
+  return {
+    type: rawType,
+    canonicalKey,
+    title,
+    description,
+    body,
+    priority,
+    ...(mocHints.length > 0 ? { mocHints } : {}),
+    ...(linkKeys.length > 0 ? { linkKeys } : {}),
+    ...(tags.length > 0 ? { tags } : {}),
+  }
+}
+
+/**
+ * Parses a `<now-patch>` element into a NowPatch.
+ * Returns null if the element is missing or malformed.
+ */
+function parseNowPatch(raw: unknown): NowPatch | null {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null
+
+  const patch = raw as Record<string, unknown>
+  const focus = typeof patch['focus'] === 'string' ? patch['focus'].trim() : ''
+  if (!focus) return null
+
+  const openLoops = extractCommaSeparated(patch['open-loops'])
+  const suggestedLinks = extractCommaSeparated(patch['suggested-links'])
+
+  return {
+    focus: focus.slice(0, 200),
+    openLoops,
+    suggestedLinks,
+  }
+}
+
+/**
+ * Parses the raw LLM output from the Extract phase into an {@link ExtractOutput}.
+ *
+ * Never throws. Returns an empty ExtractOutput on any parse failure.
+ * Parses `<operations>` the same way as `parseObserverOutput`, but maps
+ * them to `ExtractCandidate[]` instead of `ObserverOperation[]`.
+ * Parses `<now-patch>` into a structured `NowPatch` (not free-form markdown).
+ */
+export function parseExtractOutput(raw: string): ExtractOutput {
+  if (typeof raw !== 'string') {
+    console.error('[omg] Extract parser: received non-string input — this is a bug in the LLM client layer')
+    return { ...EMPTY_EXTRACT_OUTPUT }
+  }
+  if (raw.trim() === '') {
+    console.warn('[omg] Extract parser: LLM returned an empty response — no candidates will be extracted')
+    return { ...EMPTY_EXTRACT_OUTPUT }
+  }
+
+  // Extract the XML block — the LLM may wrap it in ``` fences or add preamble text.
+  const xmlMatch = raw.match(/<observations[\s\S]*?<\/observations>/)
+  const xmlSource = xmlMatch ? xmlMatch[0] : raw.trim()
+
+  let parsed: Record<string, unknown>
+  try {
+    const result = xmlParser.parse(xmlSource) as Record<string, unknown>
+    if (typeof result !== 'object' || result === null) {
+      console.error('[omg] Extract parser: XMLParser returned a non-object result — returning empty output')
+      return { ...EMPTY_EXTRACT_OUTPUT }
+    }
+    parsed = result
+  } catch (err) {
+    console.error(
+      '[omg] Extract parser: XMLParser.parse() threw — returning empty output.',
+      err instanceof Error ? err.message : String(err),
+    )
+    return { ...EMPTY_EXTRACT_OUTPUT }
+  }
+
+  const root = parsed['observations'] as Record<string, unknown> | undefined
+  if (root === undefined || root === null) {
+    console.error('[omg] Extract parser: <observations> root element not found — returning empty output')
+    return { ...EMPTY_EXTRACT_OUTPUT }
+  }
+
+  const candidates: ExtractCandidate[] = []
+  const opsNode = root['operations'] as Record<string, unknown> | undefined
+
+  if (opsNode !== undefined && opsNode !== null && typeof opsNode === 'object') {
+    const rawOps = opsNode['operation']
+    const opArray = Array.isArray(rawOps) ? rawOps : []
+
+    let skippedCount = 0
+    for (const op of opArray) {
+      if (op === null || typeof op !== 'object') continue
+      const candidate = parseCandidate(op as Record<string, unknown>)
+      if (candidate !== null) {
+        candidates.push(candidate)
+      } else {
+        skippedCount++
+      }
+    }
+    if (skippedCount > 0) {
+      console.warn(
+        `[omg] Extract parser: skipped ${skippedCount} candidate(s) — invalid type or missing required fields`,
+      )
+    }
+  }
+
+  const nowPatch = parseNowPatch(root['now-patch'])
+  const mocUpdates = deriveMocUpdatesFromCandidates(candidates)
+
+  return { candidates, nowPatch, mocUpdates }
 }
