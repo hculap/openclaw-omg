@@ -63,4 +63,8 @@ export async function scaffoldGraphIfNeeded(workspaceDir: string, config: OmgCon
       await fs.writeFile(dest, content, 'utf8')
     })
   )
+
+  // Write empty registry for fresh graphs
+  const registryPath = path.join(omgRoot, '.registry.json')
+  await fs.writeFile(registryPath, JSON.stringify({ version: 1, nodes: {} }, null, 2), 'utf8')
 }

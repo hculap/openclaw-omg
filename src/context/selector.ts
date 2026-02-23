@@ -1,5 +1,6 @@
 import type { OmgConfig } from '../config.js'
 import type { GraphNode, GraphContextSlice, Message } from '../types.js'
+import type { RegistryNodeEntry } from '../graph/registry.js'
 import { estimateTokens } from '../utils/tokens.js'
 
 // ---------------------------------------------------------------------------
@@ -87,6 +88,111 @@ export function selectContext(params: SelectionParams): GraphContextSlice {
     nodes: selectedNodes,
     estimatedTokens: estTokens,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Two-pass context selection (registry-based)
+// ---------------------------------------------------------------------------
+
+/** Max candidates to hydrate in Pass 2. */
+const MAX_HYDRATION_CANDIDATES = 200
+
+export interface SelectionParamsV2 {
+  /** Full content of index.md (always injected). */
+  readonly indexContent: string
+  /** Full content of now.md, or null if it doesn't exist. */
+  readonly nowContent: string | null
+  /** Registry entries for all nodes (id + metadata, no body). */
+  readonly registryEntries: readonly [string, RegistryNodeEntry][]
+  /** Recent conversation messages used for keyword scoring. */
+  readonly recentMessages: readonly Message[]
+  readonly config: OmgConfig
+  /**
+   * Async function that reads a node body given its file path.
+   * Injected for testability — production callers use `readGraphNode`.
+   */
+  readonly hydrateNode: (filePath: string) => Promise<GraphNode | null>
+}
+
+/**
+ * Two-pass context selector using the registry for Pass 1.
+ *
+ * Pass 1 (no I/O): Score all registry entries by priority, recency, and
+ * description/tags keyword match. Select top `MAX_HYDRATION_CANDIDATES`.
+ *
+ * Pass 2 (I/O): Hydrate top candidates by reading their node bodies.
+ * Re-rank within the hydrated set using full body keyword match.
+ * Apply budget and count limits to produce the final slice.
+ */
+export async function selectContextV2(params: SelectionParamsV2): Promise<GraphContextSlice> {
+  const { indexContent, nowContent, registryEntries, recentMessages, config, hydrateNode } = params
+  const { injection } = config
+
+  const keywords = extractKeywords(recentMessages)
+
+  // --- Pass 1: metadata-only scoring ---
+  const scoredEntries = scoreRegistryEntries(registryEntries, keywords)
+
+  // Partition moc vs regular candidates
+  const mocCandidates = scoredEntries
+    .filter(([, entry]) => entry.type === 'moc')
+    .slice(0, injection.maxMocs * 3) // generous budget for hydration
+
+  const regularCandidates = scoredEntries
+    .filter(([, entry]) => entry.type !== 'moc' && entry.type !== 'index' && entry.type !== 'now')
+    .slice(0, MAX_HYDRATION_CANDIDATES)
+
+  // --- Pass 2: hydrate top candidates ---
+  const [hydratedMocs, hydratedRegular] = await Promise.all([
+    hydrateEntries(mocCandidates, hydrateNode),
+    hydrateEntries(regularCandidates, hydrateNode),
+  ])
+
+  // Delegate to selectContext with the hydrated nodes
+  return selectContext({
+    indexContent,
+    nowContent,
+    allNodes: [...hydratedMocs, ...hydratedRegular],
+    recentMessages,
+    config,
+  })
+}
+
+function scoreRegistryEntries(
+  entries: readonly [string, RegistryNodeEntry][],
+  keywords: ReadonlySet<string>
+): [string, RegistryNodeEntry][] {
+  return [...entries]
+    .map((entry) => ({ entry, score: computeRegistryScore(entry[1], keywords) }))
+    .sort((a, b) => b.score - a.score)
+    .map(({ entry }) => entry)
+}
+
+function computeRegistryScore(entry: RegistryNodeEntry, keywords: ReadonlySet<string>): number {
+  const priorityWeight = PRIORITY_WEIGHT[entry.priority] ?? 1.0
+  const recencyFactor = computeRecencyFactor(entry.updated)
+  const keywordMatch = computeRegistryKeywordMatch(entry, keywords)
+  return keywordMatch * priorityWeight * recencyFactor
+}
+
+function computeRegistryKeywordMatch(entry: RegistryNodeEntry, keywords: ReadonlySet<string>): number {
+  if (keywords.size === 0) return 1.0
+  const text = (entry.description + ' ' + (entry.tags ?? []).join(' ')).toLowerCase()
+  let matches = 0
+  for (const kw of keywords) {
+    if (text.includes(kw)) matches++
+  }
+  return 1.0 + matches * 0.5
+}
+
+async function hydrateEntries(
+  entries: readonly [string, RegistryNodeEntry][],
+  hydrateNode: (filePath: string) => Promise<GraphNode | null>
+): Promise<GraphNode[]> {
+  const results = await Promise.all(
+    entries.map(([, entry]) => hydrateNode(entry.filePath))
+  )
+  return results.filter((n): n is GraphNode => n !== null)
 }
 
 // ---------------------------------------------------------------------------

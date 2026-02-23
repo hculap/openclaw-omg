@@ -25,6 +25,7 @@ import type {
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
 import { slugify, computeUid, computeNodeId, computeNodePath } from '../utils/id.js'
+import { registerNode, buildRegistryEntry } from './registry.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -263,7 +264,13 @@ export async function writeObservationNode(
   // Legacy path for create/update/supersede (backward compat)
   const { frontmatter, body } = operation
   const dir = join(context.omgRoot, 'nodes', frontmatter.type)
-  return writeNodeToDir(dir, frontmatter, body)
+  const node = await writeNodeToDir(dir, frontmatter, body)
+  try {
+    await registerNode(context.omgRoot, frontmatter.id, buildRegistryEntry(node, 'observation'))
+  } catch (err) {
+    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id}:`, err)
+  }
+  return node
 }
 
 /**
@@ -276,7 +283,13 @@ export async function writeReflectionNode(
   context: WriteContext
 ): Promise<GraphNode> {
   const dir = join(context.omgRoot, 'reflections')
-  return writeNodeToDir(dir, node.frontmatter, node.body)
+  const written = await writeNodeToDir(dir, node.frontmatter, node.body)
+  try {
+    await registerNode(context.omgRoot, node.frontmatter.id, buildRegistryEntry(written, 'reflection'))
+  } catch (err) {
+    console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id}:`, err)
+  }
+  return written
 }
 
 /**
@@ -314,9 +327,11 @@ export async function writeNowNode(
   const content = serializeFrontmatter(frontmatterToRecord(frontmatter), nowUpdate)
   await atomicWrite(filePath, content)
 
-  return {
-    frontmatter,
-    body: nowUpdate,
-    filePath,
+  const node: GraphNode = { frontmatter, body: nowUpdate, filePath }
+  try {
+    await registerNode(context.omgRoot, 'omg/now', buildRegistryEntry(node, 'observation'))
+  } catch (err) {
+    console.error('[omg] node-writer: registry update failed for omg/now:', err)
   }
+  return node
 }

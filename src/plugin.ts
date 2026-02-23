@@ -27,7 +27,7 @@ import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
 import { scaffoldGraphIfNeeded } from './scaffold.js'
 import { runBootstrap } from './bootstrap/bootstrap.js'
-import { listAllNodes } from './graph/node-reader.js'
+import { getNodeCount } from './graph/registry.js'
 import { resolveOmgRoot } from './utils/paths.js'
 import type { Message } from './types.js'
 import type { GenerateFn } from './llm/client.js'
@@ -533,14 +533,14 @@ export function register(api: PluginApi): void {
       bootstrappedWorkspaces.add(effectiveWorkspaceDir)
       scaffoldGraphIfNeeded(effectiveWorkspaceDir, config)
         .catch((err) => console.error('[omg] before_prompt_build: scaffold failed:', err))
-        .then(() => listAllNodes(resolveOmgRoot(effectiveWorkspaceDir, config)))
-        .then((nodes) => {
-          if (nodes.length === 0) {
+        .then(() => getNodeCount(resolveOmgRoot(effectiveWorkspaceDir, config)))
+        .then((count) => {
+          if (count === 0) {
             return runBootstrap({ workspaceDir: effectiveWorkspaceDir, config, llmClient, force: false })
               .catch((err) => console.error('[omg] before_prompt_build: bootstrap failed:', err))
           }
         })
-        .catch((err) => console.error('[omg] before_prompt_build: node listing failed, skipping bootstrap:', err))
+        .catch((err) => console.error('[omg] before_prompt_build: node count failed, skipping bootstrap:', err))
     }
 
     const sessionKey = ctx.sessionKey ?? 'default'

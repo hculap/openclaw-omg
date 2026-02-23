@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { vol } from 'memfs'
 import { parseConfig } from '../../src/config.js'
+import { clearRegistryCache } from '../../src/graph/registry.js'
 import type { LlmClient } from '../../src/llm/client.js'
 import type { Message } from '../../src/types.js'
 
@@ -37,6 +38,7 @@ function makeMessages(count: number): Message[] {
 
 beforeEach(() => {
   vol.reset()
+  clearRegistryCache()
   // Scaffold minimal graph directories
   vol.fromJSON({
     [`${OMG_ROOT}/index.md`]: '---\ntype: index\nid: omg/index\npriority: high\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\n# Index\n',

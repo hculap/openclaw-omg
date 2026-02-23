@@ -16,6 +16,7 @@ import {
   writeNowNode,
 } from '../../src/graph/node-writer.js'
 import { parseFrontmatter } from '../../src/utils/frontmatter.js'
+import { clearRegistryCache } from '../../src/graph/registry.js'
 import type {
   ObserverOperation,
   WriteContext,
@@ -70,6 +71,7 @@ function makeBaseFrontmatter(overrides: Partial<NodeFrontmatter> = {}): NodeFron
 
 beforeEach(() => {
   vol.reset()
+  clearRegistryCache()
 })
 
 // ─── writeObservationNode — upsert ────────────────────────────────────────────

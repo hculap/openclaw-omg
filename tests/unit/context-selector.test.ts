@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { parseConfig } from '../../src/config.js'
-import { selectContext } from '../../src/context/selector.js'
+import { selectContext, selectContextV2 } from '../../src/context/selector.js'
 import type { OmgConfig } from '../../src/config.js'
 import type { GraphNode } from '../../src/types.js'
+import type { RegistryNodeEntry } from '../../src/graph/registry.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -316,6 +317,232 @@ describe('selectContext — token budget', () => {
     })
 
     // Estimated tokens should be within budget (may slightly exceed due to estimation heuristic)
+    expect(slice.estimatedTokens).toBeLessThanOrEqual(600)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// selectContextV2 — two-pass registry-based selection
+// ---------------------------------------------------------------------------
+
+function makeRegistryEntry(
+  overrides: Partial<{
+    type: RegistryNodeEntry['type']
+    kind: RegistryNodeEntry['kind']
+    priority: RegistryNodeEntry['priority']
+    description: string
+    updated: string
+    filePath: string
+    archived: boolean
+    tags: string[]
+    links: string[]
+  }> = {}
+): RegistryNodeEntry {
+  const now = new Date().toISOString()
+  return {
+    type: overrides.type ?? 'fact',
+    kind: overrides.kind ?? 'observation',
+    priority: overrides.priority ?? 'medium',
+    description: overrides.description ?? 'A test fact',
+    created: now,
+    updated: overrides.updated ?? now,
+    filePath: overrides.filePath ?? '/omg/nodes/fact/test-fact.md',
+    ...(overrides.archived !== undefined && { archived: overrides.archived }),
+    ...(overrides.tags !== undefined && { tags: overrides.tags }),
+    ...(overrides.links !== undefined && { links: overrides.links }),
+  }
+}
+
+function makeHydratedNode(id: string, entry: RegistryNodeEntry, body = 'Node body content.'): GraphNode {
+  return {
+    frontmatter: {
+      id,
+      description: entry.description,
+      type: entry.type,
+      priority: entry.priority,
+      created: entry.created,
+      updated: entry.updated,
+    },
+    body,
+    filePath: entry.filePath,
+  }
+}
+
+describe('selectContextV2 — two-pass registry-based selection', () => {
+  it('returns index and nowNode when registry is empty', async () => {
+    const hydrateNode = vi.fn().mockResolvedValue(null)
+
+    const slice = await selectContextV2({
+      indexContent: INDEX_CONTENT,
+      nowContent: NOW_CONTENT,
+      registryEntries: [],
+      recentMessages: [],
+      config,
+      hydrateNode,
+    })
+
+    expect(slice.index).toBe(INDEX_CONTENT)
+    expect(slice.nowNode).not.toBeNull()
+    expect(slice.nodes).toHaveLength(0)
+    expect(slice.mocs).toHaveLength(0)
+    expect(hydrateNode).not.toHaveBeenCalled()
+  })
+
+  it('hydrates only registry candidates (Pass 2) using hydrateNode', async () => {
+    const entry = makeRegistryEntry({ filePath: '/omg/nodes/fact/node-1.md' })
+    const hydratedNode = makeHydratedNode('omg/fact/node-1', entry)
+    const hydrateNode = vi.fn().mockResolvedValue(hydratedNode)
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/node-1', entry]],
+      recentMessages: [],
+      config,
+      hydrateNode,
+    })
+
+    expect(hydrateNode).toHaveBeenCalledWith('/omg/nodes/fact/node-1.md')
+    expect(slice.nodes.map((n) => n.frontmatter.id)).toContain('omg/fact/node-1')
+  })
+
+  it('prefers high-priority entries in Pass 1 (before hydration)', async () => {
+    const highEntry = makeRegistryEntry({ priority: 'high', filePath: '/high.md' })
+    const lowEntry = makeRegistryEntry({ priority: 'low', filePath: '/low.md' })
+    const highNode = makeHydratedNode('omg/fact/high', highEntry, 'hi')
+    const lowNode = makeHydratedNode('omg/fact/low', lowEntry, 'lo')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/high.md') return Promise.resolve(highNode)
+      if (fp === '/low.md') return Promise.resolve(lowNode)
+      return Promise.resolve(null)
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 100, maxNodes: 1 } })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/low', lowEntry],
+        ['omg/fact/high', highEntry],
+      ],
+      recentMessages: [],
+      config: tightConfig,
+      hydrateNode,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/high')
+  })
+
+  it('boosts entries matching keywords in Pass 1 description/tags', async () => {
+    const tsEntry = makeRegistryEntry({
+      description: 'TypeScript configuration',
+      tags: ['typescript'],
+      filePath: '/ts.md',
+    })
+    const cookEntry = makeRegistryEntry({
+      description: 'Pasta recipe',
+      tags: ['food'],
+      filePath: '/cook.md',
+    })
+    const tsNode = makeHydratedNode('omg/fact/ts', tsEntry, 'TypeScript body.')
+    const cookNode = makeHydratedNode('omg/fact/cook', cookEntry, 'Cooking body.')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/ts.md') return Promise.resolve(tsNode)
+      if (fp === '/cook.md') return Promise.resolve(cookNode)
+      return Promise.resolve(null)
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 80, maxNodes: 1 } })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/cook', cookEntry],
+        ['omg/fact/ts', tsEntry],
+      ],
+      recentMessages: [{ role: 'user', content: 'Help me with TypeScript configuration.' }],
+      config: tightConfig,
+      hydrateNode,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/ts')
+    expect(ids).not.toContain('omg/fact/cook')
+  })
+
+  it('separates moc entries from regular entries', async () => {
+    const mocEntry = makeRegistryEntry({ type: 'moc', filePath: '/moc.md' })
+    const factEntry = makeRegistryEntry({ type: 'fact', filePath: '/fact.md' })
+    const mocNode = makeHydratedNode('omg/moc/projects', mocEntry, '- [[omg/project/alpha]]')
+    const factNode = makeHydratedNode('omg/fact/alpha', factEntry)
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/moc.md') return Promise.resolve(mocNode)
+      if (fp === '/fact.md') return Promise.resolve(factNode)
+      return Promise.resolve(null)
+    })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/moc/projects', mocEntry],
+        ['omg/fact/alpha', factEntry],
+      ],
+      recentMessages: [],
+      config,
+      hydrateNode,
+    })
+
+    expect(slice.mocs.map((m) => m.frontmatter.id)).toContain('omg/moc/projects')
+    expect(slice.nodes.map((n) => n.frontmatter.id)).toContain('omg/fact/alpha')
+    expect(slice.nodes.map((n) => n.frontmatter.id)).not.toContain('omg/moc/projects')
+  })
+
+  it('skips null results from hydrateNode without crashing', async () => {
+    const entry = makeRegistryEntry({ filePath: '/missing.md' })
+    const hydrateNode = vi.fn().mockResolvedValue(null)
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/missing', entry]],
+      recentMessages: [],
+      config,
+      hydrateNode,
+    })
+
+    expect(slice.nodes).toHaveLength(0)
+  })
+
+  it('respects maxContextTokens even with many candidates', async () => {
+    const entries: [string, RegistryNodeEntry][] = Array.from({ length: 20 }, (_, i) => [
+      `omg/fact/node-${i}`,
+      makeRegistryEntry({ filePath: `/node-${i}.md` }),
+    ])
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      const idx = parseInt(fp.match(/node-(\d+)/)![1]!)
+      const pair = entries[idx]!
+      return Promise.resolve(makeHydratedNode(pair[0], pair[1], 'x'.repeat(400)))
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 500, maxNodes: 20 } })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: entries,
+      recentMessages: [],
+      config: tightConfig,
+      hydrateNode,
+    })
+
     expect(slice.estimatedTokens).toBeLessThanOrEqual(600)
   })
 })

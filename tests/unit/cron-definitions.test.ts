@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { vol } from 'memfs'
 import { parseConfig } from '../../src/config.js'
+import { clearRegistryCache } from '../../src/graph/registry.js'
 import type { LlmClient } from '../../src/llm/client.js'
 import type { CronContext } from '../../src/cron/definitions.js'
 
@@ -50,6 +51,7 @@ function makeCtx(cronSchedule = '0 3 * * *'): CronContext {
 
 beforeEach(() => {
   vol.reset()
+  clearRegistryCache()
   vol.fromJSON({
     // Empty graph root — no observation nodes
     [`${OMG_ROOT}/.keep`]: '',

@@ -12,6 +12,7 @@ vi.mock('node:fs/promises', async () => {
 })
 
 const { beforeAgentStart } = await import('../../src/hooks/before-agent-start.js')
+const { clearRegistryCache } = await import('../../src/graph/registry.js')
 
 const WORKSPACE = '/workspace'
 const SESSION_KEY = 'test-session'
@@ -22,6 +23,7 @@ const NOW_MD = '---\ntype: now\nid: omg/now\npriority: high\ncreated: 2026-01-01
 
 beforeEach(() => {
   vol.reset()
+  clearRegistryCache()
 })
 
 // ---------------------------------------------------------------------------
