@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseObserverOutput } from '../../src/observer/parser.js'
+import { parseObserverOutput, parseExtractOutput } from '../../src/observer/parser.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -381,5 +381,184 @@ describe('parseObserverOutput — malformed input', () => {
   it('logs an error (not warn) when XMLParser.parse() throws', () => {
     parseObserverOutput('<observations')
     expect(errorSpy).toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseExtractOutput — new extract format
+// ---------------------------------------------------------------------------
+
+describe('parseExtractOutput — valid candidates', () => {
+  it('parses a single candidate with required fields', () => {
+    const xml = `<observations>
+<operations>
+<operation type="preference" priority="high">
+  <canonical-key>preferences.editor_theme</canonical-key>
+  <title>Editor Theme</title>
+  <description>User prefers dark mode</description>
+  <content>The user prefers dark mode.</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(1)
+    const c = result.candidates[0]!
+    expect(c.canonicalKey).toBe('preferences.editor_theme')
+    expect(c.type).toBe('preference')
+    expect(c.title).toBe('Editor Theme')
+    expect(c.description).toBe('User prefers dark mode')
+    expect(c.body).toBe('The user prefers dark mode.')
+    expect(c.priority).toBe('high')
+  })
+
+  it('parses moc-hints as array', () => {
+    const xml = `<observations>
+<operations>
+<operation type="preference" priority="medium">
+  <canonical-key>preferences.theme</canonical-key>
+  <title>Theme</title>
+  <description>Prefers dark</description>
+  <content>Dark mode.</content>
+  <moc-hints>preferences, colors</moc-hints>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates[0]?.mocHints).toEqual(['preferences', 'colors'])
+  })
+
+  it('parses tags as array', () => {
+    const xml = `<observations>
+<operations>
+<operation type="fact" priority="low">
+  <canonical-key>facts.typescript</canonical-key>
+  <title>TypeScript</title>
+  <description>TypeScript is typed</description>
+  <content>TypeScript adds types.</content>
+  <tags>typescript, programming</tags>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates[0]?.tags).toEqual(['typescript', 'programming'])
+  })
+
+  it('derives mocUpdates from candidates mocHints', () => {
+    const xml = `<observations>
+<operations>
+<operation type="preference" priority="high">
+  <canonical-key>preferences.theme</canonical-key>
+  <title>Theme</title>
+  <description>Prefers dark</description>
+  <content>Dark.</content>
+  <moc-hints>preferences</moc-hints>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.mocUpdates).toContain('preferences')
+  })
+
+  it('parses multiple candidates', () => {
+    const xml = `<observations>
+<operations>
+<operation type="preference" priority="high">
+  <canonical-key>preferences.theme</canonical-key>
+  <title>Theme</title>
+  <description>Prefers dark mode</description>
+  <content>Dark.</content>
+</operation>
+<operation type="fact" priority="medium">
+  <canonical-key>facts.typescript</canonical-key>
+  <title>TypeScript</title>
+  <description>TypeScript is typed</description>
+  <content>Types added.</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(2)
+  })
+})
+
+describe('parseExtractOutput — now-patch', () => {
+  it('parses now-patch when present', () => {
+    const xml = `<observations>
+<operations></operations>
+<now-patch>
+  <focus>Working on auth module.</focus>
+  <open-loops>JWT middleware, login tests</open-loops>
+  <suggested-links>preferences.answer_style</suggested-links>
+</now-patch>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.nowPatch).not.toBeNull()
+    expect(result.nowPatch?.focus).toBe('Working on auth module.')
+    expect(result.nowPatch?.openLoops).toEqual(['JWT middleware', 'login tests'])
+    expect(result.nowPatch?.suggestedLinks).toEqual(['preferences.answer_style'])
+  })
+
+  it('nowPatch is null when now-patch element is absent', () => {
+    const xml = '<observations><operations></operations></observations>'
+    const result = parseExtractOutput(xml)
+    expect(result.nowPatch).toBeNull()
+  })
+
+  it('nowPatch is null when focus is missing', () => {
+    const xml = `<observations>
+<operations></operations>
+<now-patch><open-loops>loop1</open-loops></now-patch>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.nowPatch).toBeNull()
+  })
+})
+
+describe('parseExtractOutput — failure modes', () => {
+  it('returns empty output for empty string', () => {
+    const result = parseExtractOutput('')
+    expect(result.candidates).toHaveLength(0)
+    expect(result.nowPatch).toBeNull()
+    expect(result.mocUpdates).toHaveLength(0)
+  })
+
+  it('returns empty output for garbage text', () => {
+    const result = parseExtractOutput('this is not xml')
+    expect(result.candidates).toHaveLength(0)
+  })
+
+  it('drops candidates with missing canonical-key', () => {
+    const xml = `<observations>
+<operations>
+<operation type="fact" priority="medium">
+  <description>Missing key</description>
+  <content>Content.</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(0)
+  })
+
+  it('drops candidates with unknown type', () => {
+    const xml = `<observations>
+<operations>
+<operation type="unknown-type" priority="medium">
+  <canonical-key>bad.type</canonical-key>
+  <title>Bad type</title>
+  <description>Some description</description>
+  <content>Content.</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(0)
+  })
+
+  it('never throws on any input', () => {
+    const inputs = ['', '<<garbage>>', '<observations>', null as unknown as string, undefined as unknown as string]
+    for (const input of inputs) {
+      expect(() => parseExtractOutput(input)).not.toThrow()
+    }
   })
 })

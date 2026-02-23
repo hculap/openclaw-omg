@@ -341,6 +341,74 @@ const dedupSchema = z
   .strip()
 
 // ---------------------------------------------------------------------------
+// Merge schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls the inline merge-dedup pass that runs during each observation cycle.
+ * For each extracted candidate, a retrieval pass finds close registry neighbors;
+ * if a close neighbor is found, a Merge LLM call decides whether to merge, alias,
+ * or keep the candidate separate.
+ */
+const mergeSchema = z
+  .object({
+    /**
+     * Maximum number of local (similarity-scored) registry candidates to consider
+     * per extracted node. Higher = more coverage, slower.
+     */
+    localTopM: z
+      .number()
+      .int()
+      .positive('merge.localTopM must be a positive integer')
+      .default(50),
+    /**
+     * Maximum number of semantic search results to incorporate per extracted node.
+     * Only used when memory_search is available.
+     */
+    semanticTopS: z
+      .number()
+      .int()
+      .positive('merge.semanticTopS must be a positive integer')
+      .default(20),
+    /**
+     * Number of top-scored neighbors passed to the Merge LLM call.
+     */
+    finalTopK: z
+      .number()
+      .int()
+      .positive('merge.finalTopK must be a positive integer')
+      .default(7),
+    /**
+     * Weight applied to the local similarity score in the combined scoring formula.
+     * finalScore = localWeight * localScore + semanticWeight * semanticScore + boosts
+     */
+    localWeight: z
+      .number()
+      .min(0, 'merge.localWeight must be >= 0')
+      .max(1, 'merge.localWeight must be <= 1')
+      .default(0.6),
+    /**
+     * Weight applied to the semantic score in the combined scoring formula.
+     */
+    semanticWeight: z
+      .number()
+      .min(0, 'merge.semanticWeight must be >= 0')
+      .max(1, 'merge.semanticWeight must be <= 1')
+      .default(0.4),
+    /**
+     * Minimum combined score for a neighbor to trigger the Merge LLM call.
+     * Candidates below this threshold are written as new nodes without an LLM merge call.
+     * Range [0, 1].
+     */
+    mergeThreshold: z
+      .number()
+      .min(0, 'merge.mergeThreshold must be >= 0')
+      .max(1, 'merge.mergeThreshold must be <= 1')
+      .default(0.4),
+  })
+  .strip()
+
+// ---------------------------------------------------------------------------
 // Graph maintenance schema
 // ---------------------------------------------------------------------------
 
@@ -417,6 +485,7 @@ export const omgConfigSchema = z
     reflection: reflectionSchema.default({}),
     injection: injectionSchema.default({}),
     dedup: dedupSchema.default({}),
+    merge: mergeSchema.default({}),
     graphMaintenance: graphMaintenanceSchema.default({}),
     identity: identitySchema,
     bootstrap: bootstrapSchema.default({}),
@@ -492,6 +561,7 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   reflection: new Set(Object.keys(reflectionSchema.shape)),
   injection: new Set(Object.keys(injectionSchema.shape)), // includes: semantic
   dedup: new Set(Object.keys(dedupSchema.shape)),
+  merge: new Set(Object.keys(mergeSchema.shape)),
   graphMaintenance: new Set(Object.keys(graphMaintenanceSchema.shape)),
   bootstrap: new Set(Object.keys(bootstrapSchema.shape)), // includes: sources
   identity: new Set(['mode']),

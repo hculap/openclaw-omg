@@ -133,8 +133,9 @@ describe('agentEnd — observation with node output', () => {
   it('writes observation nodes when LLM returns operations', async () => {
     const xml = `<observations>
 <operations>
-<operation action="create" type="fact" priority="medium">
-  <id>omg/typescript-types</id>
+<operation type="fact" priority="medium">
+  <canonical-key>facts.typescript_types</canonical-key>
+  <title>TypeScript Types</title>
   <description>TypeScript is strongly typed</description>
   <content>TypeScript adds static types to JavaScript.</content>
 </operation>
@@ -158,8 +159,9 @@ describe('agentEnd — observation with node output', () => {
   it('updates lastObservationNodeIds in state after writing nodes', async () => {
     const xml = `<observations>
 <operations>
-<operation action="create" type="fact" priority="high">
-  <id>omg/new-observation-fact</id>
+<operation type="fact" priority="high">
+  <canonical-key>facts.new_observation</canonical-key>
+  <title>New Observation Fact</title>
   <description>A new observation fact</description>
   <content>This is an important fact.</content>
 </operation>
@@ -189,16 +191,15 @@ describe('agentEnd — MOC update uses links, not tags', () => {
     // Observer returns a node linked to [[omg/moc-preferences]] and a mocUpdate for "preferences"
     const xml = `<observations>
 <operations>
-<operation action="create" type="fact" priority="medium">
-  <id>omg/pref-dark-mode</id>
+<operation type="fact" priority="medium">
+  <canonical-key>facts.pref_dark_mode</canonical-key>
+  <title>Dark Mode Preference</title>
   <description>User prefers dark mode</description>
   <content>The user has expressed a preference for dark mode in editors.</content>
   <links>[[omg/moc-preferences]]</links>
+  <moc-hints>preferences</moc-hints>
 </operation>
 </operations>
-<moc-updates>
-<moc domain="preferences" action="add" />
-</moc-updates>
 </observations>`
 
     const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
@@ -216,20 +217,17 @@ describe('agentEnd — MOC update uses links, not tags', () => {
   })
 
   it('does NOT create MOC file when node has matching tag but no link to omg/moc-{domain}', async () => {
-    // Node has tags: ["preferences"] but no links → old (broken) behavior would have matched,
-    // new (correct) behavior must NOT match and must NOT create/update the MOC.
+    // Node has tags: ["preferences"] but no links and no moc-hints → should NOT create/update the MOC.
     const xml = `<observations>
 <operations>
-<operation action="create" type="fact" priority="medium">
-  <id>omg/pref-tag-only</id>
+<operation type="fact" priority="medium">
+  <canonical-key>facts.pref_tag_only</canonical-key>
+  <title>Tag Only Preference Node</title>
   <description>Node tagged preferences but no MOC link</description>
   <content>This node has the preferences tag but does not link to the MOC.</content>
   <tags>preferences</tags>
 </operation>
 </operations>
-<moc-updates>
-<moc domain="preferences" action="add" />
-</moc-updates>
 </observations>`
 
     const config = parseConfig({ observation: { triggerMode: 'every-turn' } })
