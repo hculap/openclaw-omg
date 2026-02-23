@@ -23,7 +23,7 @@ describe('parseConfig — defaults', () => {
 
     expect(result.observer.model).toBeNull()
     expect(result.reflector.model).toBeNull()
-    expect(result.observation.messageTokenThreshold).toBe(30_000)
+    expect(result.observation.messageTokenThreshold).toBe(80_000)
     expect(result.observation.triggerMode).toBe('threshold')
     expect(result.reflection.observationTokenThreshold).toBe(40_000)
     expect(result.reflection.cronSchedule).toBe('0 3 * * *')

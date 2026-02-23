@@ -65,10 +65,8 @@ export async function runObservation(params: ObservationParams): Promise<Observe
   console.log(
     `[omg] Observer: tokens used — input: ${response.usage.inputTokens}, output: ${response.usage.outputTokens}`,
   )
-  console.error(`[omg] Observer: raw response (first 1000 chars): ${response.content.slice(0, 1000)}`)
 
   const output = parseObserverOutput(response.content)
-  console.error(`[omg] Observer: parsed operations=${output.operations.length}, nowUpdate=${output.nowUpdate ? 'yes' : 'no'}`)
 
   // Belt-and-suspenders: re-filter any operation whose node type slipped through
   // the parser's own validation (e.g. due to a parser bug). Logs at error level

@@ -189,6 +189,14 @@ async function writeNodeToDeterministicPath(
   scope: string
 ): Promise<GraphNode> {
   const { canonicalKey, type, title, description, body, priority, mocHints, linkKeys, tags } = operation
+
+  const slug = slugify(canonicalKey)
+  if (slug === '') {
+    throw new Error(
+      `Cannot write node: canonicalKey "${canonicalKey}" (type="${type}") produces an empty slug`
+    )
+  }
+
   const now = new Date().toISOString()
   const uid = computeUid(scope, type, canonicalKey)
   const nodeId = computeNodeId(type, canonicalKey)
