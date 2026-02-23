@@ -26,7 +26,7 @@ const OBSERVER_MAX_TOKENS = 4096
  *
  * Flow:
  *   1. Short-circuit if there are no unobserved messages.
- *   2. Build system and user prompts.
+ *   2. Build system and user prompts (no node index — dedup is deterministic).
  *   3. Call the LLM client (errors propagate to the caller).
  *   4. Parse the response into ObserverOutput.
  *   5. Post-validate operations: re-filter any whose node type fails `isNodeType`,
@@ -39,7 +39,7 @@ const OBSERVER_MAX_TOKENS = 4096
  * `cause` property holds the original error. Callers must catch and handle LLM errors.
  */
 export async function runObservation(params: ObservationParams): Promise<ObserverOutput> {
-  const { unobservedMessages, existingNodeIndex, nowNode, llmClient, sessionContext } = params
+  const { unobservedMessages, nowNode, llmClient, sessionContext } = params
 
   if (unobservedMessages.length === 0) {
     return { ...EMPTY_OUTPUT }
@@ -47,7 +47,6 @@ export async function runObservation(params: ObservationParams): Promise<Observe
 
   const system = buildObserverSystemPrompt()
   const user = buildObserverUserPrompt({
-    existingNodeIndex,
     nowNode,
     messages: unobservedMessages,
     sessionContext,
@@ -58,7 +57,7 @@ export async function runObservation(params: ObservationParams): Promise<Observe
     response = await llmClient.generate({ system, user, maxTokens: OBSERVER_MAX_TOKENS })
   } catch (err) {
     throw new Error(
-      `[omg] Observer: LLM call failed (messageCount: ${unobservedMessages.length}, nodeIndexSize: ${existingNodeIndex.length}): ${err instanceof Error ? err.message : String(err)}`,
+      `[omg] Observer: LLM call failed (messageCount: ${unobservedMessages.length}): ${err instanceof Error ? err.message : String(err)}`,
       { cause: err },
     )
   }
@@ -73,9 +72,10 @@ export async function runObservation(params: ObservationParams): Promise<Observe
   // the parser's own validation (e.g. due to a parser bug). Logs at error level
   // because triggering this path indicates a bug that must be investigated.
   const validatedOperations = output.operations.filter((op) => {
-    if (isNodeType(op.frontmatter.type)) return true
+    const type = op.kind === 'upsert' ? op.type : op.frontmatter.type
+    if (isNodeType(type)) return true
     console.error(
-      `[omg] Observer: post-validation rejected operation with unknown type "${String(op.frontmatter.type)}" (id: "${op.frontmatter.id}") — this indicates a parser bug`,
+      `[omg] Observer: post-validation rejected operation with unknown type "${String(type)}" — this indicates a parser bug`,
     )
     return false
   })

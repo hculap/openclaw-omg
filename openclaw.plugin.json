@@ -41,9 +41,9 @@
           },
           "triggerMode": {
             "type": "string",
-            "enum": ["threshold", "manual"],
+            "enum": ["threshold", "every-turn", "manual"],
             "default": "threshold",
-            "description": "How observation runs are triggered: 'threshold' (automatic) or 'manual' (skill invocation only)"
+            "description": "How observation runs are triggered: 'threshold' (automatic), 'every-turn' (after every agent turn), or 'manual' (skill invocation only)"
           }
         }
       },

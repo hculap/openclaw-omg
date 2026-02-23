@@ -27,6 +27,7 @@ import type { GraphNode, ObserverOutput } from '../types.js'
 // ---------------------------------------------------------------------------
 
 /** Source selection for CLI invocation. */
+/** @deprecated Use `config.bootstrap.sources` instead. Kept for CLI backward-compat. */
 export type BootstrapSource = 'memory' | 'logs' | 'sqlite' | 'all'
 
 /** Parameters for {@link runBootstrap}. */
@@ -43,7 +44,9 @@ export interface BootstrapParams {
    */
   readonly force?: boolean
   /**
-   * Which sources to include. Defaults to 'all'.
+   * Which sources to include.
+   * @deprecated Pass source overrides via `config.bootstrap.sources` instead.
+   * When set, overrides config.bootstrap.sources for that specific source.
    */
   readonly source?: BootstrapSource
 }
@@ -119,22 +122,17 @@ interface ChunkResult {
 async function processChunk(
   chunk: SourceChunk,
   omgRoot: string,
+  scope: string,
   config: OmgConfig,
   llmClient: LlmClient
 ): Promise<ChunkResult> {
-  // Phase 1: gather inputs
+  // Phase 1: gather inputs and run LLM observation
   let observerOutput: ObserverOutput
   try {
-    const allNodes = await listAllNodes(omgRoot)
-    const existingNodeIndex = allNodes.map((n) => ({
-      id: n.frontmatter.id,
-      description: n.frontmatter.description,
-    }))
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
 
     observerOutput = await runObservation({
       unobservedMessages: chunkToMessages(chunk),
-      existingNodeIndex,
       nowNode: nowContent,
       config,
       llmClient,
@@ -146,7 +144,7 @@ async function processChunk(
   }
 
   // Phase 2: write nodes
-  const writeContext = { omgRoot, sessionKey: 'bootstrap' }
+  const writeContext = { omgRoot, sessionKey: 'bootstrap', scope }
   const writeResults = await Promise.allSettled(
     observerOutput.operations.map((op) => writeObservationNode(op, writeContext))
   )
@@ -164,17 +162,20 @@ async function processChunk(
   }
 
   // Phase 3: update MOCs
+  // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
+  // Tags are semantic keywords; the MOC link is the reliable domain membership signal.
   if (observerOutput.mocUpdates.length > 0) {
     try {
       const allNodes = await listAllNodes(omgRoot)
       for (const domain of observerOutput.mocUpdates) {
-        const domainNodes = allNodes.filter((n) => n.frontmatter.tags?.includes(domain))
+        const mocId = `omg/moc-${domain}`
+        const domainNodes = allNodes.filter((n) => n.frontmatter.links?.includes(mocId))
         if (domainNodes.length > 0) {
           await regenerateMoc(domain, domainNodes, omgRoot)
         } else {
           const mocPath = resolveMocPath(omgRoot, domain)
           const domainWrittenIds = writtenNodes
-            .filter((n) => n.frontmatter.tags?.includes(domain))
+            .filter((n) => n.frontmatter.links?.includes(mocId))
             .map((n) => n.frontmatter.id)
           for (const id of domainWrittenIds) {
             await applyMocUpdate(mocPath, { action: 'add', nodeId: id })
@@ -221,8 +222,9 @@ const DEFAULT_CONCURRENCY = 3
  * Fire-and-forget safe: never throws (all errors are caught and logged).
  */
 export async function runBootstrap(params: BootstrapParams): Promise<BootstrapResult> {
-  const { workspaceDir, config, llmClient, force = false, source = 'all' } = params
+  const { workspaceDir, config, llmClient, force = false, source } = params
   const omgRoot = resolveOmgRoot(workspaceDir, config)
+  const scope = config.scope ?? workspaceDir
 
   // Check sentinel (skip if force)
   if (!force) {
@@ -232,21 +234,29 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
     }
   }
 
+  // Resolve which sources to use.
+  // config.bootstrap.sources is the canonical config; the deprecated `source`
+  // param can override individual flags for CLI invocations.
+  const srcs = config.bootstrap.sources
+  const useMemory = source === 'memory' || source === 'all' || (source === undefined && srcs.workspaceMemory)
+  const useLogs   = source === 'logs'   || source === 'all' || (source === undefined && srcs.openclawLogs)
+  const useSqlite = source === 'sqlite' || source === 'all' || (source === undefined && srcs.openclawSessions)
+
   // Gather source entries
   const [memoryEntries, logEntries, sqliteEntries] = await Promise.all([
-    source === 'memory' || source === 'all'
+    useMemory
       ? readWorkspaceMemory(workspaceDir, config.storagePath).catch((err) => {
           console.error('[omg] bootstrap: workspace memory read failed:', err)
           return []
         })
       : Promise.resolve([]),
-    source === 'logs' || source === 'all'
+    useLogs
       ? readOpenclawLogs().catch((err) => {
           console.error('[omg] bootstrap: openclaw logs read failed:', err)
           return []
         })
       : Promise.resolve([]),
-    source === 'sqlite' || source === 'all'
+    useSqlite
       ? readSqliteChunks(workspaceDir).catch((err) => {
           console.error('[omg] bootstrap: sqlite chunks read failed:', err)
           return []
@@ -266,18 +276,21 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
     `[omg] bootstrap: starting — ${[memoryEntries, logEntries, sqliteEntries].filter((e) => e.length > 0).length} sources, ${totalChunks} chunks`
   )
 
+  // Write sentinel immediately so a gateway restart does not re-trigger
+  // bootstrap from scratch while processing is already underway.
+  await writeSentinel(omgRoot, {
+    completedAt: new Date().toISOString(),
+    chunksProcessed: totalChunks,
+    chunksSucceeded: 0,
+  })
+
   if (totalChunks === 0) {
     console.log('[omg] bootstrap: no content found — sentinel written, skipping future runs')
-    await writeSentinel(omgRoot, {
-      completedAt: new Date().toISOString(),
-      chunksProcessed: 0,
-      chunksSucceeded: 0,
-    })
     return { ran: true, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
   }
 
   // Process chunks with bounded concurrency
-  const tasks = allChunks.map((chunk) => () => processChunk(chunk, omgRoot, config, llmClient))
+  const tasks = allChunks.map((chunk) => () => processChunk(chunk, omgRoot, scope, config, llmClient))
   const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
 
   // Tally results

@@ -39,7 +39,8 @@ export interface AgentEndContext {
 export async function agentEnd(event: AgentEndEvent, ctx: AgentEndContext): Promise<void> {
   const { workspaceDir, sessionKey, messages, config, llmClient } = ctx
   const omgRoot = resolveOmgRoot(workspaceDir, config)
-  const writeContext = { omgRoot, sessionKey }
+  const scope = config.scope ?? workspaceDir
+  const writeContext = { omgRoot, sessionKey, scope }
 
   const initialState = await loadSessionStateOrDefault(workspaceDir, sessionKey)
   const accumulatedState = accumulateTokens(messages, initialState)
@@ -75,7 +76,7 @@ export async function tryRunObservation(
   config: OmgConfig,
   llmClient: LlmClient,
   omgRoot: string,
-  writeContext: { readonly omgRoot: string; readonly sessionKey: string },
+  writeContext: { readonly omgRoot: string; readonly sessionKey: string; readonly scope: string },
   sessionKey: string
 ): Promise<OmgSessionState> {
   // Phase 1: gather inputs and run LLM observation
@@ -84,15 +85,9 @@ export async function tryRunObservation(
   let observerOutput!: ObserverOutput
   try {
     const unobservedMessages = Array.from(messages.slice(state.observationBoundaryMessageIndex))
-    const allNodes = await listAllNodes(omgRoot)
-    const existingNodeIndex = allNodes.map((n) => ({
-      id: n.frontmatter.id,
-      description: n.frontmatter.description,
-    }))
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
     observerOutput = await runObservation({
       unobservedMessages,
-      existingNodeIndex,
       nowNode: nowContent,
       config,
       llmClient,
@@ -129,17 +124,20 @@ export async function tryRunObservation(
 
   // Phase 3: update MOCs
   try {
-    // Apply MOC updates — read the graph once after all writes, not once per domain
+    // Apply MOC updates — read the graph once after all writes, not once per domain.
+    // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
+    // Tags are semantic keywords; the MOC link is the reliable domain membership signal.
     const updatedNodes = await listAllNodes(omgRoot)
     for (const domain of observerOutput.mocUpdates) {
-      const domainNodes = updatedNodes.filter((n) => n.frontmatter.tags?.includes(domain))
+      const mocId = `omg/moc-${domain}`
+      const domainNodes = updatedNodes.filter((n) => n.frontmatter.links?.includes(mocId))
       if (domainNodes.length > 0) {
         await regenerateMoc(domain, domainNodes, omgRoot)
       } else {
-        // No nodes tagged with this domain exist yet — add only written nodes that belong here
+        // No nodes link to this MOC yet — add only the written nodes that belong here
         const mocPath = resolveMocPath(omgRoot, domain)
         const domainWrittenIds = writtenNodes
-          .filter((n) => n.frontmatter.tags?.includes(domain))
+          .filter((n) => n.frontmatter.links?.includes(mocId))
           .map((n) => n.frontmatter.id)
         for (const id of domainWrittenIds) {
           await applyMocUpdate(mocPath, { action: 'add', nodeId: id })

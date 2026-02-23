@@ -6,6 +6,10 @@
  *
  * All writes are atomic: content is written to a temporary file first,
  * then renamed to the final path, preventing partial writes.
+ *
+ * Observation nodes use deterministic, content-addressed paths:
+ *   {omgRoot}/nodes/{type}/{slugify(canonicalKey)}.md
+ * If the file exists, the existing `created` timestamp is preserved (merge).
  */
 
 import { promises as fs } from 'node:fs'
@@ -20,7 +24,7 @@ import type {
 } from '../types.js'
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
-import { slugify } from '../utils/id.js'
+import { slugify, computeUid, computeNodeId, computeNodePath } from '../utils/id.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -81,12 +85,7 @@ async function readExistingCreated(filePath: string): Promise<string | null> {
 
 /**
  * Resolves a collision-free file path by appending -2, -3, ... suffixes
- * until an available path is found.
- *
- * @param dir - The directory to write into.
- * @param baseName - The base filename without extension (e.g. "fact-my-note-2026-02-20").
- * @param ext - The file extension including the dot (e.g. ".md").
- * @returns The first available absolute path.
+ * until an available path is found. Used by reflection nodes (date-based paths).
  */
 async function resolveAvailablePath(
   dir: string,
@@ -122,6 +121,9 @@ function frontmatterToRecord(fm: NodeFrontmatter): Record<string, unknown> {
     priority: fm.priority,
     created: fm.created,
     updated: fm.updated,
+    ...(fm.uid !== undefined && { uid: fm.uid }),
+    ...(fm.canonicalKey !== undefined && { canonicalKey: fm.canonicalKey }),
+    ...(fm.aliases !== undefined && { aliases: fm.aliases }),
     ...(fm.appliesTo !== undefined && { appliesTo: fm.appliesTo }),
     ...(fm.sources !== undefined && { sources: fm.sources }),
     ...(fm.links !== undefined && { links: fm.links }),
@@ -152,6 +154,7 @@ function buildBaseFilename(type: string, description: string): string {
 /**
  * Writes the given frontmatter and body to a collision-safe path within dir,
  * creates the directory if needed, and returns the written GraphNode.
+ * Used for reflection nodes (date-based paths).
  */
 async function writeNodeToDir(
   dir: string,
@@ -173,21 +176,91 @@ async function writeNodeToDir(
   }
 }
 
+/**
+ * Writes an upsert operation to a deterministic path:
+ *   {omgRoot}/nodes/{type}/{slugify(canonicalKey)}.md
+ *
+ * If the file already exists, the `created` timestamp is preserved (merge).
+ * The `uid` is computed from scope+type+canonicalKey and written to frontmatter.
+ */
+async function writeNodeToDeterministicPath(
+  omgRoot: string,
+  operation: Extract<ObserverOperation, { kind: 'upsert' }>,
+  scope: string
+): Promise<GraphNode> {
+  const { canonicalKey, type, title, description, body, priority, mocHints, linkKeys, tags } = operation
+
+  const slug = slugify(canonicalKey)
+  if (slug === '') {
+    throw new Error(
+      `Cannot write node: canonicalKey "${canonicalKey}" (type="${type}") produces an empty slug`
+    )
+  }
+
+  const now = new Date().toISOString()
+  const uid = computeUid(scope, type, canonicalKey)
+  const nodeId = computeNodeId(type, canonicalKey)
+  const relativePath = computeNodePath(type, canonicalKey)
+  const filePath = join(omgRoot, relativePath)
+
+  const dir = dirname(filePath)
+  await ensureDir(dir)
+
+  // Preserve created timestamp on merge (file exists)
+  const existingCreated = await readExistingCreated(filePath)
+  const created = existingCreated ?? now
+
+  // Resolve MOC links from mocHints
+  const mocLinks = (mocHints ?? []).map((hint) => `omg/moc-${hint}`)
+
+  const frontmatter: NodeFrontmatter = {
+    id: nodeId,
+    description,
+    type,
+    priority,
+    created,
+    updated: now,
+    uid,
+    canonicalKey,
+    ...(title && description !== title ? {} : {}),  // title stored in body heading, not frontmatter
+    ...(mocLinks.length > 0 || (linkKeys?.length ?? 0) > 0
+      ? { links: [...mocLinks, ...(linkKeys ?? [])] }
+      : {}),
+    ...(tags && tags.length > 0 ? { tags: [...tags] } : {}),
+  }
+
+  const content = serializeFrontmatter(frontmatterToRecord(frontmatter), body)
+  await atomicWrite(filePath, content)
+
+  return {
+    frontmatter,
+    body,
+    filePath,
+  }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Writes an observation node produced by the Observer to disk.
  *
- * All three operation kinds (create, update, supersede) produce a new file;
- * the `type` field within the frontmatter is set by the caller.
- * The `operation.kind` discriminant is not read by this function.
+ * For `upsert` operations: uses deterministic content-addressed path.
+ *   File location: {omgRoot}/nodes/{type}/{slugify(canonicalKey)}.md
+ *   If the file exists, preserves the original `created` timestamp (merge).
  *
- * File location: {omgRoot}/nodes/{type}/{type}-{slug}-{YYYY-MM-DD}[-N].md
+ * For legacy `create/update/supersede` operations: uses date-based collision-safe paths.
+ *   File location: {omgRoot}/nodes/{type}/{type}-{slug}-{YYYY-MM-DD}[-N].md
  */
 export async function writeObservationNode(
   operation: ObserverOperation,
   context: WriteContext
 ): Promise<GraphNode> {
+  if (operation.kind === 'upsert') {
+    const scope = context.scope ?? context.omgRoot
+    return writeNodeToDeterministicPath(context.omgRoot, operation, scope)
+  }
+
+  // Legacy path for create/update/supersede (backward compat)
   const { frontmatter, body } = operation
   const dir = join(context.omgRoot, 'nodes', frontmatter.type)
   return writeNodeToDir(dir, frontmatter, body)

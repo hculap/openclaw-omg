@@ -135,29 +135,72 @@ describe('readOpenclawLogs', () => {
 // ---------------------------------------------------------------------------
 
 describe('readSqliteChunks', () => {
-  it('returns empty array when database file does not exist', async () => {
+  it('returns empty array when memory directory does not exist', async () => {
+    vol.fromJSON({})
+    const result = await readSqliteChunks('/workspace/myproject')
+    expect(result).toEqual([])
+  })
+
+  it('returns empty array when no .sqlite files exist in memory dir', async () => {
     vol.fromJSON({ '/home/user/.openclaw/memory/.keep': '' })
     const result = await readSqliteChunks('/workspace/myproject')
     expect(result).toEqual([])
   })
 
-  it('returns empty array and warns when better-sqlite3 is unavailable', async () => {
-    // Create the db file so access check passes
+  it('filters sqlite files to agents matching workspaceDir when config is present', async () => {
+    const config = {
+      agents: {
+        defaults: { workspace: '/workspace/secretary' },
+        list: [
+          { id: 'pati', workspace: '/workspace/secretary' },
+          { id: 'coding', workspace: '/workspace/techlead' },
+          { id: 'whatsapp-triage' }, // inherits default → secretary
+        ],
+      },
+    }
     vol.fromJSON({
-      '/home/user/.openclaw/memory/myproject.sqlite': 'dummy',
+      '/home/user/.openclaw/openclaw.json': JSON.stringify(config),
+      '/home/user/.openclaw/memory/pati.sqlite': 'dummy',
+      '/home/user/.openclaw/memory/coding.sqlite': 'dummy',
+      '/home/user/.openclaw/memory/whatsapp-triage.sqlite': 'dummy',
     })
 
-    // Mock the dynamic import to simulate unavailability
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    // We can't easily mock dynamic imports in vitest without additional setup,
-    // but we can verify graceful degradation by checking the return type
-    // The actual sqlite test is more of an integration test
-    warnSpy.mockRestore()
-
-    // Since better-sqlite3 is not installed in test env, it will fall through gracefully
-    const result = await readSqliteChunks('/workspace/myproject')
-    // Either returns [] (file not found) or [] with warn (module not found)
+    // better-sqlite3 not available in test env — function returns [] but
+    // critically it should attempt to open only pati + whatsapp-triage (not coding)
+    const result = await readSqliteChunks('/workspace/secretary')
     expect(Array.isArray(result)).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('falls back to all sqlite files when openclaw.json is missing', async () => {
+    vol.fromJSON({
+      '/home/user/.openclaw/memory/pati.sqlite': 'dummy',
+      '/home/user/.openclaw/memory/coding.sqlite': 'dummy',
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await readSqliteChunks('/workspace/myproject')
+    expect(Array.isArray(result)).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('returns empty array and warns when better-sqlite3 is unavailable', async () => {
+    vol.fromJSON({
+      '/home/user/.openclaw/memory/pati.sqlite': 'dummy',
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const result = await readSqliteChunks('/workspace/myproject')
+    expect(Array.isArray(result)).toBe(true)
+    warnSpy.mockRestore()
+  })
+
+  it('ignores .tmp files in memory directory', async () => {
+    vol.fromJSON({
+      '/home/user/.openclaw/memory/pati.sqlite.tmp-abc123': 'dummy',
+    })
+    const result = await readSqliteChunks('/workspace/myproject')
+    expect(result).toEqual([])
   })
 })

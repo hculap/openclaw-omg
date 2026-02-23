@@ -25,10 +25,35 @@ import type {
 
 const OMG_ROOT = '/test/omg'
 const SESSION_KEY = 'session-abc123'
+const SCOPE = '/workspace/proj'
 
 const context: WriteContext = {
   omgRoot: OMG_ROOT,
   sessionKey: SESSION_KEY,
+  scope: SCOPE,
+}
+
+function makeUpsertOperation(overrides: Partial<{
+  canonicalKey: string
+  type: ObserverOperation extends { kind: 'upsert' } ? ObserverOperation['type'] : never
+  title: string
+  description: string
+  body: string
+  priority: 'high' | 'medium' | 'low'
+  mocHints: string[]
+  tags: string[]
+  linkKeys: string[]
+}> = {}): ObserverOperation {
+  return {
+    kind: 'upsert',
+    canonicalKey: 'preferences.editor_theme',
+    type: 'preference',
+    title: 'Editor Theme Preference',
+    description: 'User prefers dark mode in all editors',
+    body: 'The user explicitly stated they prefer dark mode.',
+    priority: 'high',
+    ...overrides,
+  } as ObserverOperation
 }
 
 function makeBaseFrontmatter(overrides: Partial<NodeFrontmatter> = {}): NodeFrontmatter {
@@ -47,322 +72,186 @@ beforeEach(() => {
   vol.reset()
 })
 
-// ─── writeObservationNode ────────────────────────────────────────────────────
+// ─── writeObservationNode — upsert ────────────────────────────────────────────
 
-describe('writeObservationNode', () => {
-  describe('create operation', () => {
-    it('writes a file at the correct path for a create operation', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter(),
-        body: 'The user expressed a preference for dark mode.',
-      }
+describe('writeObservationNode — upsert (deterministic paths)', () => {
+  it('writes to a deterministic path nodes/{type}/{slug}.md', async () => {
+    const node = await writeObservationNode(makeUpsertOperation(), context)
 
-      const node = await writeObservationNode(operation, context)
-
-      // File should be under nodes/{type}/
-      expect(node.filePath).toMatch(new RegExp(`^${OMG_ROOT}/nodes/fact/`))
-      expect(node.filePath).toMatch(/\.md$/)
-
-      // File should exist in memfs
-      const exists = memfs.existsSync(node.filePath)
-      expect(exists).toBe(true)
-    })
-
-    it('file name follows {type}-{slug}-{YYYY-MM-DD}.md pattern', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter({ description: 'User prefers dark mode' }),
-        body: 'Body content.',
-      }
-
-      const node = await writeObservationNode(operation, context)
-      const filename = node.filePath.split('/').pop()!
-
-      // Should match fact-user-prefers-dark-mode-YYYY-MM-DD.md
-      expect(filename).toMatch(/^fact-user-prefers-dark-mode-\d{4}-\d{2}-\d{2}\.md$/)
-    })
-
-    it('writes correct frontmatter and body content to file', async () => {
-      const fm = makeBaseFrontmatter()
-      const body = 'The user expressed a preference for dark mode.'
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: fm,
-        body,
-      }
-
-      const node = await writeObservationNode(operation, context)
-
-      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
-      const parsed = parseFrontmatter(raw)
-
-      expect(parsed.frontmatter['id']).toBe(fm.id)
-      expect(parsed.frontmatter['type']).toBe('fact')
-      expect(parsed.frontmatter['description']).toBe(fm.description)
-      expect(parsed.body).toBe(body)
-    })
-
-    it('returns a GraphNode with matching frontmatter and body', async () => {
-      const fm = makeBaseFrontmatter()
-      const body = 'Node body content.'
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: fm,
-        body,
-      }
-
-      const node = await writeObservationNode(operation, context)
-
-      expect(node.frontmatter.id).toBe(fm.id)
-      expect(node.frontmatter.type).toBe('fact')
-      expect(node.body).toBe(body)
-    })
-
-    it('creates the directory if it does not exist', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter({ type: 'decision', id: 'omg/decision/use-typescript' }),
-        body: 'We decided to use TypeScript.',
-      }
-
-      // Directory should not exist yet
-      expect(memfs.existsSync(`${OMG_ROOT}/nodes/decision`)).toBe(false)
-
-      const node = await writeObservationNode(operation, context)
-
-      expect(memfs.existsSync(`${OMG_ROOT}/nodes/decision`)).toBe(true)
-      expect(memfs.existsSync(node.filePath)).toBe(true)
-    })
+    expect(node.filePath).toBe(`${OMG_ROOT}/nodes/preference/preferences-editor-theme.md`)
+    expect(memfs.existsSync(node.filePath)).toBe(true)
   })
 
-  describe('collision handling', () => {
-    it('appends -2 suffix when file already exists', async () => {
-      const fm = makeBaseFrontmatter({ description: 'User prefers dark mode' })
-      const body = 'Body content.'
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: fm,
-        body,
-      }
+  it('same canonicalKey always produces same file path (idempotent)', async () => {
+    const op = makeUpsertOperation()
+    const node1 = await writeObservationNode(op, context)
 
-      // Write first file
-      const node1 = await writeObservationNode(operation, context)
-      const filename1 = node1.filePath.split('/').pop()!
+    // Re-write same key
+    const node2 = await writeObservationNode(op, context)
 
-      // Write second file with same description
-      const node2 = await writeObservationNode(operation, context)
-      const filename2 = node2.filePath.split('/').pop()!
-
-      // First file should be without suffix
-      expect(filename1).toMatch(/^fact-user-prefers-dark-mode-\d{4}-\d{2}-\d{2}\.md$/)
-      // Second file should have -2 suffix
-      expect(filename2).toMatch(/^fact-user-prefers-dark-mode-\d{4}-\d{2}-\d{2}-2\.md$/)
-
-      // Both files should exist
-      expect(memfs.existsSync(node1.filePath)).toBe(true)
-      expect(memfs.existsSync(node2.filePath)).toBe(true)
-    })
-
-    it('appends -3 suffix when both base and -2 already exist', async () => {
-      const fm = makeBaseFrontmatter({ description: 'User prefers dark mode' })
-      const body = 'Body.'
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: fm,
-        body,
-      }
-
-      const node1 = await writeObservationNode(operation, context)
-      const node2 = await writeObservationNode(operation, context)
-      const node3 = await writeObservationNode(operation, context)
-
-      const filename3 = node3.filePath.split('/').pop()!
-      expect(filename3).toMatch(/^fact-user-prefers-dark-mode-\d{4}-\d{2}-\d{2}-3\.md$/)
-
-      expect(memfs.existsSync(node1.filePath)).toBe(true)
-      expect(memfs.existsSync(node2.filePath)).toBe(true)
-      expect(memfs.existsSync(node3.filePath)).toBe(true)
-    })
+    expect(node1.filePath).toBe(node2.filePath)
+    // Only one file should exist (not two)
+    const dir = `${OMG_ROOT}/nodes/preference`
+    const files = memfs.readdirSync(dir) as string[]
+    expect(files).toHaveLength(1)
   })
 
-  describe('update operation', () => {
-    it('writes a new file for an update operation', async () => {
-      const operation: ObserverOperation = {
-        kind: 'update',
-        targetId: 'omg/fact/old-node',
-        frontmatter: makeBaseFrontmatter({
-          description: 'Updated preference note',
-          type: 'preference',
-          id: 'omg/preference/updated-preference-note',
-        }),
-        body: 'Updated body content.',
-      }
+  it('preserves original created timestamp on second write (merge behavior)', async () => {
+    const op = makeUpsertOperation()
+    const node1 = await writeObservationNode(op, context)
+    const raw1 = memfs.readFileSync(node1.filePath, 'utf-8') as string
+    const fm1 = parseFrontmatter(raw1)
+    const originalCreated = fm1.frontmatter['created'] as string
 
-      const node = await writeObservationNode(operation, context)
+    // Write again (merge/update)
+    const op2 = makeUpsertOperation({ body: 'Updated body content.' })
+    const node2 = await writeObservationNode(op2, context)
+    const raw2 = memfs.readFileSync(node2.filePath, 'utf-8') as string
+    const fm2 = parseFrontmatter(raw2)
 
-      expect(node.filePath).toMatch(new RegExp(`^${OMG_ROOT}/nodes/preference/`))
-      expect(memfs.existsSync(node.filePath)).toBe(true)
-      expect(node.body).toBe('Updated body content.')
-    })
+    expect(fm2.frontmatter['created']).toBe(originalCreated)
+    expect(fm2.body).toBe('Updated body content.')
   })
 
-  describe('supersede operation', () => {
-    it('writes a new file for a supersede operation', async () => {
-      const operation: ObserverOperation = {
-        kind: 'supersede',
-        targetId: 'omg/fact/old-fact',
-        frontmatter: makeBaseFrontmatter({
-          description: 'New superseding fact',
-          id: 'omg/fact/new-superseding-fact',
-        }),
-        body: 'New superseding body.',
-      }
+  it('writes uid to frontmatter (12-char hex)', async () => {
+    const node = await writeObservationNode(makeUpsertOperation(), context)
+    const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+    const fm = parseFrontmatter(raw)
 
-      const node = await writeObservationNode(operation, context)
-
-      expect(node.filePath).toMatch(new RegExp(`^${OMG_ROOT}/nodes/fact/`))
-      expect(memfs.existsSync(node.filePath)).toBe(true)
-    })
+    expect(typeof fm.frontmatter['uid']).toBe('string')
+    expect((fm.frontmatter['uid'] as string).length).toBe(12)
+    expect(fm.frontmatter['uid']).toMatch(/^[a-f0-9]{12}$/)
   })
 
-  describe('atomic write', () => {
-    it('leaves no temporary files after successful write', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter(),
-        body: 'Body content.',
-      }
+  it('writes canonicalKey to frontmatter', async () => {
+    const node = await writeObservationNode(makeUpsertOperation({ canonicalKey: 'preferences.editor_theme' }), context)
+    const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+    const fm = parseFrontmatter(raw)
 
-      await writeObservationNode(operation, context)
-
-      const dir = `${OMG_ROOT}/nodes/fact`
-      const files = memfs.readdirSync(dir) as string[]
-      const tmpFiles = files.filter((f) => f.startsWith('.tmp-'))
-      expect(tmpFiles).toHaveLength(0)
-    })
-
-    it('rejects with an error message when the underlying write fails', async () => {
-      const writeError = Object.assign(new Error('ENOSPC: no space left on device'), {
-        code: 'ENOSPC',
-      })
-      const writeSpy = vi.spyOn(memfs.promises, 'writeFile').mockRejectedValueOnce(writeError)
-
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter(),
-        body: 'Body.',
-      }
-
-      await expect(writeObservationNode(operation, context)).rejects.toThrow('Atomic write failed')
-
-      writeSpy.mockRestore()
-    })
+    expect(fm.frontmatter['canonicalKey']).toBe('preferences.editor_theme')
   })
 
-  describe('ensureDir', () => {
-    it('rejects with an error message when directory creation fails', async () => {
-      const mkdirError = Object.assign(new Error('EPERM: operation not permitted'), {
-        code: 'EPERM',
-      })
-      const mkdirSpy = vi.spyOn(memfs.promises, 'mkdir').mockRejectedValueOnce(mkdirError)
+  it('writes id in omg/{type}/{slug} format', async () => {
+    const node = await writeObservationNode(makeUpsertOperation(), context)
+    const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+    const fm = parseFrontmatter(raw)
 
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter(),
-        body: 'Body.',
-      }
-
-      await expect(writeObservationNode(operation, context)).rejects.toThrow(
-        'Failed to create directory'
-      )
-
-      mkdirSpy.mockRestore()
-    })
+    expect(fm.frontmatter['id']).toBe('omg/preference/preferences-editor-theme')
   })
 
-  describe('buildBaseFilename', () => {
-    it('rejects when description slugifies to an empty string', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter({ description: '!!! ???' }),
-        body: 'Body.',
-      }
+  it('uid is deterministic — same scope+type+canonicalKey always produce same uid', async () => {
+    const op = makeUpsertOperation()
+    const node1 = await writeObservationNode(op, context)
+    const raw1 = memfs.readFileSync(node1.filePath, 'utf-8') as string
+    const fm1 = parseFrontmatter(raw1)
+    const uid1 = fm1.frontmatter['uid']
 
-      await expect(writeObservationNode(operation, context)).rejects.toThrow('empty slug')
-    })
+    // Second write (merge)
+    const node2 = await writeObservationNode(op, context)
+    const raw2 = memfs.readFileSync(node2.filePath, 'utf-8') as string
+    const fm2 = parseFrontmatter(raw2)
+    const uid2 = fm2.frontmatter['uid']
+
+    expect(uid1).toBe(uid2)
   })
 
-  describe('frontmatterToRecord optional fields', () => {
-    it('includes all optional fields when present in frontmatter', async () => {
-      const fm = makeBaseFrontmatter({
-        links: ['omg/fact/other-node'],
-        tags: ['tag1', 'tag2'],
-        supersedes: ['omg/fact/old-node'],
-        compressionLevel: 2 as const,
-      })
-      const operation: ObserverOperation = { kind: 'create', frontmatter: fm, body: 'Body.' }
+  it('creates the directory if it does not exist', async () => {
+    expect(memfs.existsSync(`${OMG_ROOT}/nodes/decision`)).toBe(false)
 
-      const node = await writeObservationNode(operation, context)
+    await writeObservationNode(makeUpsertOperation({ canonicalKey: 'decisions.use_typescript', type: 'decision' as never }), context)
 
-      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
-      const parsed = parseFrontmatter(raw)
+    expect(memfs.existsSync(`${OMG_ROOT}/nodes/decision`)).toBe(true)
+  })
 
-      expect(parsed.frontmatter['links']).toEqual(['omg/fact/other-node'])
-      expect(parsed.frontmatter['tags']).toEqual(['tag1', 'tag2'])
-      expect(parsed.frontmatter['supersedes']).toEqual(['omg/fact/old-node'])
-      expect(parsed.frontmatter['compressionLevel']).toBe(2)
+  it('writes moc links from mocHints when present', async () => {
+    const op = makeUpsertOperation({ mocHints: ['preferences', 'tools'] })
+    const node = await writeObservationNode(op, context)
+    const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+    const fm = parseFrontmatter(raw)
+
+    const links = fm.frontmatter['links'] as string[]
+    expect(links).toContain('omg/moc-preferences')
+    expect(links).toContain('omg/moc-tools')
+  })
+
+  it('writes tags to frontmatter when present', async () => {
+    const op = makeUpsertOperation({ tags: ['editor', 'appearance'] })
+    const node = await writeObservationNode(op, context)
+    const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+    const fm = parseFrontmatter(raw)
+
+    expect(fm.frontmatter['tags']).toEqual(['editor', 'appearance'])
+  })
+
+  it('leaves no temporary files after successful write', async () => {
+    await writeObservationNode(makeUpsertOperation(), context)
+
+    const dir = `${OMG_ROOT}/nodes/preference`
+    const files = memfs.readdirSync(dir) as string[]
+    const tmpFiles = files.filter((f) => f.startsWith('.tmp-'))
+    expect(tmpFiles).toHaveLength(0)
+  })
+
+  it('returns a GraphNode with matching data', async () => {
+    const op = makeUpsertOperation()
+    const node = await writeObservationNode(op, context)
+
+    expect(node.frontmatter.type).toBe('preference')
+    expect(node.frontmatter.canonicalKey).toBe('preferences.editor_theme')
+    expect(node.body).toBe('The user explicitly stated they prefer dark mode.')
+    expect(node.filePath).toBe(`${OMG_ROOT}/nodes/preference/preferences-editor-theme.md`)
+  })
+
+  it('different canonicalKeys write to different files', async () => {
+    const op1 = makeUpsertOperation({ canonicalKey: 'preferences.editor_theme' })
+    const op2 = makeUpsertOperation({ canonicalKey: 'preferences.font_size' })
+
+    const node1 = await writeObservationNode(op1, context)
+    const node2 = await writeObservationNode(op2, context)
+
+    expect(node1.filePath).not.toBe(node2.filePath)
+    expect(memfs.existsSync(node1.filePath)).toBe(true)
+    expect(memfs.existsSync(node2.filePath)).toBe(true)
+  })
+
+  it('uses omgRoot as scope fallback when context.scope is undefined', async () => {
+    const ctxNoScope: WriteContext = { omgRoot: OMG_ROOT, sessionKey: SESSION_KEY }
+    const node = await writeObservationNode(makeUpsertOperation(), ctxNoScope)
+
+    // Should still write to deterministic path
+    expect(node.filePath).toBe(`${OMG_ROOT}/nodes/preference/preferences-editor-theme.md`)
+    // uid should be computed with omgRoot as scope
+    const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
+    const fm = parseFrontmatter(raw)
+    expect(fm.frontmatter['uid']).toMatch(/^[a-f0-9]{12}$/)
+  })
+})
+
+// ─── writeObservationNode — atomic write ─────────────────────────────────────
+
+describe('writeObservationNode — atomic write', () => {
+  it('rejects with an error message when the underlying write fails', async () => {
+    const writeError = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
     })
+    const writeSpy = vi.spyOn(memfs.promises, 'writeFile').mockRejectedValueOnce(writeError)
 
-    it('omits optional fields when absent from frontmatter', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter(),
-        body: 'Body.',
-      }
+    await expect(writeObservationNode(makeUpsertOperation(), context)).rejects.toThrow('Atomic write failed')
 
-      const node = await writeObservationNode(operation, context)
+    writeSpy.mockRestore()
+  })
 
-      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
-      const parsed = parseFrontmatter(raw)
-
-      expect(parsed.frontmatter['links']).toBeUndefined()
-      expect(parsed.frontmatter['tags']).toBeUndefined()
-      expect(parsed.frontmatter['supersedes']).toBeUndefined()
-      expect(parsed.frontmatter['compressionLevel']).toBeUndefined()
+  it('rejects with a directory creation error message when mkdir fails', async () => {
+    const mkdirError = Object.assign(new Error('EPERM: operation not permitted'), {
+      code: 'EPERM',
     })
+    const mkdirSpy = vi.spyOn(memfs.promises, 'mkdir').mockRejectedValueOnce(mkdirError)
 
-    it('includes appliesTo and sources when present in frontmatter', async () => {
-      const fm = makeBaseFrontmatter({
-        appliesTo: { sessionScope: 'chat-abc' },
-        sources: [{ sessionKey: 'chat-abc', kind: 'user', timestamp: 1234567890 }],
-      })
-      const operation: ObserverOperation = { kind: 'create', frontmatter: fm, body: 'Body.' }
+    await expect(writeObservationNode(makeUpsertOperation(), context)).rejects.toThrow(
+      'Failed to create directory'
+    )
 
-      const node = await writeObservationNode(operation, context)
-
-      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
-      const parsed = parseFrontmatter(raw)
-
-      expect(parsed.frontmatter['appliesTo']).toEqual({ sessionScope: 'chat-abc' })
-      expect(Array.isArray(parsed.frontmatter['sources'])).toBe(true)
-    })
-
-    it('omits appliesTo and sources when absent from frontmatter', async () => {
-      const operation: ObserverOperation = {
-        kind: 'create',
-        frontmatter: makeBaseFrontmatter(),
-        body: 'Body.',
-      }
-
-      const node = await writeObservationNode(operation, context)
-
-      const raw = memfs.readFileSync(node.filePath, 'utf-8') as string
-      const parsed = parseFrontmatter(raw)
-
-      expect(parsed.frontmatter['appliesTo']).toBeUndefined()
-      expect(parsed.frontmatter['sources']).toBeUndefined()
-    })
+    mkdirSpy.mockRestore()
   })
 })
 
@@ -475,7 +364,7 @@ describe('writeNowNode', () => {
 
   it('creates frontmatter with type=now, id=omg/now, priority=high', async () => {
     const nowUpdate = 'Working on phase 2 implementation.'
-    const node = await writeNowNode(nowUpdate, [], context)
+    await writeNowNode(nowUpdate, [], context)
 
     const raw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
     const parsed = parseFrontmatter(raw)
@@ -487,7 +376,7 @@ describe('writeNowNode', () => {
 
   it('writes the nowUpdate string as the body', async () => {
     const nowUpdate = 'Current focus: implementing node-writer.'
-    const node = await writeNowNode(nowUpdate, [], context)
+    await writeNowNode(nowUpdate, [], context)
 
     const raw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
     const parsed = parseFrontmatter(raw)
@@ -504,20 +393,16 @@ describe('writeNowNode', () => {
     const created = parsed.frontmatter['created'] as string
     const updated = parsed.frontmatter['updated'] as string
 
-    // On first write (no existing file), both are set to the same 'now' instant
     expect(created).toBe(updated)
-    // Valid ISO 8601 — round-tripping through Date preserves the string
     expect(new Date(created).toISOString()).toBe(created)
   })
 
   it('preserves the original created timestamp on subsequent writes', async () => {
-    // First write — establishes the created timestamp
     await writeNowNode('First update.', [], context)
     const firstRaw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
     const firstParsed = parseFrontmatter(firstRaw)
     const originalCreated = firstParsed.frontmatter['created'] as string
 
-    // Second write — created must be preserved, updated must be >= created
     await writeNowNode('Second update.', [], context)
     const secondRaw = memfs.readFileSync(`${OMG_ROOT}/now.md`, 'utf-8') as string
     const secondParsed = parseFrontmatter(secondRaw)
@@ -566,7 +451,6 @@ describe('writeNowNode', () => {
   it('leaves no temporary files after successful write', async () => {
     await writeNowNode('Update content.', [], context)
 
-    // now.md should exist, but no .tmp- files at root
     const files = memfs.readdirSync(OMG_ROOT) as string[]
     const tmpFiles = files.filter((f) => f.startsWith('.tmp-'))
     expect(tmpFiles).toHaveLength(0)

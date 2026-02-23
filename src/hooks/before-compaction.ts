@@ -36,7 +36,8 @@ export async function beforeCompaction(
 ): Promise<void> {
   const { workspaceDir, sessionKey, messages, config, llmClient } = ctx
   const omgRoot = resolveOmgRoot(workspaceDir, config)
-  const writeContext = { omgRoot, sessionKey }
+  const scope = config.scope ?? workspaceDir
+  const writeContext = { omgRoot, sessionKey, scope }
 
   let state = getDefaultSessionState()
   try {

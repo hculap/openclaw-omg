@@ -197,16 +197,13 @@ describe('runBootstrap — chunk processing', () => {
     vi.mocked(runObservation).mockResolvedValueOnce({
       operations: [
         {
-          kind: 'create',
-          frontmatter: {
-            id: 'omg/fact/test',
-            description: 'test',
-            type: 'fact',
-            priority: 'low',
-            created: '2026-01-01T00:00:00Z',
-            updated: '2026-01-01T00:00:00Z',
-          },
+          kind: 'upsert',
+          canonicalKey: 'facts.test',
+          type: 'fact',
+          title: 'Test Fact',
+          description: 'test',
           body: 'test body',
+          priority: 'low',
         },
       ],
       nowUpdate: null,

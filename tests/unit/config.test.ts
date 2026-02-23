@@ -23,7 +23,7 @@ describe('parseConfig — defaults', () => {
 
     expect(result.observer.model).toBeNull()
     expect(result.reflector.model).toBeNull()
-    expect(result.observation.messageTokenThreshold).toBe(30_000)
+    expect(result.observation.messageTokenThreshold).toBe(80_000)
     expect(result.observation.triggerMode).toBe('threshold')
     expect(result.reflection.observationTokenThreshold).toBe(40_000)
     expect(result.reflection.cronSchedule).toBe('0 3 * * *')
@@ -705,5 +705,25 @@ describe('OmgConfig type', () => {
     expect(_maxTokens).toBeGreaterThan(0)
     expect(_pinned).toEqual([])
     expect(_storagePath).toBeTruthy()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// scope field (Phase 1c)
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — scope field', () => {
+  it('scope is undefined by default', () => {
+    const result = parseConfig({})
+    expect(result.scope).toBeUndefined()
+  })
+
+  it('accepts a non-empty scope string', () => {
+    const result = parseConfig({ scope: '/workspace/proj' })
+    expect(result.scope).toBe('/workspace/proj')
+  })
+
+  it('rejects an empty scope string', () => {
+    expect(() => parseConfig({ scope: '' })).toThrow(ConfigValidationError)
   })
 })

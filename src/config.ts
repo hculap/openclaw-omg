@@ -104,6 +104,15 @@ const observerSchema = z
   .object({
     /** LLM model to use. null = inherit from OpenClaw's active agent config. */
     model: modelField,
+    /**
+     * Anthropic API key for direct API access (bypass gateway routing).
+     * Use this when the gateway routes to a model that is rate-limited or
+     * when you want to ensure bootstrap uses Anthropic directly.
+     * Accepts `sk-ant-...` format keys only (not OAuth tokens).
+     *
+     * Example: "sk-ant-api03-..."
+     */
+    apiKey: z.string().min(1).optional(),
   })
   .strip()
 
@@ -133,7 +142,7 @@ const observationSchema = z
       .number()
       .int()
       .positive('messageTokenThreshold must be a positive integer')
-      .default(30_000),
+      .default(80_000),
     /**
      * How observation runs are triggered:
      * - "threshold" — automatically when messageTokenThreshold is reached (default)
@@ -221,6 +230,49 @@ const identitySchema = z
   .default({ mode: 'session-key' })
 
 // ---------------------------------------------------------------------------
+// Bootstrap schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls which data sources are used during the cold-start bootstrap pass.
+ * Bootstrap ingests historical data once (sentinel guards re-runs) to populate
+ * the graph before the agent has accumulated real observations.
+ */
+const bootstrapSourcesSchema = z
+  .object({
+    /**
+     * Read markdown files from `{workspaceDir}/memory/` (excluding the OMG
+     * storage path). Good for agent workspaces that maintain curated memory files.
+     * Silently skipped if the directory does not exist.
+     * @default true
+     */
+    workspaceMemory: z.boolean().default(true),
+    /**
+     * Read session-memory chunks from `~/.openclaw/memory/{agentId}.sqlite`.
+     * These are the curated session summaries OpenClaw agents write between turns.
+     * Requires `better-sqlite3` to be installed (optional dependency).
+     * Silently skipped if the package is unavailable or no matching databases exist.
+     * @default true
+     */
+    openclawSessions: z.boolean().default(true),
+    /**
+     * Read raw application log files from `~/.openclaw/logs/`.
+     * Almost always noise (stack traces, heartbeat lines, debug output) — disabled
+     * by default. Enable only for specialised diagnostic bootstraps.
+     * @default false
+     */
+    openclawLogs: z.boolean().default(false),
+  })
+  .strip()
+
+const bootstrapSchema = z
+  .object({
+    /** Which data sources to ingest during the cold-start bootstrap pass. */
+    sources: bootstrapSourcesSchema.default({}),
+  })
+  .strip()
+
+// ---------------------------------------------------------------------------
 // Root config schema
 // ---------------------------------------------------------------------------
 
@@ -239,6 +291,7 @@ export const omgConfigSchema = z
     reflection: reflectionSchema.default({}),
     injection: injectionSchema.default({}),
     identity: identitySchema,
+    bootstrap: bootstrapSchema.default({}),
     /**
      * Absolute path to the workspace root directory.
      * When provided, overrides the value supplied by the OpenClaw host API.
@@ -250,6 +303,18 @@ export const omgConfigSchema = z
     workspaceDir: z
       .string()
       .min(1, 'workspaceDir must not be empty')
+      .optional(),
+
+    /**
+     * Scope string used when computing deterministic node UIDs.
+     * Enables per-workspace identity isolation when multiple workspaces share a single gateway.
+     * Defaults to the resolved workspace directory path at runtime when not provided.
+     *
+     * Example: "/Users/alice/Projects/MyProject"
+     */
+    scope: z
+      .string()
+      .min(1, 'scope must not be empty')
       .optional(),
 
     /**
@@ -293,12 +358,13 @@ export const omgConfigSchema = z
  * detect typos in nested config objects.
  */
 const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
-  observer: new Set(Object.keys(observerSchema.shape)),
+  observer: new Set(Object.keys(observerSchema.shape)), // includes: model, apiKey
   reflector: new Set(Object.keys(reflectorSchema.shape)),
   observation: new Set(Object.keys(observationSchema.shape)),
   reflection: new Set(Object.keys(reflectionSchema.shape)),
   injection: new Set(Object.keys(injectionSchema.shape)),
   identity: new Set(['mode']),
+  bootstrap: new Set(Object.keys(bootstrapSchema.shape)), // includes: sources
 }
 
 /**

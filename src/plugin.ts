@@ -13,8 +13,13 @@
  * for OpenClaw's auto-discovery, and a default export for backward compatibility.
  */
 
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { parseConfig, omgConfigSchema } from './config.js'
 import { createLlmClient } from './llm/client.js'
+import { createGatewayCompletionsGenerateFn } from './llm/gateway-completions.js'
+import { createDirectAnthropicGenerateFn } from './llm/direct-anthropic.js'
+import { createDirectOpenAiGenerateFn } from './llm/direct-openai.js'
 import { agentEnd } from './hooks/agent-end.js'
 import { beforeAgentStart } from './hooks/before-agent-start.js'
 import { beforeCompaction } from './hooks/before-compaction.js'
@@ -34,8 +39,10 @@ import type { BootstrapSource } from './bootstrap/bootstrap.js'
 
 /** Context provided per hook call for session-scoped hooks. */
 export interface PluginHookContext {
-  /** Stable identifier for the current conversation session. */
-  readonly sessionKey: string
+  /** Agent identifier (e.g. "main", "email-triage"). May be undefined. */
+  readonly agentId?: string
+  /** Stable identifier for the current conversation session. May be undefined for CLI sessions. */
+  readonly sessionKey?: string
   /**
    * Conversation messages accumulated so far in this session.
    * Only present on `agent_end` and `before_compaction` hooks.
@@ -84,7 +91,7 @@ export interface PluginApi {
     hook: 'agent_end',
     handler: (
       event: { success: boolean },
-      ctx: Required<PluginHookContext>
+      ctx: PluginHookContext
     ) => Promise<void>
   ): void
 
@@ -93,7 +100,7 @@ export interface PluginApi {
     hook: 'before_compaction',
     handler: (
       event: Record<string, never>,
-      ctx: Required<PluginHookContext>
+      ctx: PluginHookContext
     ) => Promise<void>
   ): void
 
@@ -150,6 +157,312 @@ export interface OpenClawPluginDefinition {
 }
 
 // ---------------------------------------------------------------------------
+// Message normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Content block as used by the Anthropic Messages API.
+ * Gateway messages may use this format instead of plain strings.
+ */
+interface ContentBlock {
+  readonly type: string
+  readonly text?: string
+}
+
+/**
+ * Normalizes raw gateway messages into the OMG `Message` format.
+ *
+ * The OpenClaw gateway passes messages in Anthropic API format where `content`
+ * is an array of content blocks (`[{type: "text", text: "..."}]`), but OMG's
+ * `Message` type expects `content` to be a plain string.
+ *
+ * This function handles both formats gracefully:
+ *   - Plain string content → passed through unchanged
+ *   - Array of content blocks → text blocks are extracted and joined
+ *   - Any other shape → converted to string via JSON.stringify
+ */
+function normalizeMessages(raw: readonly unknown[]): readonly Message[] {
+  return raw.map((msg) => {
+    const m = msg as { role?: string; content?: unknown }
+    const role = m.role === 'assistant' ? 'assistant' : 'user'
+    const content = normalizeContent(m.content)
+    return { role, content } as Message
+  })
+}
+
+function normalizeContent(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return (content as readonly ContentBlock[])
+      .filter((block) => block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text!)
+      .join('\n')
+  }
+  return typeof content === 'undefined' ? '' : JSON.stringify(content)
+}
+
+// ---------------------------------------------------------------------------
+// LLM generation resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the Anthropic API key from gateway auth profiles on disk.
+ * Reads `~/.clawdbot/agents/{agentId}/agent/auth-profiles.json` and returns
+ * the token from the first `anthropic:*` profile found.
+ */
+function resolveAnthropicKeyFromAuthProfiles(): string | undefined {
+  const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? ''
+  const agentsDir = join(home, '.clawdbot', 'agents')
+
+  try {
+    const agentDirs = readdirSync(agentsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+
+    for (const agentDir of agentDirs) {
+      const profilesPath = join(agentsDir, agentDir, 'agent', 'auth-profiles.json')
+      try {
+        const data = JSON.parse(readFileSync(profilesPath, 'utf-8'))
+        const profiles = data?.profiles as Record<string, { token?: string; type?: string; provider?: string }> | undefined
+        if (!profiles) continue
+        for (const [key, profile] of Object.entries(profiles)) {
+          if (key.startsWith('anthropic:') && profile.token) {
+            // Skip OAuth tokens — they are not supported by the direct Anthropic API
+            if (profile.token.startsWith('sk-ant-oat')) continue
+            return profile.token
+          }
+        }
+      } catch {
+        // Skip unreadable profile files
+      }
+    }
+  } catch {
+    // agentsDir doesn't exist
+  }
+
+  return undefined
+}
+
+/**
+ * Resolves the gateway port from config or environment, defaulting to 18789.
+ */
+function resolveGatewayPort(rawConfig: Record<string, unknown>): number {
+  const gatewayConfig = rawConfig?.['gateway'] as Record<string, unknown> | undefined
+  const configPort = gatewayConfig?.['port'] as number | undefined
+  const envPort = process.env['CLAWDBOT_GATEWAY_PORT']
+  return configPort ?? (envPort ? Number(envPort) : 18789)
+}
+
+/**
+ * Resolves the gateway auth token from config.
+ */
+function resolveGatewayAuthToken(rawConfig: Record<string, unknown>): string | undefined {
+  const gatewayConfig = rawConfig?.['gateway'] as Record<string, unknown> | undefined
+  const authConfig = gatewayConfig?.['auth'] as Record<string, unknown> | undefined
+  return authConfig?.['token'] as string | undefined
+}
+
+/**
+ * Ensures the gateway's `/v1/chat/completions` endpoint is enabled in the config.
+ *
+ * The OMG plugin routes LLM calls through this endpoint to use OpenClaw's own
+ * model providers. If the endpoint is not enabled, this function patches the
+ * config and writes it back. The gateway will pick up the change on next reload.
+ */
+async function ensureChatCompletionsEnabled(api: PluginApi): Promise<void> {
+  const rawConfig = api.config as Record<string, unknown>
+  const gateway = rawConfig?.['gateway'] as Record<string, unknown> | undefined
+  const http = gateway?.['http'] as Record<string, unknown> | undefined
+  const endpoints = http?.['endpoints'] as Record<string, unknown> | undefined
+  const chatCompletions = endpoints?.['chatCompletions'] as Record<string, unknown> | undefined
+
+  if (chatCompletions?.['enabled'] === true) return // already enabled
+
+  // Use runtime.config.writeConfigFile to patch the config
+  const runtime = (api as unknown as { runtime?: { config?: { loadConfig?: () => unknown; writeConfigFile?: (cfg: unknown) => Promise<void> } } }).runtime
+  if (typeof runtime?.config?.loadConfig !== 'function' || typeof runtime?.config?.writeConfigFile !== 'function') {
+    console.warn('[omg] gateway_start: cannot auto-enable chatCompletions — runtime.config not available')
+    return
+  }
+
+  const currentConfig = runtime.config.loadConfig() as Record<string, unknown>
+  const currentGateway = (currentConfig['gateway'] ?? {}) as Record<string, unknown>
+  const currentHttp = (currentGateway['http'] ?? {}) as Record<string, unknown>
+  const currentEndpoints = (currentHttp['endpoints'] ?? {}) as Record<string, unknown>
+  const currentChatCompletions = (currentEndpoints['chatCompletions'] ?? {}) as Record<string, unknown>
+
+  const patchedConfig = {
+    ...currentConfig,
+    gateway: {
+      ...currentGateway,
+      http: {
+        ...currentHttp,
+        endpoints: {
+          ...currentEndpoints,
+          chatCompletions: { ...currentChatCompletions, enabled: true },
+        },
+      },
+    },
+  }
+
+  await runtime.config.writeConfigFile(patchedConfig)
+  console.error('[omg] gateway_start: auto-enabled gateway.http.endpoints.chatCompletions — LLM calls will route through OpenClaw')
+}
+
+/**
+ * Builds the LLM generate function for the observer/reflector.
+ *
+ * Resolution order:
+ *   1. `api.generate` if the host provides it (future-proofing)
+ *   2. Gateway's `/v1/chat/completions` endpoint (preferred — uses OpenClaw's
+ *      own model providers and auth; no external API key needed)
+ *   3. `ANTHROPIC_API_KEY` environment variable (direct fallback)
+ *   4. `OPENAI_API_KEY` environment variable (direct fallback)
+ *   5. OpenAI API key from gateway config (`env.vars.OPENAI_API_KEY`)
+ *   6. Anthropic regular API key from gateway auth-profiles
+ *
+ * Falls back to a function that throws if no usable path is found.
+ */
+function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
+  const rawGlobal = api.config as Record<string, unknown>
+
+  // 1. Check if host provides generate (future-proofing)
+  const hostGenerate = (api as unknown as { generate?: unknown }).generate
+  if (typeof hostGenerate === 'function') {
+    console.error('[omg] Using api.generate from host for LLM calls')
+    return (params) => (hostGenerate as GenerateFn)(params)
+  }
+
+  // 2. Gateway's own /v1/chat/completions endpoint (preferred path)
+  //    This routes through OpenClaw's model providers — no separate API key.
+  const gatewayPort = resolveGatewayPort(rawGlobal)
+  const gatewayAuthToken = resolveGatewayAuthToken(rawGlobal)
+  const gatewayFn = createGatewayCompletionsGenerateFn({
+    port: gatewayPort,
+    authToken: gatewayAuthToken,
+    model,
+  })
+
+  // 3–6. Direct API fallbacks (only used when gateway endpoint is unreachable)
+  const directFallback = resolveDirectFallbackFn(api, model)
+
+  // Return a wrapper that tries gateway first, falls back to direct on network/
+  // connectivity failures only. Rate limits and model errors are re-thrown so
+  // callers can handle them — they do NOT indicate the gateway is unavailable.
+  let gatewayFailures = 0
+  const GATEWAY_FAILURE_THRESHOLD = 3
+
+  return async (params) => {
+    if (gatewayFailures < GATEWAY_FAILURE_THRESHOLD) {
+      try {
+        const result = await gatewayFn(params)
+        // The gateway returns rate limit errors as HTTP 200 with an error string
+        // in the content body. Detect and re-throw so callers fail fast rather
+        // than treating the error text as a real LLM response.
+        if (result.content.startsWith('⚠️') || result.content.startsWith('Connection error')) {
+          throw new Error(`Gateway error response: ${result.content.slice(0, 120)}`)
+        }
+        gatewayFailures = 0 // reset on success
+        return result
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        // Connection/network errors = gateway unreachable; switch to fallback
+        if (
+          msg.includes('ECONNREFUSED') ||
+          msg.includes('ECONNRESET') ||
+          msg.includes('ETIMEDOUT') ||
+          msg.includes('ENOTFOUND') ||
+          msg.includes('(404)') ||
+          msg.includes('fetch failed')
+        ) {
+          gatewayFailures = GATEWAY_FAILURE_THRESHOLD // permanent switch
+          console.error(`[omg] Gateway /v1/chat/completions not available — switching to direct API fallback`)
+        } else {
+          // Other errors (auth, 500, etc.) — re-throw, don't fall back
+          throw err
+        }
+      }
+    }
+    return directFallback(params)
+  }
+}
+
+/**
+ * Extracts and parses the omg plugin config from the OpenClaw plugin API.
+ * Returns null if parsing fails or config is not present.
+ */
+function resolvePluginConfig(api: PluginApi): ReturnType<typeof parseConfig> | null {
+  try {
+    const rawGlobal = api.config as Record<string, unknown>
+    const apiPluginConfig = (api as unknown as { pluginConfig?: Record<string, unknown> }).pluginConfig
+    const rawPluginConfig =
+      apiPluginConfig ??
+      (
+        (
+          (rawGlobal?.['plugins'] as Record<string, unknown>)
+            ?.['entries'] as Record<string, unknown>
+        )?.['omg'] as Record<string, unknown>
+      )?.['config'] ?? api.config
+    return parseConfig(rawPluginConfig)
+  } catch (err) {
+    console.error('[omg] resolvePluginConfig: failed to parse plugin config:', err)
+    return null
+  }
+}
+
+/**
+ * Resolves a direct-API fallback generate function (steps 3–6 of the chain).
+ * Used only when the gateway endpoint is unreachable.
+ */
+function resolveDirectFallbackFn(api: PluginApi, model: string): GenerateFn {
+  // Try Anthropic key from plugin observer config (highest priority — user explicitly set it)
+  const pluginConfig = resolvePluginConfig(api)
+  const configApiKey = pluginConfig?.observer?.apiKey
+  if (configApiKey && !configApiKey.startsWith('sk-ant-oat')) {
+    console.error('[omg] Direct fallback: Anthropic API key from plugin observer.apiKey config')
+    return createDirectAnthropicGenerateFn({ apiKey: configApiKey, model })
+  }
+
+  // Try ANTHROPIC_API_KEY from environment
+  const envAnthropicKey = process.env['ANTHROPIC_API_KEY']
+  if (envAnthropicKey) {
+    console.error('[omg] Direct fallback: ANTHROPIC_API_KEY from environment')
+    return createDirectAnthropicGenerateFn({ apiKey: envAnthropicKey, model })
+  }
+
+  // Try Anthropic key from gateway auth-profiles (skip OAuth tokens — not supported by direct API)
+  const authKey = resolveAnthropicKeyFromAuthProfiles()
+  if (authKey) {
+    console.error('[omg] Direct fallback: Anthropic API key from gateway auth-profiles')
+    return createDirectAnthropicGenerateFn({ apiKey: authKey, model })
+  }
+
+  // Try OPENAI_API_KEY from environment
+  const envOpenAiKey = process.env['OPENAI_API_KEY']
+  if (envOpenAiKey) {
+    console.error('[omg] Direct fallback: OPENAI_API_KEY from environment (model: gpt-4o)')
+    return createDirectOpenAiGenerateFn({ apiKey: envOpenAiKey, model: 'gpt-4o' })
+  }
+
+  // Try OpenAI key from gateway config (env.vars.OPENAI_API_KEY)
+  const rawGlobal = api.config as Record<string, unknown>
+  const configEnvVars = (rawGlobal?.['env'] as Record<string, unknown>)?.['vars'] as Record<string, string> | undefined
+  const configOpenAiKey = configEnvVars?.['OPENAI_API_KEY']
+  if (configOpenAiKey) {
+    console.error('[omg] Direct fallback: OPENAI_API_KEY from gateway config (model: gpt-4o)')
+    return createDirectOpenAiGenerateFn({ apiKey: configOpenAiKey, model: 'gpt-4o' })
+  }
+
+  // No usable API key found
+  return () => {
+    throw new Error(
+      '[omg] No LLM path available. Enable gateway.http.endpoints.chatCompletions in your gateway config, ' +
+      'or set ANTHROPIC_API_KEY / OPENAI_API_KEY environment variable.'
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin registration
 // ---------------------------------------------------------------------------
 
@@ -165,8 +478,13 @@ export function register(api: PluginApi): void {
   // OpenClaw passes the full global config as api.config, not the plugin-specific
   // sub-config. Extract the OMG-specific config from plugins.entries.omg.config,
   // falling back to api.config directly for backward compatibility.
+  // Resolve plugin-specific config. The gateway provides it via api.pluginConfig
+  // (validated against the manifest JSON Schema). Fall back to navigating
+  // api.config.plugins.entries.omg.config for backward compatibility.
   const rawGlobal = api.config as Record<string, unknown>
+  const apiPluginConfig = (api as unknown as { pluginConfig?: Record<string, unknown> }).pluginConfig
   const rawPluginConfig =
+    apiPluginConfig ??
     (
       (
         (rawGlobal?.['plugins'] as Record<string, unknown>)
@@ -175,6 +493,7 @@ export function register(api: PluginApi): void {
     )?.['config'] ?? api.config
 
   const config = parseConfig(rawPluginConfig)
+  console.error(`[omg] register: threshold=${config.observation.messageTokenThreshold}, triggerMode=${config.observation.triggerMode}`)
 
   // Resolve workspaceDir from (in priority order):
   //   1. Host-provided api.workspaceDir (per-agent context, may be undefined at gateway level)
@@ -187,61 +506,78 @@ export function register(api: PluginApi): void {
 
   const workspaceDir = api.workspaceDir ?? config.workspaceDir ?? agentDefaultWorkspace
 
-  // Model label used only for error-message attribution; actual model
-  // selection is owned by the host via api.generate.
-  // Use a lazy wrapper so we read api.generate at call time — OpenClaw may
-  // populate it after registration completes (e.g. once an agent session starts).
-  const observerModel = config.observer.model ?? '(inherited)'
-  const llmClient = createLlmClient(observerModel, (params) => {
-    const generate = api.generate as unknown
-    if (typeof generate !== 'function') {
-      throw new Error('[omg] api.generate is not available in this plugin context')
-    }
-    return (generate as typeof api.generate)(params)
-  })
+  // Build the LLM generate function. The current OpenClaw plugin API does not
+  // expose a `generate` method, so we create a direct Anthropic client using
+  // the auth token from the gateway's auth-profiles store.
+  const observerModel = config.observer.model ?? 'claude-sonnet-4-20250514'
+  const generateFn = resolveGenerateFn(api, observerModel)
+  const llmClient = createLlmClient(observerModel, generateFn)
 
-  // One-time flag: trigger bootstrap on first agent turn if sentinel is missing.
-  // api.generate is available during agent sessions (not at gateway_start or CLI time).
-  let bootstrapTriggeredFromSession = false
+  // Per-workspace bootstrap flag: tracks which workspaceDirs have already had
+  // bootstrap triggered this gateway lifetime. Using a Set keyed by resolved
+  // workspaceDir prevents double-bootstrap when multiple agents share the same
+  // workspace, and correctly bootstraps each distinct workspace independently.
+  const bootstrappedWorkspaces = new Set<string>()
 
   api.on('before_prompt_build', (event, ctx) => {
-    if (!workspaceDir) return Promise.resolve(undefined)
+    // ctx.workspaceDir is populated per-agent by OpenClaw (PluginHookAgentContext).
+    // It takes priority over the globally-resolved workspaceDir so that agents with
+    // separate workspaces (e.g. "coding" → ~/TechLead, "pati" → ~/Secretary) each
+    // get their own graph rather than sharing the default workspace.
+    const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
+    if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
 
-    // Fire-and-forget bootstrap if it hasn't been attempted this gateway lifetime.
-    // Runs once: even if bootstrap succeeds in the background, subsequent turns skip this.
-    if (!bootstrapTriggeredFromSession) {
-      bootstrapTriggeredFromSession = true
-      const omgRoot = resolveOmgRoot(workspaceDir, config)
-      listAllNodes(omgRoot)
+    // Fire-and-forget scaffold + bootstrap once per workspace per gateway lifetime.
+    // Scaffold runs first so the directory structure exists before bootstrap tries to write.
+    if (!bootstrappedWorkspaces.has(effectiveWorkspaceDir)) {
+      bootstrappedWorkspaces.add(effectiveWorkspaceDir)
+      scaffoldGraphIfNeeded(effectiveWorkspaceDir, config)
+        .catch((err) => console.error('[omg] before_prompt_build: scaffold failed:', err))
+        .then(() => listAllNodes(resolveOmgRoot(effectiveWorkspaceDir, config)))
         .then((nodes) => {
           if (nodes.length === 0) {
-            return runBootstrap({ workspaceDir: workspaceDir!, config, llmClient, force: false })
+            return runBootstrap({ workspaceDir: effectiveWorkspaceDir, config, llmClient, force: false })
               .catch((err) => console.error('[omg] before_prompt_build: bootstrap failed:', err))
           }
         })
-        .catch(() => { /* listAllNodes failure: skip bootstrap silently */ })
+        .catch((err) => console.error('[omg] before_prompt_build: node listing failed, skipping bootstrap:', err))
     }
 
-    return beforeAgentStart(event, { workspaceDir, sessionKey: ctx.sessionKey, config })
+    const sessionKey = ctx.sessionKey ?? 'default'
+    return beforeAgentStart(event, { workspaceDir: effectiveWorkspaceDir, sessionKey, config })
   })
 
   api.on('agent_end', (event, ctx) => {
-    if (!workspaceDir) return Promise.resolve(undefined)
+    const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
+    if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
+    // sessionKey may be undefined for CLI-initiated sessions. Use a stable fallback
+    // so session state is still persisted (keyed by agentId or a default label).
+    const sessionKey = ctx.sessionKey ?? ctx.agentId ?? 'default'
+    // Messages are passed in the event object by the gateway, not in ctx.
+    // ctx only contains agentId, sessionKey, workspaceDir.
+    // Gateway messages use Anthropic API format (content as array of blocks),
+    // so we normalize them to our Message type (content as plain string).
+    const rawMessages = (event as unknown as { messages?: readonly unknown[] }).messages ?? ctx.messages ?? []
+    const messages = normalizeMessages(rawMessages)
+    console.error(`[omg] agent_end [${sessionKey}]: messages=${messages.length}, threshold=${config.observation.messageTokenThreshold}, triggerMode=${config.observation.triggerMode}`)
     return agentEnd(event, {
-      workspaceDir,
-      sessionKey: ctx.sessionKey,
-      messages: ctx.messages,
+      workspaceDir: effectiveWorkspaceDir,
+      sessionKey,
+      messages,
       config,
       llmClient,
     })
   })
 
   api.on('before_compaction', (_event, ctx) => {
-    if (!workspaceDir) return Promise.resolve(undefined)
+    const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
+    if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
+    const sessionKey = ctx.sessionKey ?? 'default'
+    const rawMessages = (ctx.messages ?? []) as readonly unknown[]
     return beforeCompaction(_event, {
-      workspaceDir,
-      sessionKey: ctx.sessionKey,
-      messages: ctx.messages ?? [],
+      workspaceDir: effectiveWorkspaceDir,
+      sessionKey,
+      messages: normalizeMessages(rawMessages),
       config,
       llmClient,
     })
@@ -251,6 +587,12 @@ export function register(api: PluginApi): void {
 
   api.on('gateway_start', async () => {
     if (!workspaceDir) return
+
+    // Auto-enable the gateway's /v1/chat/completions endpoint if not already on.
+    // The OMG plugin needs this to route LLM calls through OpenClaw's model providers.
+    await ensureChatCompletionsEnabled(api).catch((err) =>
+      console.error('[omg] gateway_start: failed to auto-enable chatCompletions endpoint:', err)
+    )
 
     await scaffoldGraphIfNeeded(workspaceDir, config).catch((err) =>
       console.error('[omg] scaffold failed:', err)
@@ -263,17 +605,17 @@ export function register(api: PluginApi): void {
       console.error('[omg] gateway_start: failed to register cron jobs — background reflection will not run:', err)
     }
 
-    // Fire-and-forget bootstrap on first start (graph is empty, no sentinel).
-    // Requires api.generate to be callable — skip silently at gateway level if not.
-    if (typeof api.generate === 'function') {
-      const omgRoot = resolveOmgRoot(workspaceDir, config)
-      const nodes = await listAllNodes(omgRoot).catch(() => [])
-      if (nodes.length === 0) {
-        runBootstrap({ workspaceDir, config, llmClient, force: false })
-          .catch((err) => console.error('[omg] gateway_start: bootstrap failed:', err))
-      }
-    } else {
-      console.warn('[omg] gateway_start: api.generate is not available — bootstrap deferred. Run `openclaw omg bootstrap` manually once the gateway is active.')
+    // Fire-and-forget bootstrap on first start if no sentinel exists.
+    // Use sentinel presence (not node count) — scaffold writes index.md/now.md
+    // so nodes.length is never 0 after scaffold. runBootstrap skips internally
+    // if sentinel exists, but checking here avoids the async overhead.
+    const omgRoot = resolveOmgRoot(workspaceDir, config)
+    const { readSentinel } = await import('./bootstrap/sentinel.js')
+    const sentinel = await readSentinel(omgRoot).catch(() => null)
+    console.error(`[omg] gateway_start: sentinel=${sentinel ? 'exists' : 'missing'}, will bootstrap=${sentinel === null}`)
+    if (sentinel === null) {
+      runBootstrap({ workspaceDir, config, llmClient, force: false })
+        .catch((err) => console.error('[omg] gateway_start: bootstrap failed:', err))
     }
   })
 
