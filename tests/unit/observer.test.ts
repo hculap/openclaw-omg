@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { runObservation } from '../../src/observer/observer.js'
-import type { ObservationParams, Message, NodeIndexEntry, ObserverOutput } from '../../src/types.js'
+import type { ObservationParams, Message, ObserverOutput } from '../../src/types.js'
 import type { LlmClient, LlmResponse } from '../../src/llm/client.js'
 import { parseConfig } from '../../src/config.js'
 
@@ -20,17 +20,16 @@ const MESSAGES: readonly Message[] = [
   { role: 'assistant', content: 'Got it! I will remember that preference.' },
 ]
 
-const INDEX: readonly NodeIndexEntry[] = [
-  { id: 'omg/project/my-app', description: 'Main web application' },
-]
-
+// New upsert format XML
 const VALID_XML = `
 <observations>
   <operations>
-    <operation action="create" type="preference" priority="high">
-      <id>omg/preference/dark-mode</id>
+    <operation type="preference" priority="high">
+      <canonical-key>preferences.editor_theme</canonical-key>
+      <title>Editor Theme Preference</title>
       <description>User prefers dark mode</description>
       <content>The user prefers dark mode in all editors.</content>
+      <moc-hints>preferences</moc-hints>
     </operation>
   </operations>
   <now-update>## Focus\nPreference setting session.</now-update>
@@ -51,7 +50,6 @@ function makeMockClient(response: LlmResponse = VALID_LLM_RESPONSE): LlmClient {
 function makeParams(overrides: Partial<ObservationParams> = {}): ObservationParams {
   return {
     unobservedMessages: MESSAGES,
-    existingNodeIndex: INDEX,
     nowNode: null,
     config,
     llmClient: makeMockClient(),
@@ -83,8 +81,10 @@ describe('runObservation', () => {
       const output = await runObservation(makeParams())
 
       expect(output.operations).toHaveLength(1)
-      expect(output.operations[0]!.kind).toBe('create')
-      expect(output.operations[0]!.frontmatter.id).toBe('omg/preference/dark-mode')
+      expect(output.operations[0]!.kind).toBe('upsert')
+      if (output.operations[0]!.kind === 'upsert') {
+        expect(output.operations[0]!.canonicalKey).toBe('preferences.editor_theme')
+      }
     })
 
     it('returns nowUpdate from valid LLM XML response', async () => {
@@ -110,6 +110,14 @@ describe('runObservation', () => {
 
       const call = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0]
       expect(call.maxTokens).toBe(4096)
+    })
+
+    it('does NOT include existingNodeIndex in the LLM user prompt', async () => {
+      const client = makeMockClient()
+      await runObservation(makeParams({ llmClient: client }))
+
+      const userPrompt = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0].user
+      expect(userPrompt).not.toContain('Existing Node Index')
     })
 
     it('passes nowNode content into the LLM user prompt', async () => {
@@ -143,22 +151,18 @@ describe('runObservation', () => {
     })
 
     it('filters out operations whose node type slipped through the parser (post-validation)', async () => {
-      // Simulate a parser bug: inject an operation with an invalid type that the
-      // parser should have rejected. The post-validator in the observer must catch it.
+      // Simulate a parser bug: inject a upsert operation with an invalid type
       const parserModule = await import('../../src/observer/parser.js')
       const badOutput: ObserverOutput = {
         operations: [
           {
-            kind: 'create',
-            frontmatter: {
-              id: 'omg/unknown/test',
-              description: 'Test',
-              type: 'not-a-valid-type' as never,
-              priority: 'medium',
-              created: new Date().toISOString(),
-              updated: new Date().toISOString(),
-            },
+            kind: 'upsert',
+            canonicalKey: 'some.key',
+            type: 'not-a-valid-type' as never,
+            title: 'Bad',
+            description: 'Bad op',
             body: 'Test body',
+            priority: 'medium',
           },
         ],
         nowUpdate: null,
@@ -173,7 +177,7 @@ describe('runObservation', () => {
         // Post-validator must filter out the bad operation
         expect(output.operations).toHaveLength(0)
 
-        // Must log the rejection with the invalid type and id
+        // Must log the rejection with the invalid type
         const rejectionLog = errorSpy.mock.calls.find((args) =>
           typeof args[0] === 'string' && args[0].includes('not-a-valid-type'),
         )
@@ -259,7 +263,7 @@ describe('runObservation', () => {
   })
 
   describe('LLM error context', () => {
-    it('includes messageCount and nodeIndexSize in the error message', async () => {
+    it('includes messageCount in the error message', async () => {
       const client: LlmClient = {
         generate: vi.fn().mockRejectedValue(new Error('timeout')),
       }
@@ -268,14 +272,12 @@ describe('runObservation', () => {
         { role: 'user' as const, content: 'msg 1' },
         { role: 'assistant' as const, content: 'msg 2' },
       ]
-      const index = [{ id: 'omg/project/x', description: 'X' }]
 
       const err = await runObservation(
-        makeParams({ llmClient: client, unobservedMessages: messages, existingNodeIndex: index }),
+        makeParams({ llmClient: client, unobservedMessages: messages }),
       ).catch((e) => e)
 
       expect(err.message).toContain('messageCount: 2')
-      expect(err.message).toContain('nodeIndexSize: 1')
     })
   })
 })

@@ -39,7 +39,8 @@ export interface AgentEndContext {
 export async function agentEnd(event: AgentEndEvent, ctx: AgentEndContext): Promise<void> {
   const { workspaceDir, sessionKey, messages, config, llmClient } = ctx
   const omgRoot = resolveOmgRoot(workspaceDir, config)
-  const writeContext = { omgRoot, sessionKey }
+  const scope = config.scope ?? workspaceDir
+  const writeContext = { omgRoot, sessionKey, scope }
 
   const initialState = await loadSessionStateOrDefault(workspaceDir, sessionKey)
   const accumulatedState = accumulateTokens(messages, initialState)
@@ -75,7 +76,7 @@ export async function tryRunObservation(
   config: OmgConfig,
   llmClient: LlmClient,
   omgRoot: string,
-  writeContext: { readonly omgRoot: string; readonly sessionKey: string },
+  writeContext: { readonly omgRoot: string; readonly sessionKey: string; readonly scope: string },
   sessionKey: string
 ): Promise<OmgSessionState> {
   // Phase 1: gather inputs and run LLM observation
@@ -84,15 +85,9 @@ export async function tryRunObservation(
   let observerOutput!: ObserverOutput
   try {
     const unobservedMessages = Array.from(messages.slice(state.observationBoundaryMessageIndex))
-    const allNodes = await listAllNodes(omgRoot)
-    const existingNodeIndex = allNodes.map((n) => ({
-      id: n.frontmatter.id,
-      description: n.frontmatter.description,
-    }))
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
     observerOutput = await runObservation({
       unobservedMessages,
-      existingNodeIndex,
       nowNode: nowContent,
       config,
       llmClient,

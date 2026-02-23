@@ -3,11 +3,14 @@
  *
  * The system prompt instructs the LLM on how to classify and extract
  * durable knowledge nodes from conversation messages. The user prompt
- * assembles the runtime context: existing node index, current now node,
- * messages to analyse, and optional session metadata.
+ * assembles the runtime context: current now node, messages to analyse,
+ * and optional session metadata.
+ *
+ * The new format uses canonical keys for deterministic, code-computed node IDs.
+ * No existing node index is sent — dedup is handled via file-exists checks.
  */
 
-import type { NodeIndexEntry, Message } from '../types.js'
+import type { Message } from '../types.js'
 import { NODE_TYPES } from '../types.js'
 
 // ---------------------------------------------------------------------------
@@ -16,8 +19,6 @@ import { NODE_TYPES } from '../types.js'
 
 /** All runtime parameters needed to build the Observer user prompt. */
 export interface ObserverUserPromptParams {
-  /** Compact index of nodes already in the graph. */
-  readonly existingNodeIndex: readonly NodeIndexEntry[]
   /** Current body of the [[omg/now]] node, or null. */
   readonly nowNode: string | null
   /** Conversation messages to analyse. */
@@ -42,7 +43,7 @@ export function buildObserverSystemPrompt(): string {
 
 Your task is to read conversation messages and extract durable, reusable knowledge nodes
 that capture what was learned or decided. You produce structured XML describing which nodes
-to create, update, or supersede, and how to update the current-state snapshot.
+to upsert (create or update), and how to update the current-state snapshot.
 
 ## Node Types
 
@@ -67,27 +68,19 @@ Assign priority based on how durable and important the information is:
 - **medium** — Project details, implicit preferences, factual context from the conversation
 - **low**    — Minor context, ephemeral details unlikely to matter in future sessions
 
-## Action Rules
+## Canonical Key Format
 
-Choose the right action for each node:
+Every operation requires a <canonical-key> — a stable, dotted-path identifier for the concept.
 
-**create** — The information is new; no existing node covers it.
-  Provide: id, description, content, and optionally links, tags.
+Rules for canonical keys:
+- Lowercase with dots as separators: \`preferences.editor_theme\`, \`projects.my_app\`, \`identity.name\`
+- Start with the type domain: \`preferences.\`, \`projects.\`, \`identity.\`, \`decisions.\`, \`facts.\`
+- Be descriptive and stable — the same concept should always get the same key across sessions
+- Use underscores within segments, dots between segments: \`preferences.terminal_setup\`
+- Keep it concise but unambiguous: \`projects.secretary\` not \`projects.my_secretary_project\`
 
-**update** — An existing node covers the same topic; the content should be augmented or corrected.
-  Provide: target-id (the existing node's ID), id (can be same as target-id), description, content.
-  Use update when the existing node is still valid but incomplete or needs minor correction.
-
-**supersede** — An existing node is outdated or contradicted; replace it entirely.
-  Provide: target-id (the ID of the node being replaced), a new id, description, content.
-  Use supersede when the old node should no longer be used (e.g. the user changed their preference).
-
-## Node IDs
-
-Node IDs use the format: omg/{type}/{slug}
-Where slug is lowercase, hyphenated, and concise (e.g. omg/preference/editor-theme).
-For update operations, the id in <id> can match the target-id.
-For supersede operations, use a fresh slug that reflects the updated content.
+The code uses the canonical key to compute the node's ID and file path. If you reuse the same
+canonical key for the same concept, the system will merge into the existing node automatically.
 
 ## Output Format
 
@@ -96,36 +89,26 @@ Respond ONLY with valid XML matching this schema. Do not add any text outside th
 \`\`\`xml
 <observations>
   <operations>
-    <!-- For a create operation: -->
-    <operation action="create" type="preference" priority="high">
-      <id>omg/preference/editor-theme</id>
+    <operation type="preference" priority="high">
+      <canonical-key>preferences.editor_theme</canonical-key>
+      <title>Editor Theme Preference</title>
       <description>User prefers dark mode in all editors</description>
       <content>
 The user explicitly stated they prefer dark mode in all development editors.
 They find it reduces eye strain during long sessions.
       </content>
-      <links>[[omg/moc-preferences]]</links>
+      <moc-hints>preferences</moc-hints>
       <tags>editor, appearance, preferences</tags>
     </operation>
 
-    <!-- For an update operation: -->
-    <operation action="update" type="project" priority="medium">
-      <target-id>omg/project/my-app</target-id>
-      <id>omg/project/my-app</id>
+    <operation type="project" priority="medium">
+      <canonical-key>projects.my_app</canonical-key>
+      <title>My App Project</title>
       <description>Main web application project</description>
       <content>
 Updated project description with new details from this session.
       </content>
-    </operation>
-
-    <!-- For a supersede operation: -->
-    <operation action="supersede" type="preference" priority="high">
-      <target-id>omg/preference/old-editor-theme</target-id>
-      <id>omg/preference/editor-theme-2026</id>
-      <description>User switched from dark mode to high-contrast theme</description>
-      <content>
-The user now prefers a high-contrast theme after finding it easier to read.
-      </content>
+      <links>preferences.editor_theme</links>
     </operation>
   </operations>
 
@@ -140,12 +123,6 @@ Working on the authentication module of my-app.
 ## Active Context
 Setting up the login flow with email + password.
   </now-update>
-
-  <!-- Optional: list MOC domains affected. Omit if no nodes touch a MOC. -->
-  <moc-updates>
-    <moc domain="preferences" action="add" />
-    <moc domain="project-my-app" action="add" />
-  </moc-updates>
 </observations>
 \`\`\`
 
@@ -154,12 +131,12 @@ Setting up the login flow with email + password.
 1. Only extract observations that are **durable** — likely to be useful in a future session.
    Skip small talk, transient questions, and purely ephemeral activity.
 2. Each <content> block should be self-contained markdown that makes sense without the conversation.
-3. Use <links> to reference related nodes with wikilink syntax: [[omg/node-id]].
-   Separate multiple links with spaces or newlines: [[omg/id-one]] [[omg/id-two]]
-4. Use <tags> as a comma-separated list: preferences, dark-mode, editor
-5. Do not invent node IDs that are not in the existing index. Only reference nodes you know exist.
-6. If nothing durable was observed, return an empty <operations> block.
-7. The <now-update> should reflect the user's current focus and state — not a full history.
+3. Use <canonical-key> to identify the concept. The same concept must always get the same key.
+4. Use <moc-hints> as a comma-separated list of domain names: preferences, tools, projects
+5. Use <links> as a comma-separated list of related canonical keys: preferences.editor_theme, projects.my_app
+6. Use <tags> as a comma-separated list: preferences, dark-mode, editor
+7. If nothing durable was observed, return an empty <operations> block.
+8. The <now-update> should reflect the user's current focus and state — not a full history.
 `
 }
 
@@ -169,21 +146,12 @@ Setting up the login flow with email + password.
 
 /**
  * Builds the per-turn user prompt for the Observer LLM call.
- * Assembles existing node index, now node content, messages, and session context.
+ * Assembles now node content, messages, and session context.
+ * Does NOT include an existing node index — dedup is handled deterministically.
  */
 export function buildObserverUserPrompt(params: ObserverUserPromptParams): string {
-  const { existingNodeIndex, nowNode, messages, sessionContext } = params
+  const { nowNode, messages, sessionContext } = params
   const parts: string[] = []
-
-  // --- Existing Node Index ---
-  if (existingNodeIndex.length === 0) {
-    parts.push('## Existing Node Index\n(none)')
-  } else {
-    const indexLines = existingNodeIndex
-      .map((entry) => `- ${entry.id}: ${entry.description}`)
-      .join('\n')
-    parts.push(`## Existing Node Index\n${indexLines}`)
-  }
 
   // --- Current Now Node ---
   const nowSection = nowNode !== null && nowNode.trim().length > 0

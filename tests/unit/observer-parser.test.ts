@@ -13,151 +13,145 @@ function makeOperation(attrs: string, children: string): string {
   return `<operation ${attrs}>${children}</operation>`
 }
 
-const VALID_CREATE = makeOperation(
-  'action="create" type="preference" priority="high"',
-  `<id>omg/preference/dark-mode</id>
-   <description>User prefers dark mode</description>
-   <content>The user prefers dark mode in all editors.</content>`,
+// New upsert format operations
+const VALID_UPSERT_PREFERENCE = makeOperation(
+  'type="preference" priority="high"',
+  `<canonical-key>preferences.editor_theme</canonical-key>
+   <title>Editor Theme Preference</title>
+   <description>User prefers dark mode in all editors</description>
+   <content>The user explicitly stated they prefer dark mode in all development editors.</content>
+   <moc-hints>preferences</moc-hints>
+   <tags>editor, appearance</tags>`,
 )
 
-const VALID_UPDATE = makeOperation(
-  'action="update" type="project" priority="medium"',
-  `<target-id>omg/project/my-app</target-id>
-   <id>omg/project/my-app</id>
-   <description>Main web app project</description>
+const VALID_UPSERT_PROJECT = makeOperation(
+  'type="project" priority="medium"',
+  `<canonical-key>projects.my_app</canonical-key>
+   <title>My App Project</title>
+   <description>Main web application project</description>
    <content>Updated details about the project.</content>`,
 )
 
-const VALID_SUPERSEDE = makeOperation(
-  'action="supersede" type="preference" priority="high"',
-  `<target-id>omg/preference/light-mode</target-id>
-   <id>omg/preference/dark-mode-2026</id>
-   <description>User switched to dark mode</description>
-   <content>User now prefers dark mode after finding it easier on the eyes.</content>`,
+const VALID_UPSERT_WITH_LINKS = makeOperation(
+  'type="fact" priority="low"',
+  `<canonical-key>user.location.city</canonical-key>
+   <title>User Location</title>
+   <description>User is based in New York</description>
+   <content>The user is based in New York City.</content>
+   <links>preferences.editor_theme</links>`,
 )
 
 // ---------------------------------------------------------------------------
 // Valid XML: basic cases
 // ---------------------------------------------------------------------------
 
-describe('parseObserverOutput — valid XML', () => {
-  it('parses a single create operation correctly', () => {
-    const xml = makeXml(`<operations>${VALID_CREATE}</operations>`)
+describe('parseObserverOutput — valid upsert operations', () => {
+  it('parses a single upsert operation correctly', () => {
+    const xml = makeXml(`<operations>${VALID_UPSERT_PREFERENCE}</operations>`)
     const output = parseObserverOutput(xml)
 
     expect(output.operations).toHaveLength(1)
     const op = output.operations[0]!
-    expect(op.kind).toBe('create')
-    expect(op.frontmatter.id).toBe('omg/preference/dark-mode')
-    expect(op.frontmatter.description).toBe('User prefers dark mode')
-    expect(op.frontmatter.type).toBe('preference')
-    expect(op.frontmatter.priority).toBe('high')
-    expect(op.body).toBe('The user prefers dark mode in all editors.')
-  })
-
-  it('parses an update operation with targetId', () => {
-    const xml = makeXml(`<operations>${VALID_UPDATE}</operations>`)
-    const output = parseObserverOutput(xml)
-
-    expect(output.operations).toHaveLength(1)
-    const op = output.operations[0]!
-    expect(op.kind).toBe('update')
-    if (op.kind === 'update') {
-      expect(op.targetId).toBe('omg/project/my-app')
+    expect(op.kind).toBe('upsert')
+    if (op.kind === 'upsert') {
+      expect(op.canonicalKey).toBe('preferences.editor_theme')
+      expect(op.type).toBe('preference')
+      expect(op.title).toBe('Editor Theme Preference')
+      expect(op.description).toBe('User prefers dark mode in all editors')
+      expect(op.body).toBe('The user explicitly stated they prefer dark mode in all development editors.')
+      expect(op.priority).toBe('high')
     }
   })
 
-  it('parses a supersede operation with targetId', () => {
-    const xml = makeXml(`<operations>${VALID_SUPERSEDE}</operations>`)
+  it('parses moc-hints into an array', () => {
+    const xml = makeXml(`<operations>${VALID_UPSERT_PREFERENCE}</operations>`)
     const output = parseObserverOutput(xml)
-
-    expect(output.operations).toHaveLength(1)
     const op = output.operations[0]!
-    expect(op.kind).toBe('supersede')
-    if (op.kind === 'supersede') {
-      expect(op.targetId).toBe('omg/preference/light-mode')
-      expect(op.frontmatter.id).toBe('omg/preference/dark-mode-2026')
+    if (op.kind === 'upsert') {
+      expect(op.mocHints).toContain('preferences')
+    }
+  })
+
+  it('parses multiple moc-hints separated by comma', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="fact" priority="medium"',
+      `<canonical-key>some.fact</canonical-key>
+       <title>Some Fact</title>
+       <description>Some fact</description>
+       <content>body</content>
+       <moc-hints>preferences, tools</moc-hints>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    const op = output.operations[0]!
+    if (op.kind === 'upsert') {
+      expect(op.mocHints).toContain('preferences')
+      expect(op.mocHints).toContain('tools')
+    }
+  })
+
+  it('parses <tags> into a trimmed array', () => {
+    const xml = makeXml(`<operations>${VALID_UPSERT_PREFERENCE}</operations>`)
+    const output = parseObserverOutput(xml)
+    const op = output.operations[0]!
+    if (op.kind === 'upsert') {
+      expect(op.tags).toContain('editor')
+      expect(op.tags).toContain('appearance')
+    }
+  })
+
+  it('parses <links> into an array of canonicalKeys', () => {
+    const xml = makeXml(`<operations>${VALID_UPSERT_WITH_LINKS}</operations>`)
+    const output = parseObserverOutput(xml)
+    const op = output.operations[0]!
+    if (op.kind === 'upsert') {
+      expect(op.linkKeys).toContain('preferences.editor_theme')
     }
   })
 
   it('parses multiple operations in order', () => {
-    const xml = makeXml(`<operations>${VALID_CREATE}${VALID_UPDATE}</operations>`)
+    const xml = makeXml(`<operations>${VALID_UPSERT_PREFERENCE}${VALID_UPSERT_PROJECT}</operations>`)
     const output = parseObserverOutput(xml)
 
     expect(output.operations).toHaveLength(2)
-    expect(output.operations[0]!.kind).toBe('create')
-    expect(output.operations[1]!.kind).toBe('update')
+    expect(output.operations[0]!.kind).toBe('upsert')
+    expect(output.operations[1]!.kind).toBe('upsert')
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.canonicalKey).toBe('preferences.editor_theme')
+    }
+    if (output.operations[1]!.kind === 'upsert') {
+      expect(output.operations[1]!.canonicalKey).toBe('projects.my_app')
+    }
   })
 
   it('defaults priority to medium when attribute is missing', () => {
     const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="fact"',
-      `<id>omg/fact/x</id>
-       <description>Some fact</description>
-       <content>content</content>`,
-    )}</operations>`)
-
-    const output = parseObserverOutput(xml)
-    expect(output.operations[0]!.frontmatter.priority).toBe('medium')
-  })
-
-  it('defaults priority to medium when priority attribute is an unrecognised value', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="fact" priority="urgent"',
-      `<id>omg/fact/x</id>
+      'type="fact"',
+      `<canonical-key>some.fact</canonical-key>
+       <title>Some Fact</title>
        <description>Some fact</description>
        <content>body</content>`,
     )}</operations>`)
 
     const output = parseObserverOutput(xml)
-    expect(output.operations[0]!.frontmatter.priority).toBe('medium')
+    expect(output.operations[0]!.kind).toBe('upsert')
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.priority).toBe('medium')
+    }
   })
 
-  it('all operations from one parse call share the same created/updated timestamp', () => {
-    const xml = makeXml(`<operations>${VALID_CREATE}${VALID_UPDATE}</operations>`)
-    const output = parseObserverOutput(xml)
-
-    expect(output.operations).toHaveLength(2)
-    expect(output.operations[0]!.frontmatter.created).toBe(output.operations[1]!.frontmatter.created)
-    expect(output.operations[0]!.frontmatter.updated).toBe(output.operations[1]!.frontmatter.updated)
-  })
-
-  it('sets created and updated to ISO 8601 timestamps', () => {
-    const xml = makeXml(`<operations>${VALID_CREATE}</operations>`)
-    const output = parseObserverOutput(xml)
-
-    const fm = output.operations[0]!.frontmatter
-    expect(fm.created).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
-    expect(fm.updated).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
-  })
-
-  it('parses <links> into an array of wikilink targets', () => {
+  it('defaults priority to medium when priority attribute is unrecognised', () => {
     const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="preference" priority="high"',
-      `<id>omg/preference/vim</id>
-       <description>User uses vim</description>
-       <content>content</content>
-       <links>[[omg/moc-preferences]] [[omg/moc-tools]]</links>`,
+      'type="fact" priority="urgent"',
+      `<canonical-key>some.fact</canonical-key>
+       <title>Some Fact</title>
+       <description>Some fact</description>
+       <content>body</content>`,
     )}</operations>`)
 
     const output = parseObserverOutput(xml)
-    const links = output.operations[0]!.frontmatter.links
-    expect(links).toContain('omg/moc-preferences')
-    expect(links).toContain('omg/moc-tools')
-  })
-
-  it('parses <tags> into a trimmed array', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="preference" priority="medium"',
-      `<id>omg/preference/terminal</id>
-       <description>Uses terminal</description>
-       <content>content</content>
-       <tags>editor, tooling,  terminal </tags>`,
-    )}</operations>`)
-
-    const output = parseObserverOutput(xml)
-    const tags = output.operations[0]!.frontmatter.tags
-    expect(tags).toEqual(expect.arrayContaining(['editor', 'tooling', 'terminal']))
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.priority).toBe('medium')
+    }
   })
 
   it('parses <now-update> correctly', () => {
@@ -170,93 +164,40 @@ describe('parseObserverOutput — valid XML', () => {
   })
 
   it('returns nowUpdate: null when <now-update> is absent', () => {
-    const xml = makeXml(`<operations>${VALID_CREATE}</operations>`)
+    const xml = makeXml(`<operations>${VALID_UPSERT_PREFERENCE}</operations>`)
     const output = parseObserverOutput(xml)
     expect(output.nowUpdate).toBeNull()
   })
 
-  it('returns nowUpdate: null when <now-update> is empty', () => {
-    const xml = makeXml(`<operations></operations><now-update>   </now-update>`)
+  it('derives mocUpdates from operations mocHints (deduplicated)', () => {
+    const op1 = makeOperation(
+      'type="preference" priority="high"',
+      `<canonical-key>pref.one</canonical-key>
+       <title>Pref One</title>
+       <description>Pref one</description>
+       <content>body</content>
+       <moc-hints>preferences</moc-hints>`,
+    )
+    const op2 = makeOperation(
+      'type="preference" priority="medium"',
+      `<canonical-key>pref.two</canonical-key>
+       <title>Pref Two</title>
+       <description>Pref two</description>
+       <content>body</content>
+       <moc-hints>preferences, tools</moc-hints>`,
+    )
+    const xml = makeXml(`<operations>${op1}${op2}</operations>`)
     const output = parseObserverOutput(xml)
-    expect(output.nowUpdate).toBeNull()
-  })
-
-  it('parses <moc-updates> into an array of domain strings', () => {
-    const xml = makeXml(`
-      <operations></operations>
-      <moc-updates>
-        <moc domain="preferences" action="add" />
-        <moc domain="projects" action="add" />
-      </moc-updates>
-    `)
-    const output = parseObserverOutput(xml)
-    expect(output.mocUpdates).toContain('preferences')
-    expect(output.mocUpdates).toContain('projects')
-  })
-
-  it('parses a single <moc> element as an array (isArray guard)', () => {
-    const xml = makeXml(`
-      <operations></operations>
-      <moc-updates>
-        <moc domain="preferences" action="add" />
-      </moc-updates>
-    `)
-    const output = parseObserverOutput(xml)
-    expect(output.mocUpdates).toHaveLength(1)
-    expect(output.mocUpdates[0]).toBe('preferences')
-  })
-
-  it('deduplicates repeated MOC domains', () => {
-    const xml = makeXml(`
-      <operations></operations>
-      <moc-updates>
-        <moc domain="preferences" action="add" />
-        <moc domain="preferences" action="add" />
-      </moc-updates>
-    `)
-    const output = parseObserverOutput(xml)
+    // preferences appears in both ops but should only appear once in mocUpdates
     const prefCount = output.mocUpdates.filter((d) => d === 'preferences').length
     expect(prefCount).toBe(1)
+    expect(output.mocUpdates).toContain('tools')
   })
 
-  it('drops and warns about <moc> entries with no domain attribute', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    try {
-      const xml = makeXml(`
-        <operations></operations>
-        <moc-updates>
-          <moc action="add" />
-          <moc domain="projects" action="add" />
-        </moc-updates>
-      `)
-      const output = parseObserverOutput(xml)
-      expect(output.mocUpdates).toEqual(['projects'])
-      const warnCall = warnSpy.mock.calls.find((args) =>
-        typeof args[0] === 'string' && args[0].includes('missing or empty domain'),
-      )
-      expect(warnCall).toBeDefined()
-    } finally {
-      warnSpy.mockRestore()
-    }
-  })
-
-  it('returns empty mocUpdates when <moc-updates> is absent', () => {
-    const xml = makeXml(`<operations></operations>`)
+  it('returns empty mocUpdates when no operation has moc-hints', () => {
+    const xml = makeXml(`<operations>${VALID_UPSERT_PROJECT}</operations>`)
     const output = parseObserverOutput(xml)
     expect(output.mocUpdates).toHaveLength(0)
-  })
-
-  it('handles XML with HTML entities (&amp;, &quot;) correctly', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="fact" priority="low"',
-      `<id>omg/fact/ampersand</id>
-       <description>AT&amp;T fact</description>
-       <content>Content with &quot;quotes&quot; and &amp; ampersand.</content>`,
-    )}</operations>`)
-
-    const output = parseObserverOutput(xml)
-    expect(output.operations).toHaveLength(1)
-    expect(output.operations[0]!.frontmatter.description).toContain('AT&T fact')
   })
 
   it('returns empty operations array for empty <operations> block', () => {
@@ -268,9 +209,25 @@ describe('parseObserverOutput — valid XML', () => {
   })
 
   it('works when LLM wraps XML in ``` code fences', () => {
-    const raw = `Here is my analysis:\n\`\`\`xml\n${makeXml(`<operations>${VALID_CREATE}</operations>`)}\n\`\`\``
+    const raw = `Here is my analysis:\n\`\`\`xml\n${makeXml(`<operations>${VALID_UPSERT_PREFERENCE}</operations>`)}\n\`\`\``
     const output = parseObserverOutput(raw)
     expect(output.operations).toHaveLength(1)
+  })
+
+  it('handles XML with HTML entities (&amp;, &quot;) correctly', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="fact" priority="low"',
+      `<canonical-key>facts.ampersand</canonical-key>
+       <title>AT&amp;T fact</title>
+       <description>AT&amp;T fact</description>
+       <content>Content with &quot;quotes&quot; and &amp; ampersand.</content>`,
+    )}</operations>`)
+
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.description).toContain('AT&T fact')
+    }
   })
 })
 
@@ -278,7 +235,7 @@ describe('parseObserverOutput — valid XML', () => {
 // Invalid operations: skipped with warning
 // ---------------------------------------------------------------------------
 
-describe('parseObserverOutput — invalid operations skipped', () => {
+describe('parseObserverOutput — invalid upsert operations skipped', () => {
   let warnSpy: ReturnType<typeof vi.spyOn>
 
   beforeEach(() => {
@@ -290,102 +247,84 @@ describe('parseObserverOutput — invalid operations skipped', () => {
 
   it('skips an operation with an invalid node type and logs a warning', () => {
     const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="invalidType" priority="high"',
-      `<id>omg/fact/x</id><description>desc</description><content>body</content>`,
+      'type="invalidType" priority="high"',
+      `<canonical-key>some.key</canonical-key>
+       <title>Title</title>
+       <description>desc</description>
+       <content>body</content>`,
     )}</operations>`)
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalidType'))
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 1'))
   })
 
-  it('skips an operation with an invalid action and logs the rejected action', () => {
+  it('skips an operation with missing canonical-key and logs a warning', () => {
     const xml = makeXml(`<operations>${makeOperation(
-      'action="delete" type="fact" priority="high"',
-      `<id>omg/fact/x</id><description>desc</description><content>body</content>`,
+      'type="fact" priority="medium"',
+      `<title>Some Fact</title>
+       <description>desc</description>
+       <content>body</content>`,
     )}</operations>`)
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"delete"'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing canonical-key'))
   })
 
-  it('skips an update operation with missing target-id and logs the operation id', () => {
+  it('skips an operation with missing description and logs a warning', () => {
     const xml = makeXml(`<operations>${makeOperation(
-      'action="update" type="fact" priority="medium"',
-      `<id>omg/fact/x</id><description>desc</description><content>body</content>`,
+      'type="fact" priority="medium"',
+      `<canonical-key>some.key</canonical-key>
+       <title>Some Title</title>
+       <content>body</content>`,
     )}</operations>`)
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(0)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing target-id'))
-  })
-
-  it('skips a supersede operation with missing target-id and logs the operation id', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="supersede" type="preference" priority="high"',
-      `<id>omg/preference/new</id><description>new desc</description><content>body</content>`,
-    )}</operations>`)
-
-    const output = parseObserverOutput(xml)
-    expect(output.operations).toHaveLength(0)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing target-id'))
-  })
-
-  it('skips an operation with missing id and logs the rejection reason', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="fact" priority="medium"',
-      `<description>desc</description><content>body</content>`,
-    )}</operations>`)
-
-    const output = parseObserverOutput(xml)
-    expect(output.operations).toHaveLength(0)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing id or description'))
-  })
-
-  it('skips an operation with missing description and logs the rejection reason', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="fact" priority="medium"',
-      `<id>omg/fact/x</id><content>body</content>`,
-    )}</operations>`)
-
-    const output = parseObserverOutput(xml)
-    expect(output.operations).toHaveLength(0)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing id or description'))
-  })
-
-  it('logs a warning with the unknown priority value when coercing to medium', () => {
-    const xml = makeXml(`<operations>${makeOperation(
-      'action="create" type="fact" priority="urgent"',
-      `<id>omg/fact/x</id><description>Some fact</description><content>body</content>`,
-    )}</operations>`)
-
-    parseObserverOutput(xml)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"urgent"'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing'))
   })
 
   it('still returns valid operations when mixed with invalid ones', () => {
     const badOp = makeOperation(
-      'action="create" type="not-a-type" priority="high"',
-      `<id>omg/fact/bad</id><description>bad</description><content>body</content>`,
+      'type="not-a-type" priority="high"',
+      `<canonical-key>some.key</canonical-key>
+       <title>Title</title>
+       <description>bad type</description>
+       <content>body</content>`,
     )
-    const xml = makeXml(`<operations>${badOp}${VALID_CREATE}</operations>`)
+    const xml = makeXml(`<operations>${badOp}${VALID_UPSERT_PREFERENCE}</operations>`)
 
     const output = parseObserverOutput(xml)
     expect(output.operations).toHaveLength(1)
-    expect(output.operations[0]!.kind).toBe('create')
+    expect(output.operations[0]!.kind).toBe('upsert')
   })
 
   it('logs a warning with the count of skipped operations', () => {
     const badOp = makeOperation(
-      'action="create" type="not-a-type" priority="high"',
-      `<id>omg/fact/bad</id><description>bad</description><content>body</content>`,
+      'type="not-a-type" priority="high"',
+      `<canonical-key>some.key</canonical-key>
+       <title>Title</title>
+       <description>bad</description>
+       <content>body</content>`,
     )
-    const xml = makeXml(`<operations>${badOp}${badOp}${VALID_CREATE}</operations>`)
+    const xml = makeXml(`<operations>${badOp}${badOp}${VALID_UPSERT_PREFERENCE}</operations>`)
 
     parseObserverOutput(xml)
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 2'))
+  })
+
+  it('logs warning with unknown priority value when coercing to medium', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="fact" priority="urgent"',
+      `<canonical-key>some.key</canonical-key>
+       <title>Title</title>
+       <description>Some fact</description>
+       <content>body</content>`,
+    )}</operations>`)
+
+    parseObserverOutput(xml)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('"urgent"'))
   })
 })
 
@@ -440,7 +379,6 @@ describe('parseObserverOutput — malformed input', () => {
   })
 
   it('logs an error (not warn) when XMLParser.parse() throws', () => {
-    // Force a parse failure by feeding something that looks XML-ish but breaks the parser
     parseObserverOutput('<observations')
     expect(errorSpy).toHaveBeenCalled()
   })

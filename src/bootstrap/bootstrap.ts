@@ -122,22 +122,17 @@ interface ChunkResult {
 async function processChunk(
   chunk: SourceChunk,
   omgRoot: string,
+  scope: string,
   config: OmgConfig,
   llmClient: LlmClient
 ): Promise<ChunkResult> {
-  // Phase 1: gather inputs
+  // Phase 1: gather inputs and run LLM observation
   let observerOutput: ObserverOutput
   try {
-    const allNodes = await listAllNodes(omgRoot)
-    const existingNodeIndex = allNodes.map((n) => ({
-      id: n.frontmatter.id,
-      description: n.frontmatter.description,
-    }))
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
 
     observerOutput = await runObservation({
       unobservedMessages: chunkToMessages(chunk),
-      existingNodeIndex,
       nowNode: nowContent,
       config,
       llmClient,
@@ -149,7 +144,7 @@ async function processChunk(
   }
 
   // Phase 2: write nodes
-  const writeContext = { omgRoot, sessionKey: 'bootstrap' }
+  const writeContext = { omgRoot, sessionKey: 'bootstrap', scope }
   const writeResults = await Promise.allSettled(
     observerOutput.operations.map((op) => writeObservationNode(op, writeContext))
   )
@@ -229,6 +224,7 @@ const DEFAULT_CONCURRENCY = 3
 export async function runBootstrap(params: BootstrapParams): Promise<BootstrapResult> {
   const { workspaceDir, config, llmClient, force = false, source } = params
   const omgRoot = resolveOmgRoot(workspaceDir, config)
+  const scope = config.scope ?? workspaceDir
 
   // Check sentinel (skip if force)
   if (!force) {
@@ -294,7 +290,7 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
   }
 
   // Process chunks with bounded concurrency
-  const tasks = allChunks.map((chunk) => () => processChunk(chunk, omgRoot, config, llmClient))
+  const tasks = allChunks.map((chunk) => () => processChunk(chunk, omgRoot, scope, config, llmClient))
   const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
 
   // Tally results

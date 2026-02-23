@@ -321,6 +321,76 @@ describe('FrontmatterValidationError', () => {
 })
 
 // ---------------------------------------------------------------------------
+// New optional fields: uid, canonicalKey, aliases (Phase 1d)
+// ---------------------------------------------------------------------------
+
+describe('parseNodeFrontmatter — uid, canonicalKey, aliases (new optional fields)', () => {
+  it('accepts frontmatter without uid/canonicalKey/aliases (backward compat)', () => {
+    const result = parseNodeFrontmatter(validMinimal)
+    expect(result.uid).toBeUndefined()
+    expect(result.canonicalKey).toBeUndefined()
+    expect(result.aliases).toBeUndefined()
+  })
+
+  it('accepts valid uid (12-char hex)', () => {
+    const result = parseNodeFrontmatter({ ...validMinimal, uid: 'a3f8c2d91e47' })
+    expect(result.uid).toBe('a3f8c2d91e47')
+  })
+
+  it('rejects uid with wrong length (not 12 chars)', () => {
+    expect(() =>
+      parseNodeFrontmatter({ ...validMinimal, uid: 'abc123' })
+    ).toThrow(FrontmatterValidationError)
+  })
+
+  it('rejects uid with uppercase letters', () => {
+    expect(() =>
+      parseNodeFrontmatter({ ...validMinimal, uid: 'A3F8C2D91E47' })
+    ).toThrow(FrontmatterValidationError)
+  })
+
+  it('rejects uid with non-hex chars', () => {
+    expect(() =>
+      parseNodeFrontmatter({ ...validMinimal, uid: 'zzzzzzzzzzzz' })
+    ).toThrow(FrontmatterValidationError)
+  })
+
+  it('accepts valid canonicalKey', () => {
+    const result = parseNodeFrontmatter({ ...validMinimal, canonicalKey: 'preferences.editor_theme' })
+    expect(result.canonicalKey).toBe('preferences.editor_theme')
+  })
+
+  it('rejects empty canonicalKey', () => {
+    expect(() =>
+      parseNodeFrontmatter({ ...validMinimal, canonicalKey: '' })
+    ).toThrow(FrontmatterValidationError)
+  })
+
+  it('accepts aliases as array of strings', () => {
+    const result = parseNodeFrontmatter({ ...validMinimal, aliases: ['editor-theme', 'dark-mode'] })
+    expect(result.aliases).toEqual(['editor-theme', 'dark-mode'])
+  })
+
+  it('rejects aliases containing empty string', () => {
+    expect(() =>
+      parseNodeFrontmatter({ ...validMinimal, aliases: ['valid', ''] })
+    ).toThrow(FrontmatterValidationError)
+  })
+
+  it('accepts all three new fields together', () => {
+    const result = parseNodeFrontmatter({
+      ...validMinimal,
+      uid: 'a3f8c2d91e47',
+      canonicalKey: 'preferences.editor_theme',
+      aliases: ['editor-theme'],
+    })
+    expect(result.uid).toBe('a3f8c2d91e47')
+    expect(result.canonicalKey).toBe('preferences.editor_theme')
+    expect(result.aliases).toEqual(['editor-theme'])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // nodeFrontmatterSchema export
 // ---------------------------------------------------------------------------
 

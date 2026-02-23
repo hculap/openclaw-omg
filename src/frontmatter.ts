@@ -82,6 +82,12 @@ export const nodeFrontmatterSchema = z
       .refine(isCompressionLevel, { message: 'compressionLevel must be 0, 1, 2, or 3' })
       .optional(),
     archived: z.boolean().optional(),
+    uid: z
+      .string()
+      .regex(/^[a-f0-9]{12}$/, 'uid must be a 12-character lowercase hex string')
+      .optional(),
+    canonicalKey: z.string().min(1, 'canonicalKey must not be empty').optional(),
+    aliases: z.array(z.string().min(1, 'alias must not be empty')).optional(),
   })
   .strip()
   .refine((f) => f.updated >= f.created, {

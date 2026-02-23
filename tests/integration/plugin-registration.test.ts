@@ -210,9 +210,8 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
     expect(handler).toBeDefined()
 
     await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
-    // Give fire-and-forget a microtask to run
-    await Promise.resolve()
-    await Promise.resolve()
+    // Give fire-and-forget microtasks to run: scaffold → listAllNodes → bootstrap
+    for (let i = 0; i < 6; i++) await Promise.resolve()
 
     expect(runBootstrap).toHaveBeenCalledWith(
       expect.objectContaining({ force: false })
@@ -235,13 +234,11 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
     )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
 
     await handler!({ prompt: 'turn 1' }, { sessionKey: 'sess-1' })
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let i = 0; i < 6; i++) await Promise.resolve()
     const callsAfterFirst = vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mock.calls.length
 
     await handler!({ prompt: 'turn 2' }, { sessionKey: 'sess-1' })
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let i = 0; i < 6; i++) await Promise.resolve()
 
     expect(vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst)
   })
@@ -250,7 +247,7 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
     const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
     const { listAllNodes } = await import('../../src/graph/node-reader.js')
     vi.mocked(listAllNodes).mockResolvedValueOnce([
-      { id: 'omg/some-node' } as Parameters<typeof listAllNodes>[0] extends string ? Awaited<ReturnType<typeof listAllNodes>>[number] : never
+      { id: 'omg/some-node' } as unknown as Awaited<ReturnType<typeof listAllNodes>>[number]
     ] as Awaited<ReturnType<typeof listAllNodes>>)
 
     const api = makeMockApi()
@@ -261,8 +258,7 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
     )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
 
     await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
-    await Promise.resolve()
-    await Promise.resolve()
+    for (let i = 0; i < 6; i++) await Promise.resolve()
 
     expect(runBootstrap).not.toHaveBeenCalled()
   })

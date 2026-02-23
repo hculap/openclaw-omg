@@ -177,6 +177,7 @@ export function buildReflectorUserPrompt(params: ReflectorUserPromptParams): str
         priority: fm.priority,
         created: fm.created,
         updated: fm.updated,
+        ...(fm.canonicalKey !== undefined && { canonicalKey: fm.canonicalKey }),
         ...(fm.tags !== undefined && { tags: fm.tags }),
         ...(fm.links !== undefined && { links: fm.links }),
         ...(fm.compressionLevel !== undefined && { compressionLevel: fm.compressionLevel }),

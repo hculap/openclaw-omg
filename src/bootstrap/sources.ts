@@ -4,7 +4,7 @@
  * Three source types are supported, all with graceful degradation:
  *   1. Workspace markdown files (memory/**\/*.md, excluding OMG storage)
  *   2. OpenClaw session logs (~/.openclaw/logs/**)
- *   3. memory-core SQLite chunks (~/.openclaw/memory/{workspace}.sqlite)
+ *   3. OpenClaw agent SQLite chunks (~/.openclaw/memory/{agentId}.sqlite, all agents)
  */
 
 import fs from 'node:fs'
@@ -150,78 +150,155 @@ export async function readOpenclawLogs(): Promise<readonly SourceEntry[]> {
 // ---------------------------------------------------------------------------
 
 /**
- * Reads text chunks from the memory-core SQLite database at
- * `~/.openclaw/memory/{basename(workspaceDir)}.sqlite`, table `chunks`,
- * column `text`.
+ * Reads the openclaw config at `~/.openclaw/openclaw.json` and returns the
+ * set of agent IDs whose workspace matches `workspaceDir` (resolved to the
+ * same absolute path, case-insensitively on case-folded systems).
+ *
+ * Falls back to `null` on any read/parse error — callers treat `null` as
+ * "unknown, include all agents".
+ *
+ * Agent workspace resolution order (mirrors plugin.ts):
+ *   1. `agents.list[].workspace` per agent
+ *   2. `agents.defaults.workspace` as fallback for agents without an explicit workspace
+ */
+function resolveWorkspaceAgentIds(workspaceDir: string): Set<string> | null {
+  const configPath = path.join(os.homedir(), '.openclaw', 'openclaw.json')
+  let raw: string
+  try {
+    raw = fs.readFileSync(configPath, 'utf-8')
+  } catch {
+    return null
+  }
+
+  let config: unknown
+  try {
+    config = JSON.parse(raw)
+  } catch {
+    return null
+  }
+
+  if (typeof config !== 'object' || config === null) return null
+
+  const agents = (config as Record<string, unknown>)['agents']
+  if (typeof agents !== 'object' || agents === null) return null
+
+  const defaultsObj = (agents as Record<string, unknown>)['defaults']
+  const defaultWorkspace =
+    typeof defaultsObj === 'object' && defaultsObj !== null
+      ? ((defaultsObj as Record<string, unknown>)['workspace'] as string | undefined)
+      : undefined
+
+  const list = (agents as Record<string, unknown>)['list']
+  if (!Array.isArray(list)) return null
+
+  const normalizedTarget = path.resolve(workspaceDir)
+  const matched = new Set<string>()
+
+  for (const agent of list) {
+    if (typeof agent !== 'object' || agent === null) continue
+    const id = (agent as Record<string, unknown>)['id']
+    if (typeof id !== 'string') continue
+    const agentWorkspace =
+      (agent as Record<string, unknown>)['workspace'] as string | undefined ?? defaultWorkspace
+    if (typeof agentWorkspace === 'string' && path.resolve(agentWorkspace) === normalizedTarget) {
+      matched.add(id)
+    }
+  }
+
+  return matched.size > 0 ? matched : null
+}
+
+/**
+ * Reads text chunks from OpenClaw agent SQLite memory databases at
+ * `~/.openclaw/memory/{agentId}.sqlite`, table `chunks`, column `text`.
+ *
+ * Only databases belonging to agents whose configured workspace matches
+ * `workspaceDir` are read (resolved from `~/.openclaw/openclaw.json`).
+ * Falls back to reading all `.sqlite` files if the config cannot be parsed.
  *
  * Uses a dynamic import of `better-sqlite3` so the package is optional.
- * Returns `[]` with a single `console.warn` if the package is unavailable
- * or the database file does not exist.
+ * Returns `[]` with a single `console.warn` if the package is unavailable.
  *
  * Graceful degradation: returns `[]` on any error.
  */
 export async function readSqliteChunks(
   workspaceDir: string
 ): Promise<readonly SourceEntry[]> {
-  const dbName = `${path.basename(workspaceDir)}.sqlite`
-  const dbPath = path.join(os.homedir(), '.openclaw', 'memory', dbName)
+  const memoryDir = path.join(os.homedir(), '.openclaw', 'memory')
 
-  // Check if the database file exists before attempting to load the driver
+  // Resolve which agent IDs belong to this workspace from the openclaw config.
+  // Falls back to null (= include all agents) if the config cannot be read.
+  const workspaceAgentIds = resolveWorkspaceAgentIds(workspaceDir)
+
+  // Collect .sqlite files in the openclaw memory directory, filtered to agents
+  // whose workspace matches. OpenClaw names files after agent IDs (e.g. pati.sqlite),
+  // not after the workspace dirname.
+  let dbPaths: string[]
   try {
-    await fs.promises.access(dbPath)
-  } catch {
+    const entries = await fs.promises.readdir(memoryDir)
+    dbPaths = entries
+      .filter((name) => {
+        if (!name.endsWith('.sqlite') || name.includes('.tmp')) return false
+        if (workspaceAgentIds === null) return true // config unavailable — include all
+        const agentId = name.slice(0, -'.sqlite'.length)
+        return workspaceAgentIds.has(agentId)
+      })
+      .map((name) => path.join(memoryDir, name))
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return []
+    }
+    console.warn('[omg] bootstrap: failed to list SQLite memory directory:', err)
     return []
   }
 
-  type SqliteDb = {
-    prepare(sql: string): { all(): unknown[] }
-    close(): void
-  }
-  type SqliteConstructor = new (path: string, options?: { readonly: boolean }) => SqliteDb
+  if (dbPaths.length === 0) return []
 
-  let Database: SqliteConstructor
-
+  // Use Node's built-in node:sqlite (available Node 22.5+, stable Node 25+).
+  // No native addon — no ABI issues regardless of gateway Node version.
+  let DatabaseSync: (typeof import('node:sqlite'))['DatabaseSync']
   try {
-    // better-sqlite3 is an optional dependency — TypeScript may not find its types.
-    // We cast the module at runtime using our own local SqliteConstructor type.
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-    const mod: { default: SqliteConstructor } = await (Function('id', 'return import(id)') as (id: string) => Promise<{ default: SqliteConstructor }>)('better-sqlite3')
-    Database = mod.default
+    const nodeSqlite = await import('node:sqlite')
+    DatabaseSync = nodeSqlite.DatabaseSync
   } catch {
     console.warn(
-      '[omg] bootstrap: better-sqlite3 is not available — SQLite memory chunks will not be ingested. ' +
-      'Install it as an optional dependency to enable this source.'
+      '[omg] bootstrap: node:sqlite is not available — SQLite memory chunks will not be ingested. ' +
+      'Requires Node 22.5+ (experimental) or Node 25+.'
     )
     return []
   }
 
-  try {
-    const db = new Database(dbPath, { readonly: true })
-    let rows: unknown[]
-    try {
-      rows = db.prepare('SELECT text FROM chunks').all()
-    } finally {
-      db.close()
-    }
+  const allEntries: SourceEntry[] = []
 
-    const entries: SourceEntry[] = []
-    let idx = 0
-    for (const row of rows) {
-      if (
-        typeof row === 'object' &&
-        row !== null &&
-        typeof (row as Record<string, unknown>)['text'] === 'string'
-      ) {
-        const text = (row as Record<string, unknown>)['text'] as string
-        if (text.trim().length > 0) {
-          entries.push({ label: `sqlite:chunks[${idx}]`, text })
-        }
+  for (const dbPath of dbPaths) {
+    const agentId = path.basename(dbPath, '.sqlite')
+    try {
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      let rows: unknown[]
+      try {
+        rows = db.prepare('SELECT text FROM chunks').all()
+      } finally {
+        db.close()
       }
-      idx++
+
+      let idx = 0
+      for (const row of rows) {
+        if (
+          typeof row === 'object' &&
+          row !== null &&
+          typeof (row as Record<string, unknown>)['text'] === 'string'
+        ) {
+          const text = (row as Record<string, unknown>)['text'] as string
+          if (text.trim().length > 0) {
+            allEntries.push({ label: `sqlite:${agentId}[${idx}]`, text })
+          }
+        }
+        idx++
+      }
+    } catch (err) {
+      console.warn(`[omg] bootstrap: failed to read SQLite chunks from ${agentId}:`, err)
     }
-    return entries
-  } catch (err) {
-    console.warn('[omg] bootstrap: failed to read SQLite memory chunks:', err)
-    return []
   }
+
+  return allEntries
 }

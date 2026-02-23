@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildObserverSystemPrompt, buildObserverUserPrompt } from '../../src/observer/prompts.js'
 import { NODE_TYPES } from '../../src/types.js'
-import type { NodeIndexEntry, Message } from '../../src/types.js'
+import type { Message } from '../../src/types.js'
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -21,11 +21,9 @@ describe('buildObserverSystemPrompt', () => {
     }
   })
 
-  it('includes action keywords create, update, supersede', () => {
+  it('includes canonical-key format instructions', () => {
     const prompt = buildObserverSystemPrompt()
-    expect(prompt).toContain('create')
-    expect(prompt).toContain('update')
-    expect(prompt).toContain('supersede')
+    expect(prompt).toContain('canonical-key')
   })
 
   it('includes priority keywords high, medium, low', () => {
@@ -47,10 +45,24 @@ describe('buildObserverSystemPrompt', () => {
     expect(prompt).toContain('now-update')
   })
 
-  it('includes wikilink format instruction', () => {
+  it('does NOT include the old existingNodeIndex / action / supersede instructions', () => {
     const prompt = buildObserverSystemPrompt()
-    expect(prompt).toContain('[[')
-    expect(prompt).toContain(']]')
+    // New format uses only upsert — no create/update/supersede action attributes
+    expect(prompt).not.toContain('action="create"')
+    expect(prompt).not.toContain('action="update"')
+    expect(prompt).not.toContain('action="supersede"')
+    // No node index scanning instruction
+    expect(prompt).not.toContain('existing node index')
+  })
+
+  it('includes <canonical-key> in the XML schema example', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('<canonical-key>')
+  })
+
+  it('includes <moc-hints> in the schema', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('moc-hints')
   })
 })
 
@@ -65,46 +77,8 @@ describe('buildObserverUserPrompt', () => {
       content,
     }))
 
-  const makeIndex = (...entries: [string, string][]): readonly NodeIndexEntry[] =>
-    entries.map(([id, description]) => ({ id, description }))
-
-  it('includes node IDs from the existing index', () => {
-    const prompt = buildObserverUserPrompt({
-      existingNodeIndex: makeIndex(
-        ['omg/preference/dark-mode', 'User prefers dark mode'],
-        ['omg/project/my-app', 'Main web application'],
-      ),
-      nowNode: null,
-      messages: makeMessages('Hello'),
-    })
-
-    expect(prompt).toContain('omg/preference/dark-mode')
-    expect(prompt).toContain('omg/project/my-app')
-  })
-
-  it('includes node descriptions from the existing index', () => {
-    const prompt = buildObserverUserPrompt({
-      existingNodeIndex: makeIndex(['omg/fact/test', 'A test fact']),
-      nowNode: null,
-      messages: makeMessages('Hello'),
-    })
-
-    expect(prompt).toContain('A test fact')
-  })
-
-  it('shows (none) for empty existing index', () => {
-    const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
-      nowNode: null,
-      messages: makeMessages('Hello'),
-    })
-
-    expect(prompt).toContain('(none)')
-  })
-
   it('includes messages with correct role formatting', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: null,
       messages: [
         { role: 'user', content: 'I prefer TypeScript' },
@@ -118,7 +92,6 @@ describe('buildObserverUserPrompt', () => {
 
   it('includes the now node content when provided', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: '## Current Focus\nWorking on auth module',
       messages: makeMessages('Hello'),
     })
@@ -128,7 +101,6 @@ describe('buildObserverUserPrompt', () => {
 
   it('shows (none) for null nowNode', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: null,
       messages: makeMessages('Hello'),
     })
@@ -138,7 +110,6 @@ describe('buildObserverUserPrompt', () => {
 
   it('shows (none) for empty string nowNode', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: '   ',
       messages: makeMessages('Hello'),
     })
@@ -148,7 +119,6 @@ describe('buildObserverUserPrompt', () => {
 
   it('includes session context as JSON when provided', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: null,
       messages: makeMessages('Hello'),
       sessionContext: { agentId: 'agent-123', workspace: '/home/user' },
@@ -161,7 +131,6 @@ describe('buildObserverUserPrompt', () => {
 
   it('omits session context section when not provided', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: null,
       messages: makeMessages('Hello'),
     })
@@ -171,7 +140,6 @@ describe('buildObserverUserPrompt', () => {
 
   it('omits session context section when empty object provided', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: [],
       nowNode: null,
       messages: makeMessages('Hello'),
       sessionContext: {},
@@ -180,32 +148,37 @@ describe('buildObserverUserPrompt', () => {
     expect(prompt).not.toContain('Session Context')
   })
 
-  it('contains all required section headers', () => {
+  it('does NOT include an existing node index section', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: makeIndex(['omg/fact/x', 'X']),
+      nowNode: null,
+      messages: makeMessages('Hello'),
+    })
+
+    expect(prompt).not.toContain('Existing Node Index')
+    expect(prompt).not.toContain('existingNodeIndex')
+  })
+
+  it('contains required section headers', () => {
+    const prompt = buildObserverUserPrompt({
       nowNode: 'now content',
       messages: makeMessages('msg'),
     })
 
-    expect(prompt).toContain('## Existing Node Index')
     expect(prompt).toContain('## Current Now Node')
     expect(prompt).toContain('## Messages to Observe')
   })
 
-  it('orders sections: index → now node → messages → session context', () => {
+  it('orders sections: now node → messages → session context', () => {
     const prompt = buildObserverUserPrompt({
-      existingNodeIndex: makeIndex(['omg/fact/x', 'X']),
       nowNode: 'now content',
       messages: makeMessages('msg'),
       sessionContext: { key: 'val' },
     })
 
-    const indexPos = prompt.indexOf('## Existing Node Index')
     const nowPos = prompt.indexOf('## Current Now Node')
     const msgPos = prompt.indexOf('## Messages to Observe')
     const ctxPos = prompt.indexOf('## Session Context')
 
-    expect(indexPos).toBeLessThan(nowPos)
     expect(nowPos).toBeLessThan(msgPos)
     expect(msgPos).toBeLessThan(ctxPos)
   })

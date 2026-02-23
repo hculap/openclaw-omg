@@ -114,6 +114,12 @@ export interface NodeFrontmatter {
   readonly compressionLevel?: CompressionLevel
   /** When true, the Reflector has soft-deleted this node. Archived nodes are excluded from context injection. */
   readonly archived?: boolean
+  /** Deterministic 12-character hex hash of scope:type:canonicalKey. Enables O(1) dedup via file-exists checks. */
+  readonly uid?: string
+  /** Stable dotted-path key used to compute id and file path (e.g. "preferences.editor_theme"). */
+  readonly canonicalKey?: string
+  /** Alternative identifiers or slugs this node was previously known by. */
+  readonly aliases?: readonly string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +172,21 @@ export type ObserverOperation =
       readonly frontmatter: NodeFrontmatter
       /** Proposed body for the replacement node. */
       readonly body: string
+    }
+  | {
+      readonly kind: 'upsert'
+      /** Stable dotted-path key (e.g. "preferences.editor_theme"). Used to compute uid, id, and file path. */
+      readonly canonicalKey: string
+      readonly type: NodeType
+      readonly title: string
+      readonly description: string
+      readonly body: string
+      readonly priority: Priority
+      /** Domain hints for MOC membership (e.g. ["preferences", "tools"]). */
+      readonly mocHints?: readonly string[]
+      /** canonicalKeys of related nodes to link to. */
+      readonly linkKeys?: readonly string[]
+      readonly tags?: readonly string[]
     }
 
 /** Convenience union of all valid Observer action kinds. */
@@ -422,6 +443,12 @@ export interface WriteContext {
   readonly omgRoot: string
   /** Identifier of the current conversation session. */
   readonly sessionKey: string
+  /**
+   * Scope string used when computing deterministic node UIDs.
+   * Typically the resolved workspace directory path.
+   * Defaults to omgRoot when not provided.
+   */
+  readonly scope?: string
 }
 
 /**
@@ -494,8 +521,12 @@ export interface Message {
 export interface ObservationParams {
   /** Messages not yet analysed by a previous Observer run. */
   readonly unobservedMessages: readonly Message[]
-  /** Compact index of nodes already in the graph. */
-  readonly existingNodeIndex: readonly NodeIndexEntry[]
+  /**
+   * Compact index of nodes already in the graph.
+   * @deprecated No longer required — the new Observer uses deterministic IDs and does not
+   * need the full node index for dedup. Kept for backward compatibility.
+   */
+  readonly existingNodeIndex?: readonly NodeIndexEntry[]
   /** Current body of the [[omg/now]] node, or null if it doesn't exist yet. */
   readonly nowNode: string | null
   /**

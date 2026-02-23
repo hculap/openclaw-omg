@@ -707,3 +707,23 @@ describe('OmgConfig type', () => {
     expect(_storagePath).toBeTruthy()
   })
 })
+
+// ---------------------------------------------------------------------------
+// scope field (Phase 1c)
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — scope field', () => {
+  it('scope is undefined by default', () => {
+    const result = parseConfig({})
+    expect(result.scope).toBeUndefined()
+  })
+
+  it('accepts a non-empty scope string', () => {
+    const result = parseConfig({ scope: '/workspace/proj' })
+    expect(result.scope).toBe('/workspace/proj')
+  })
+
+  it('rejects an empty scope string', () => {
+    expect(() => parseConfig({ scope: '' })).toThrow(ConfigValidationError)
+  })
+})
