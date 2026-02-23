@@ -4,7 +4,9 @@
  * Ingests existing OpenClaw memory sources (workspace markdown, session logs,
  * memory-core SQLite) into OMG graph nodes using the Observer LLM pipeline.
  * Runs once at first `gateway_start` when the graph is empty, then writes a
- * sentinel file to prevent re-ingestion.
+ * state file (`.bootstrap-state.json`) to prevent re-ingestion. If the process
+ * crashes mid-run, the state machine enables cursor-based resume on the next
+ * gateway start.
  *
  * Source chunks are packed into batches (controlled by `config.bootstrap.batchCharBudget`)
  * to reduce the number of LLM calls while preserving the same XML parser pipeline.
@@ -21,7 +23,17 @@ import { resolveOmgRoot, resolveMocPath } from '../utils/paths.js'
 import { readWorkspaceMemory, readOpenclawLogs, readSqliteChunks } from './sources.js'
 import { chunkText } from './chunker.js'
 import { batchChunks, batchToMessages, computeBatchMaxTokens } from './batcher.js'
-import { readSentinel, writeSentinel } from './sentinel.js'
+import {
+  readBootstrapState,
+  writeBootstrapState,
+  createInitialState,
+  advanceBatch,
+  finalizeState,
+  shouldBootstrap,
+  computeCursor,
+  createDebouncedFlush,
+  type BootstrapState,
+} from './state.js'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
@@ -45,7 +57,7 @@ export interface BootstrapParams {
   /** LLM client for generating observations. */
   readonly llmClient: LlmClient
   /**
-   * When true, runs even if the sentinel file exists.
+   * When true, runs from scratch regardless of existing state.
    * Useful for CLI `--force` invocation.
    */
   readonly force?: boolean
@@ -59,7 +71,7 @@ export interface BootstrapParams {
 
 /** Result summary returned by {@link runBootstrap}. */
 export interface BootstrapResult {
-  /** Whether bootstrap actually ran (false if sentinel already existed). */
+  /** Whether bootstrap actually ran (false if state was already completed). */
   readonly ran: boolean
   /** Total chunks processed (0 if `ran` is false). */
   readonly chunksProcessed: number
@@ -240,8 +252,8 @@ const DEFAULT_CONCURRENCY = 3
  *
  * Reads from up to three sources, chunks the content, packs chunks into
  * batches, and processes each batch through the Observer LLM pipeline with
- * bounded concurrency. Writes a sentinel file on completion to prevent
- * re-ingestion.
+ * bounded concurrency. Tracks progress in a state file so that a crash
+ * mid-run can be resumed on the next gateway start.
  *
  * Fire-and-forget safe: never throws (all errors are caught and logged).
  */
@@ -250,13 +262,13 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
   const omgRoot = resolveOmgRoot(workspaceDir, config)
   const scope = config.scope ?? workspaceDir
 
-  // Check sentinel (skip if force)
-  if (!force) {
-    const sentinel = await readSentinel(omgRoot)
-    if (sentinel !== null) {
-      return { ran: false, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
-    }
+  // Check state (skip if force)
+  const existingState = await readBootstrapState(omgRoot)
+  const decision = shouldBootstrap(existingState, force)
+  if (!decision.needed) {
+    return { ran: false, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
   }
+  const previousDone = force ? undefined : decision.resumeFromDone
 
   // Resolve which sources to use.
   // config.bootstrap.sources is the canonical config; the deprecated `source`
@@ -304,43 +316,62 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
     `[omg] bootstrap: starting — ${[memoryEntries, logEntries, sqliteEntries].filter((e) => e.length > 0).length} sources, ${totalChunks} chunks, ${batches.length} batches`
   )
 
-  // Write sentinel immediately so a gateway restart does not re-trigger
-  // bootstrap from scratch while processing is already underway.
-  await writeSentinel(omgRoot, {
-    completedAt: new Date().toISOString(),
-    chunksProcessed: totalChunks,
-    chunksSucceeded: 0,
-  })
+  // Initialise state — carry forward progress when resuming
+  let state: BootstrapState =
+    previousDone && existingState
+      ? {
+          ...createInitialState(batches.length),
+          ok: existingState.ok,
+          fail: existingState.fail,
+          done: [...previousDone],
+          cursor: computeCursor(previousDone, batches.length),
+        }
+      : createInitialState(batches.length)
+  await writeBootstrapState(omgRoot, state)
 
   if (totalChunks === 0) {
-    console.log('[omg] bootstrap: no content found — sentinel written, skipping future runs')
+    state = finalizeState(state)
+    await writeBootstrapState(omgRoot, state)
+    console.log('[omg] bootstrap: no content found — state written, skipping future runs')
     return { ran: true, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0, batchCount: 0 }
   }
 
-  // Process batches with bounded concurrency
-  const tasks = batches.map((batch) => () => processBatch(batch, omgRoot, scope, config, llmClient))
-  const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
+  // Build per-batch tasks, skipping already-completed batches
+  const doneSet = new Set(previousDone ?? [])
+  const debouncedFlush = createDebouncedFlush(omgRoot)
 
-  // Tally results
-  let chunksSucceeded = 0
+  const tasks = batches
+    .filter((batch) => !doneSet.has(batch.batchIndex))
+    .map((batch) => async () => {
+      const result = await processBatch(batch, omgRoot, scope, config, llmClient)
+      state = advanceBatch(state, batch.batchIndex, result)
+      debouncedFlush.flush(state)
+      return result
+    })
+
+  const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
+  await debouncedFlush.flushNow(state)
+
+  // Tally nodes written
   let nodesWritten = 0
   for (const result of results) {
     if (result.status === 'fulfilled' && result.value.observationSucceeded) {
-      chunksSucceeded += result.value.chunkCount
       nodesWritten += result.value.nodesWritten
     }
   }
 
+  state = finalizeState(state)
+  await writeBootstrapState(omgRoot, state)
+
   console.log(
-    `[omg] bootstrap: complete — ${chunksSucceeded}/${totalChunks} chunks succeeded (${batches.length} batches), ${nodesWritten} nodes written`
+    `[omg] bootstrap: complete — ${state.ok}/${totalChunks} chunks succeeded (${batches.length} batches), ${nodesWritten} nodes written`
   )
 
-  // Write sentinel
-  await writeSentinel(omgRoot, {
-    completedAt: new Date().toISOString(),
+  return {
+    ran: true,
     chunksProcessed: totalChunks,
-    chunksSucceeded,
-  })
-
-  return { ran: true, chunksProcessed: totalChunks, chunksSucceeded, nodesWritten, batchCount: batches.length }
+    chunksSucceeded: state.ok,
+    nodesWritten,
+    batchCount: batches.length,
+  }
 }

@@ -429,7 +429,7 @@ const graphMaintenanceSchema = z
 
 /**
  * Controls which data sources are used during the cold-start bootstrap pass.
- * Bootstrap ingests historical data once (sentinel guards re-runs) to populate
+ * Bootstrap ingests historical data once (state machine guards re-runs) to populate
  * the graph before the agent has accumulated real observations.
  */
 const bootstrapSourcesSchema = z
