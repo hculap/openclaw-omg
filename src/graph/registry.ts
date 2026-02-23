@@ -12,9 +12,12 @@
 import { z } from 'zod'
 import { join } from 'node:path'
 import { AsyncMutex } from './registry-lock.js'
-import { listAllNodes } from './node-reader.js'
+import { listAllNodes, readGraphNode } from './node-reader.js'
 import { atomicWrite, readFileOrNull } from '../utils/fs.js'
 import type { NodeType, Priority, NodeIndexEntry, GraphNode } from '../types.js'
+import { NODE_TYPES } from '../types.js'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -39,7 +42,7 @@ export interface RegistryData {
 }
 
 const registryNodeEntrySchema = z.object({
-  type: z.string(),
+  type: z.enum(NODE_TYPES),
   kind: z.enum(['observation', 'reflection']),
   description: z.string(),
   priority: z.enum(['high', 'medium', 'low']),
@@ -62,6 +65,8 @@ const registryDataSchema = z.object({
 
 const cache = new Map<string, RegistryData>()
 const mutexes = new Map<string, AsyncMutex>()
+// Deduplicates concurrent cold-start loads for the same omgRoot.
+const pendingLoads = new Map<string, Promise<RegistryData>>()
 
 function getMutex(omgRoot: string): AsyncMutex {
   let mutex = mutexes.get(omgRoot)
@@ -95,9 +100,19 @@ async function loadFromDisk(omgRoot: string): Promise<RegistryData | null> {
   try {
     const parsed = JSON.parse(raw)
     const result = registryDataSchema.safeParse(parsed)
-    if (!result.success) return null
-    return result.data as RegistryData
-  } catch {
+    if (!result.success) {
+      console.error(
+        '[omg] registry: .registry.json failed schema validation — rebuilding from disk.',
+        result.error.issues
+      )
+      return null
+    }
+    return result.data
+  } catch (err) {
+    console.error(
+      '[omg] registry: .registry.json is not valid JSON — rebuilding from disk:',
+      err instanceof Error ? err.message : String(err)
+    )
     return null
   }
 }
@@ -110,14 +125,27 @@ async function ensureLoaded(omgRoot: string): Promise<RegistryData> {
   const cached = cache.get(omgRoot)
   if (cached) return cached
 
-  const fromDisk = await loadFromDisk(omgRoot)
-  if (fromDisk) {
-    cache.set(omgRoot, fromDisk)
-    return fromDisk
-  }
+  // Deduplicate concurrent cold-start callers: if a load is already in-flight
+  // for this omgRoot, await the same promise rather than starting a second one.
+  const pending = pendingLoads.get(omgRoot)
+  if (pending) return pending
 
-  // Cold start or corrupt — rebuild
-  return rebuildRegistry(omgRoot)
+  const load = (async () => {
+    try {
+      const fromDisk = await loadFromDisk(omgRoot)
+      if (fromDisk) {
+        cache.set(omgRoot, fromDisk)
+        return fromDisk
+      }
+      // Cold start or corrupt — rebuild
+      return await rebuildRegistry(omgRoot)
+    } finally {
+      pendingLoads.delete(omgRoot)
+    }
+  })()
+
+  pendingLoads.set(omgRoot, load)
+  return load
 }
 
 // ---------------------------------------------------------------------------
@@ -128,21 +156,6 @@ function inferKind(node: GraphNode): 'observation' | 'reflection' {
   if (node.frontmatter.type === 'reflection') return 'reflection'
   if (node.filePath.includes('/reflections/')) return 'reflection'
   return 'observation'
-}
-
-function entryFromGraphNode(node: GraphNode): RegistryNodeEntry {
-  return {
-    type: node.frontmatter.type,
-    kind: inferKind(node),
-    description: node.frontmatter.description,
-    priority: node.frontmatter.priority,
-    created: node.frontmatter.created,
-    updated: node.frontmatter.updated,
-    filePath: node.filePath,
-    ...(node.frontmatter.archived !== undefined && { archived: node.frontmatter.archived }),
-    ...(node.frontmatter.links !== undefined && { links: node.frontmatter.links }),
-    ...(node.frontmatter.tags !== undefined && { tags: node.frontmatter.tags }),
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,20 +289,60 @@ export async function removeRegistryEntry(
 }
 
 /**
- * Full disk scan → rebuild registry from all graph nodes.
+ * Lists all .md files in `{omgRoot}/reflections/`, parses each as a GraphNode,
+ * and returns valid results. Returns empty array if the directory does not exist.
+ */
+async function listReflectionNodes(omgRoot: string): Promise<GraphNode[]> {
+  const dir = path.join(omgRoot, 'reflections')
+  let entries: string[]
+  try {
+    entries = await fs.readdir(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw new Error(`[omg] registry: failed to read reflections directory ${dir}: ${String(err)}`)
+  }
+  const results = await Promise.all(
+    entries.filter((e) => e.endsWith('.md')).map((e) => readGraphNode(path.join(dir, e)))
+  )
+  return results.filter((n): n is GraphNode => n !== null)
+}
+
+/**
+ * Full disk scan → rebuild registry from all graph nodes (observations + reflections).
  * Always persists the result to disk.
  */
 export async function rebuildRegistry(omgRoot: string): Promise<RegistryData> {
-  const allNodes = await listAllNodes(omgRoot)
-  const nodes: Record<string, RegistryNodeEntry> = {}
+  let observationNodes: GraphNode[]
+  try {
+    observationNodes = await listAllNodes(omgRoot)
+  } catch (err) {
+    throw new Error(
+      `[omg] registry: rebuildRegistry failed — could not list observation nodes in "${omgRoot}": ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err }
+    )
+  }
 
-  for (const node of allNodes) {
-    nodes[node.frontmatter.id] = entryFromGraphNode(node)
+  let reflectionNodes: GraphNode[]
+  try {
+    reflectionNodes = await listReflectionNodes(omgRoot)
+  } catch (err) {
+    // Non-fatal: log and continue without reflection nodes.
+    console.error('[omg] registry: rebuildRegistry — could not list reflection nodes:', err)
+    reflectionNodes = []
+  }
+
+  const nodes: Record<string, RegistryNodeEntry> = {}
+  for (const node of [...observationNodes, ...reflectionNodes]) {
+    nodes[node.frontmatter.id] = buildRegistryEntry(node, inferKind(node))
   }
 
   const data: RegistryData = { version: 1, nodes }
   cache.set(omgRoot, data)
-  await persistRegistry(omgRoot, data)
+  try {
+    await persistRegistry(omgRoot, data)
+  } catch (err) {
+    console.error('[omg] registry: rebuildRegistry — could not persist to disk (in-memory cache still set):', err)
+  }
   return data
 }
 
@@ -309,9 +362,11 @@ export function clearRegistryCache(omgRoot?: string): void {
   if (omgRoot) {
     cache.delete(omgRoot)
     mutexes.delete(omgRoot)
+    pendingLoads.delete(omgRoot)
   } else {
     cache.clear()
     mutexes.clear()
+    pendingLoads.clear()
   }
 }
 

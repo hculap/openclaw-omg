@@ -75,19 +75,26 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
 
   // Hydrate only the qualifying nodes for reflection
   const nodeIds = eligibleEntries.map(([id]) => id)
-  const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
-  const observationNodes = (await Promise.all(
-    [...filePaths.values()].map((fp) => readGraphNode(fp))
-  )).filter((n): n is NonNullable<typeof n> => n !== null)
+  let observationNodes: Awaited<ReturnType<typeof readGraphNode>>[]
+  try {
+    const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+    observationNodes = await Promise.all(
+      [...filePaths.values()].map((fp) => readGraphNode(fp))
+    )
+  } catch (err) {
+    console.error('[omg] cron omg-reflection: failed to hydrate eligible nodes:', err)
+    return
+  }
+  const validNodes = observationNodes.filter((n): n is NonNullable<typeof n> => n !== null)
 
-  if (observationNodes.length === 0) {
+  if (validNodes.length === 0) {
     console.warn('[omg] cron omg-reflection: no eligible nodes found after hydration')
     return
   }
 
   try {
     const result = await runReflection({
-      observationNodes,
+      observationNodes: validNodes,
       config: ctx.config,
       llmClient: ctx.llmClient,
       omgRoot,

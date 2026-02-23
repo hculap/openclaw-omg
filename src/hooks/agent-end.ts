@@ -195,16 +195,21 @@ export async function tryRunObservation(
   // the last reflection pass. After the pass (successful or not) we advance the
   // watermark so reflection does not re-fire on the very next turn.
   if (shouldTriggerReflection(updatedState, config)) {
-    // Use registry for metadata-only filter, then hydrate qualifying nodes
-    const eligibleEntries = await getRegistryEntries(omgRoot, { archived: false })
-    const nonReflectionEntries = eligibleEntries.filter(([, e]) => e.type !== 'reflection')
-    const nodeIds = nonReflectionEntries.map(([id]) => id)
-    const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
-    const observationNodes = (await Promise.all(
-      [...filePaths.values()].map((fp) => readGraphNode(fp))
-    )).filter((n): n is NonNullable<typeof n> => n !== null)
-    await runReflection({ observationNodes, config, llmClient, omgRoot, sessionKey })
-      .catch((err) => console.error(`[omg] agent_end [${sessionKey}]: reflection failed:`, err))
+    try {
+      // Use registry for metadata-only filter, then hydrate qualifying nodes
+      const eligibleEntries = await getRegistryEntries(omgRoot, { archived: false })
+      const nonReflectionEntries = eligibleEntries.filter(([, e]) => e.type !== 'reflection')
+      const nodeIds = nonReflectionEntries.map(([id]) => id)
+      const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+      const observationNodes = (await Promise.all(
+        [...filePaths.values()].map((fp) => readGraphNode(fp))
+      )).filter((n): n is NonNullable<typeof n> => n !== null)
+      await runReflection({ observationNodes, config, llmClient, omgRoot, sessionKey })
+        .catch((err) => console.error(`[omg] agent_end [${sessionKey}]: reflection failed:`, err))
+    } catch (err) {
+      console.error(`[omg] agent_end [${sessionKey}]: reflection setup failed — watermark not advanced:`, err)
+      return updatedState
+    }
     // Advance the watermark regardless of outcome — prevents infinite re-triggering.
     updatedState = { ...updatedState, lastReflectionTotalTokens: updatedState.totalObservationTokens }
   }

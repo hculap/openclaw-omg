@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OmgConfig } from './config.js'
 import { resolveOmgRoot } from './utils/paths.js'
+import { atomicWrite } from './utils/fs.js'
 
 const TEMPLATES_DIR = fileURLToPath(new URL('../templates', import.meta.url))
 
@@ -66,5 +67,5 @@ export async function scaffoldGraphIfNeeded(workspaceDir: string, config: OmgCon
 
   // Write empty registry for fresh graphs
   const registryPath = path.join(omgRoot, '.registry.json')
-  await fs.writeFile(registryPath, JSON.stringify({ version: 1, nodes: {} }, null, 2), 'utf8')
+  await atomicWrite(registryPath, JSON.stringify({ version: 1, nodes: {} }, null, 2))
 }
