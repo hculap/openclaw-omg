@@ -632,15 +632,16 @@ export function register(api: PluginApi): void {
       console.error('[omg] gateway_start: failed to register cron jobs — background reflection will not run:', err)
     }
 
-    // Fire-and-forget bootstrap on first start if no sentinel exists.
-    // Use sentinel presence (not node count) — scaffold writes index.md/now.md
-    // so nodes.length is never 0 after scaffold. runBootstrap skips internally
-    // if sentinel exists, but checking here avoids the async overhead.
+    // Fire-and-forget bootstrap on first start if state says it's needed.
+    // Use state (not node count) — scaffold writes index.md/now.md so
+    // nodes.length is never 0 after scaffold. runBootstrap skips internally
+    // if already completed, but checking here avoids the async overhead.
     const omgRoot = resolveOmgRoot(workspaceDir, config)
-    const { readSentinel } = await import('./bootstrap/sentinel.js')
-    const sentinel = await readSentinel(omgRoot).catch(() => null)
-    console.error(`[omg] gateway_start: sentinel=${sentinel ? 'exists' : 'missing'}, will bootstrap=${sentinel === null}`)
-    if (sentinel === null) {
+    const { readBootstrapState, shouldBootstrap } = await import('./bootstrap/state.js')
+    const existing = await readBootstrapState(omgRoot).catch(() => null)
+    const decision = shouldBootstrap(existing, false)
+    console.error(`[omg] gateway_start: state=${existing?.status ?? 'none'}, bootstrap=${decision.needed}`)
+    if (decision.needed) {
       runBootstrap({ workspaceDir, config, llmClient, force: false })
         .catch((err) => console.error('[omg] gateway_start: bootstrap failed:', err))
     }
@@ -659,7 +660,7 @@ export function register(api: PluginApi): void {
         const program = ctx.program as CliProgram
         program
           .command('omg bootstrap')
-          .option('--force', 'Re-run bootstrap even if sentinel exists')
+          .option('--force', 'Re-run bootstrap from scratch, ignoring previous state')
           .option('--source <source>', 'Source to ingest: memory|logs|sqlite|all', 'all')
           .action(async (...actionArgs: unknown[]) => {
             // Commander calls action as (...positionalArgs, options, command).
@@ -671,12 +672,12 @@ export function register(api: PluginApi): void {
               : {}) as Record<string, unknown>
             if (typeof api.generate !== 'function') {
               const omgRoot = workspaceDir ? resolveOmgRoot(workspaceDir, config) : null
-              const sentinelPath = omgRoot ? `${omgRoot}/.bootstrap-done` : '<omgRoot>/.bootstrap-done'
+              const stateFile = omgRoot ? `${omgRoot}/.bootstrap-state.json` : '<omgRoot>/.bootstrap-state.json'
               console.error(
                 '[omg] bootstrap: api.generate is not available in the CLI context.\n' +
                 'Bootstrap requires an active agent session to access the LLM.\n' +
                 'It will run automatically on the next agent turn if the graph is empty.\n' +
-                `To force a re-run: delete the sentinel file and start a new session:\n  rm ${sentinelPath}`
+                `To force a re-run: delete the state file and start a new session:\n  rm ${stateFile}`
               )
               return
             }
