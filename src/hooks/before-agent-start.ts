@@ -1,4 +1,5 @@
 import type { OmgConfig } from '../config.js'
+import type { MemoryTools } from '../context/memory-search.js'
 import { readGraphNode } from '../graph/node-reader.js'
 import { getNodeCount, getRegistryEntries, type RegistryNodeEntry } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
@@ -19,6 +20,8 @@ export interface BeforeAgentStartContext {
   readonly workspaceDir: string
   readonly sessionKey: string
   readonly config: OmgConfig
+  /** Optional memory tool interface for semantic boosting. null = registry-only. */
+  readonly memoryTools?: MemoryTools | null
 }
 
 export interface BeforeAgentStartResult {
@@ -39,7 +42,7 @@ export async function beforeAgentStart(
   ctx: BeforeAgentStartContext
 ): Promise<BeforeAgentStartResult | undefined> {
   try {
-    const { workspaceDir, config } = ctx
+    const { workspaceDir, config, memoryTools } = ctx
     const omgRoot = resolveOmgRoot(workspaceDir, config)
 
     const [indexContent, nowContent, nodeCount, registryEntries] = await Promise.all([
@@ -68,6 +71,7 @@ export async function beforeAgentStart(
       recentMessages,
       config,
       hydrateNode: readGraphNode,
+      memoryTools,
     })
 
     const prependContext = renderContextBlock(slice)

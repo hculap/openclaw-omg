@@ -122,6 +122,49 @@ describe('beforeAgentStart — empty graph', () => {
 })
 
 // ---------------------------------------------------------------------------
+// beforeAgentStart — memoryTools passthrough
+// ---------------------------------------------------------------------------
+
+describe('beforeAgentStart — memoryTools passthrough', () => {
+  it('accepts memoryTools: null in context without crashing', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/index.md`]: INDEX_MD,
+      [`${OMG_ROOT}/now.md`]: NOW_MD,
+    })
+
+    const config = parseConfig({})
+    const result = await beforeAgentStart(
+      { prompt: 'Hello.' },
+      { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, config, memoryTools: null }
+    )
+
+    expect(result).toBeDefined()
+    expect(result?.prependContext).toContain('<omg-context>')
+  })
+
+  it('accepts memoryTools with mock search that returns null without crashing', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/index.md`]: INDEX_MD,
+      [`${OMG_ROOT}/now.md`]: NOW_MD,
+    })
+
+    const config = parseConfig({})
+    const mockMemoryTools = {
+      search: vi.fn().mockResolvedValue(null),
+      get: vi.fn().mockResolvedValue(null),
+    }
+
+    const result = await beforeAgentStart(
+      { prompt: 'Hello.' },
+      { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, config, memoryTools: mockMemoryTools }
+    )
+
+    expect(result).toBeDefined()
+    expect(result?.prependContext).toContain('<omg-context>')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // beforeAgentStart — knowledge nodes included
 // ---------------------------------------------------------------------------
 

@@ -1,6 +1,8 @@
 import type { OmgConfig } from '../config.js'
 import type { GraphNode, GraphContextSlice, Message } from '../types.js'
 import type { RegistryNodeEntry } from '../graph/registry.js'
+import type { MemoryTools, SemanticCandidate } from './memory-search.js'
+import { buildSearchQuery, buildSemanticCandidates } from './memory-search.js'
 import { estimateTokens } from '../utils/tokens.js'
 
 // ---------------------------------------------------------------------------
@@ -112,33 +114,59 @@ export interface SelectionParamsV2 {
    * Injected for testability — production callers use `readGraphNode`.
    */
   readonly hydrateNode: (filePath: string) => Promise<GraphNode | null>
+  /**
+   * Optional memory tool interface for semantic boosting.
+   * When null (or undefined), scoring falls back to registry-only.
+   */
+  readonly memoryTools?: MemoryTools | null
 }
 
 /**
- * Two-pass context selector using the registry for Pass 1.
+ * Two-pass context selector using the registry for Pass 1, with optional
+ * semantic boosting via OpenClaw's memory_search tool.
  *
  * Pass 1 (no I/O): Score all registry entries by priority, recency, and
  * description/tags keyword match. Select top `MAX_HYDRATION_CANDIDATES`.
+ * If `memoryTools` is provided and `config.injection.semantic.enabled` is true,
+ * a memory_search call runs in parallel with Pass 1 scoring.
  *
  * Pass 2 (I/O): Hydrate top candidates by reading their node bodies.
  * Re-rank within the hydrated set using full body keyword match.
  * Apply budget and count limits to produce the final slice.
  */
 export async function selectContextV2(params: SelectionParamsV2): Promise<GraphContextSlice> {
-  const { indexContent, nowContent, registryEntries, recentMessages, config, hydrateNode } = params
+  const { indexContent, nowContent, registryEntries, recentMessages, config, hydrateNode, memoryTools } = params
   const { injection } = config
 
   const keywords = extractKeywords(recentMessages)
 
-  // --- Pass 1: metadata-only scoring ---
-  const scoredEntries = scoreRegistryEntries(registryEntries, keywords)
+  // --- Pass 1: metadata-only scoring (+ optional parallel memory_search) ---
+  const shouldUseSemantic = memoryTools != null && injection.semantic.enabled
+
+  const [scoredEntries, semanticCandidates] = await Promise.all([
+    Promise.resolve(scoreRegistryEntries(registryEntries, keywords)),
+    shouldUseSemantic
+      ? runMemorySearch(memoryTools!, injection.semantic.maxResults, injection.semantic.minScore, recentMessages, nowContent, keywords)
+      : Promise.resolve([] as readonly SemanticCandidate[]),
+  ])
+
+  // Build filePath → semanticScore map for use after hydration
+  const semanticByPath = new Map<string, number>()
+  for (const candidate of semanticCandidates) {
+    semanticByPath.set(candidate.filePath, candidate.semanticScore)
+  }
+
+  // Merge semantic scores into registry scores for candidate selection
+  const boostedEntries = semanticCandidates.length > 0
+    ? mergeSemantic(scoredEntries, semanticCandidates, injection.semantic.weight)
+    : scoredEntries
 
   // Partition moc vs regular candidates
-  const mocCandidates = scoredEntries
+  const mocCandidates = boostedEntries
     .filter(([, entry]) => entry.type === 'moc')
     .slice(0, injection.maxMocs * 3) // generous budget for hydration
 
-  const regularCandidates = scoredEntries
+  const regularCandidates = boostedEntries
     .filter(([, entry]) => entry.type !== 'moc' && entry.type !== 'index' && entry.type !== 'now')
     .slice(0, MAX_HYDRATION_CANDIDATES)
 
@@ -148,14 +176,172 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     hydrateEntries(regularCandidates, hydrateNode),
   ])
 
-  // Delegate to selectContext with the hydrated nodes
-  return selectContext({
+  // When no semantic signal, delegate to selectContext directly
+  if (semanticByPath.size === 0 || injection.semantic.weight === 0) {
+    return selectContext({
+      indexContent,
+      nowContent,
+      allNodes: [...hydratedMocs, ...hydratedRegular],
+      recentMessages,
+      config,
+    })
+  }
+
+  // With semantic signal: apply hybrid scoring on hydrated nodes, then use
+  // selectContext-like logic with the pre-sorted nodes
+  return selectContextWithSemanticBoost({
     indexContent,
     nowContent,
-    allNodes: [...hydratedMocs, ...hydratedRegular],
+    hydratedMocs,
+    hydratedRegular,
     recentMessages,
     config,
+    semanticByPath,
+    semanticWeight: injection.semantic.weight,
   })
+}
+
+/**
+ * Runs the memory_search tool and returns normalized semantic candidates.
+ * Returns an empty array on any failure (graceful degradation).
+ */
+async function runMemorySearch(
+  memoryTools: MemoryTools,
+  maxResults: number,
+  minScore: number,
+  recentMessages: readonly Message[],
+  nowContent: string | null,
+  keywords: ReadonlySet<string>
+): Promise<readonly SemanticCandidate[]> {
+  try {
+    const lastUserMsg = [...recentMessages].reverse().find((m) => m.role === 'user')?.content ?? ''
+    const query = buildSearchQuery(lastUserMsg, nowContent, keywords)
+
+    const response = await memoryTools.search(query.length > 0 ? `${query} limit:${maxResults}` : `limit:${maxResults}`)
+    if (!response) return []
+
+    return buildSemanticCandidates(response, minScore)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Variant of selectContext that applies semantic boosting to the final node scoring.
+ * Used when semantic candidates are available.
+ */
+function selectContextWithSemanticBoost(params: {
+  indexContent: string
+  nowContent: string | null
+  hydratedMocs: GraphNode[]
+  hydratedRegular: GraphNode[]
+  recentMessages: readonly Message[]
+  config: OmgConfig
+  semanticByPath: Map<string, number>
+  semanticWeight: number
+}): GraphContextSlice {
+  const { indexContent, nowContent, hydratedMocs, hydratedRegular, recentMessages, config, semanticByPath, semanticWeight } = params
+  const { injection } = config
+
+  const keywords = extractKeywords(recentMessages)
+
+  // Score with hybrid formula: baseScore + weight * semanticScore
+  const scoredMocs = scoreNodesWithSemantic(hydratedMocs, keywords, semanticByPath, semanticWeight)
+    .slice(0, injection.maxMocs)
+
+  const scoredRegular = scoreNodesWithSemantic(hydratedRegular, keywords, semanticByPath, semanticWeight)
+
+  // Collect pinned nodes (always included, de-duped)
+  const pinnedIds = new Set(injection.pinnedNodes)
+  const pinnedNodes = hydratedRegular.filter((n) => pinnedIds.has(n.frontmatter.id))
+  const pinnedIdSet = new Set(pinnedNodes.map((n) => n.frontmatter.id))
+
+  const nonPinned = scoredRegular
+    .filter((n) => !pinnedIdSet.has(n.frontmatter.id))
+    .slice(0, Math.max(0, injection.maxNodes - pinnedNodes.length))
+
+  // Enforce token budget
+  const pinnedCost = pinnedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
+  let budget = injection.maxContextTokens
+  budget -= estimateTokens(indexContent)
+  if (nowContent !== null) budget -= estimateTokens(nowContent)
+  budget -= pinnedCost
+
+  const selectedMocs = fitInBudget(scoredMocs, budget / 2)
+  budget -= selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
+
+  const selectedNonPinned = fitInBudget(nonPinned, budget)
+  const selectedNodes = [...pinnedNodes, ...selectedNonPinned]
+
+  const estTokens =
+    estimateTokens(indexContent) +
+    (nowContent !== null ? estimateTokens(nowContent) : 0) +
+    selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0) +
+    selectedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
+
+  const nowNode = nowContent !== null ? buildNowNode(nowContent) : null
+
+  return {
+    index: indexContent,
+    nowNode,
+    mocs: selectedMocs,
+    nodes: selectedNodes,
+    estimatedTokens: estTokens,
+  }
+}
+
+function scoreNodesWithSemantic(
+  nodes: readonly GraphNode[],
+  keywords: ReadonlySet<string>,
+  semanticByPath: Map<string, number>,
+  semanticWeight: number
+): GraphNode[] {
+  return [...nodes]
+    .map((node) => {
+      const baseScore = computeScore(node, keywords)
+      const semanticScore = semanticByPath.get(node.filePath) ?? 0
+      return { node, score: baseScore + semanticWeight * semanticScore }
+    })
+    .sort((a, b) => b.score - a.score)
+    .map(({ node }) => node)
+}
+
+/**
+ * Merges semantic scores into registry entry scores.
+ *
+ * Formula: finalScore = registryScore + weight * semanticScore
+ *
+ * Only registry entries whose filePath appears in the semantic candidates are
+ * boosted. Entries not in the semantic result set keep their original score.
+ * Semantic candidates whose filePath is not in the registry are ignored — the
+ * OMG plugin only injects nodes it owns.
+ */
+function mergeSemantic(
+  scoredEntries: readonly [string, RegistryNodeEntry][],
+  semanticCandidates: readonly SemanticCandidate[],
+  weight: number
+): [string, RegistryNodeEntry][] {
+  if (weight === 0) return [...scoredEntries]
+
+  // Build a lookup map: filePath → normalizedSemanticScore
+  const semanticByPath = new Map<string, number>()
+  for (const candidate of semanticCandidates) {
+    semanticByPath.set(candidate.filePath, candidate.semanticScore)
+  }
+
+  // Re-score entries (we need to reconstruct scores to apply boost)
+  // We store the computed semantic boost alongside each entry, then re-sort
+  const withBoost = scoredEntries.map(([id, entry], idx): { entry: [string, RegistryNodeEntry]; boostPos: number } => {
+    const semanticScore = semanticByPath.get(entry.filePath) ?? 0
+    // Use negative index as base rank (higher in scoredEntries = lower idx = better rank).
+    // Boost shifts rank: semanticScore * weight is added as negative offset (less negative = better).
+    const boostPos = idx - semanticScore * weight * scoredEntries.length
+    return { entry: [id, entry], boostPos }
+  })
+
+  return withBoost
+    .sort((a, b) => a.boostPos - b.boostPos)
+    .map(({ entry }) => entry)
 }
 
 function scoreRegistryEntries(

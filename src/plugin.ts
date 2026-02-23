@@ -22,6 +22,7 @@ import { createDirectAnthropicGenerateFn } from './llm/direct-anthropic.js'
 import { createDirectOpenAiGenerateFn } from './llm/direct-openai.js'
 import { agentEnd } from './hooks/agent-end.js'
 import { beforeAgentStart } from './hooks/before-agent-start.js'
+import { createMemoryTools } from './context/memory-search.js'
 import { beforeCompaction } from './hooks/before-compaction.js'
 import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
@@ -126,6 +127,21 @@ export interface PluginApi {
    * @param handler   Async function to execute on each tick. Errors are logged by the host.
    */
   scheduleCron(jobId: string, schedule: string, handler: () => Promise<void>): void
+
+  /**
+   * Optional runtime extension API provided by newer OpenClaw host versions.
+   * Guards: `typeof api.runtime?.tools?.createMemorySearchTool === 'function'`
+   */
+  readonly runtime?: {
+    readonly tools?: {
+      createMemorySearchTool?: () => { execute(input: unknown): Promise<unknown> } | null
+      createMemoryGetTool?: () => { execute(input: unknown): Promise<unknown> } | null
+    }
+    readonly config?: {
+      loadConfig?: () => unknown
+      writeConfigFile?: (cfg: unknown) => Promise<void>
+    }
+  }
 
   /**
    * Registers a CLI sub-command with OpenClaw's CLI framework.
@@ -280,7 +296,7 @@ async function ensureChatCompletionsEnabled(api: PluginApi): Promise<void> {
   if (chatCompletions?.['enabled'] === true) return // already enabled
 
   // Use runtime.config.writeConfigFile to patch the config
-  const runtime = (api as unknown as { runtime?: { config?: { loadConfig?: () => unknown; writeConfigFile?: (cfg: unknown) => Promise<void> } } }).runtime
+  const runtime = api.runtime
   if (typeof runtime?.config?.loadConfig !== 'function' || typeof runtime?.config?.writeConfigFile !== 'function') {
     console.warn('[omg] gateway_start: cannot auto-enable chatCompletions — runtime.config not available')
     return
@@ -496,6 +512,10 @@ export function register(api: PluginApi): void {
   const config = parseConfig(rawPluginConfig)
   console.error(`[omg] register: threshold=${config.observation.messageTokenThreshold}, triggerMode=${config.observation.triggerMode}`)
 
+  // Probe for OpenClaw memory tools (optional — degrades gracefully to registry-only)
+  const memoryTools = createMemoryTools(api)
+  console.error(`[omg] register: ${memoryTools ? 'memory_search/memory_get tools available — hybrid scoring enabled' : 'registry-only scoring'}`)
+
   // Resolve workspaceDir from (in priority order):
   //   1. Host-provided api.workspaceDir (per-agent context, may be undefined at gateway level)
   //   2. Explicitly configured workspaceDir in plugins.entries.omg.config
@@ -551,7 +571,7 @@ export function register(api: PluginApi): void {
     }
 
     const sessionKey = ctx.sessionKey ?? 'default'
-    return beforeAgentStart(event, { workspaceDir: effectiveWorkspaceDir, sessionKey, config })
+    return beforeAgentStart(event, { workspaceDir: effectiveWorkspaceDir, sessionKey, config, memoryTools })
   })
 
   api.on('agent_end', (event, ctx) => {
