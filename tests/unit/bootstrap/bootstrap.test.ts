@@ -17,6 +17,7 @@ vi.mock('node:os', () => ({
 // Mock observer and graph modules
 vi.mock('../../../src/observer/observer.js', () => ({
   runObservation: vi.fn(),
+  EXTRACT_MAX_TOKENS: 4096,
 }))
 vi.mock('../../../src/graph/node-writer.js', () => ({
   writeObservationNode: vi.fn(),
@@ -177,7 +178,7 @@ describe('runBootstrap — source selection', () => {
 // ---------------------------------------------------------------------------
 
 describe('runBootstrap — chunk processing', () => {
-  it('calls runObservation for each chunk', async () => {
+  it('calls runObservation once per batch (small chunks batched together)', async () => {
     vol.fromJSON({
       '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
       '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
@@ -185,6 +186,19 @@ describe('runBootstrap — chunk processing', () => {
     })
 
     await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+    // Default budget=24000, two small chunks (~30 chars each) fit in one batch
+    expect(runObservation).toHaveBeenCalledTimes(1)
+  })
+
+  it('calls runObservation once per chunk when batchCharBudget=0', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    await runBootstrap(makeBootstrapParams({ config: noBatchConfig, source: 'memory' }))
     expect(runObservation).toHaveBeenCalledTimes(2)
   })
 
@@ -212,15 +226,34 @@ describe('runBootstrap — chunk processing', () => {
 
     const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
     expect(result.nodesWritten).toBe(1)
+    // chunksSucceeded counts all chunks in fulfilled (non-erroring) batches
     expect(result.chunksSucceeded).toBe(1)
   })
 
-  it('handles LLM errors gracefully and continues processing other chunks', async () => {
+  it('counts chunks as succeeded even when batch produces zero nodes', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nSome noise content.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    // EMPTY_OBSERVER_OUTPUT has 0 operations → 0 nodes written
+    vi.mocked(runObservation).mockResolvedValueOnce(EMPTY_OBSERVER_OUTPUT)
+
+    const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+    expect(result.nodesWritten).toBe(0)
+    // Batch fulfilled without error → chunks count as succeeded
+    expect(result.chunksSucceeded).toBe(result.chunksProcessed)
+  })
+
+  it('handles LLM errors gracefully and continues processing other batches', async () => {
     vol.fromJSON({
       '/workspace/memory/file1.md': '# File 1\n\nContent.',
       '/workspace/memory/file2.md': '# File 2\n\nContent.',
       '/workspace/memory/omg/nodes/.keep': '',
     })
+
+    // With batchCharBudget=0, each chunk is its own batch → 2 LLM calls
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
 
     vi.mocked(runObservation)
       .mockRejectedValueOnce(new Error('LLM timeout'))
@@ -228,10 +261,13 @@ describe('runBootstrap — chunk processing', () => {
 
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+    const result = await runBootstrap(makeBootstrapParams({ config: noBatchConfig, source: 'memory' }))
     expect(result.ran).toBe(true)
-    // Both chunks were attempted
+    // Both batches were attempted
     expect(runObservation).toHaveBeenCalledTimes(2)
+    // Only the non-erroring batch counts its chunk as succeeded
+    expect(result.chunksSucceeded).toBe(1)
+    expect(result.chunksProcessed).toBe(2)
 
     consoleErrorSpy.mockRestore()
   })
@@ -252,5 +288,126 @@ describe('runBootstrap — result shape', () => {
       chunksSucceeded: expect.any(Number),
       nodesWritten: expect.any(Number),
     })
+  })
+
+  it('includes batchCount in result when bootstrap runs', async () => {
+    vol.fromJSON({ '/workspace/memory/omg/nodes/.keep': '' })
+
+    const result = await runBootstrap(makeBootstrapParams())
+    expect(result.batchCount).toBeDefined()
+    expect(typeof result.batchCount).toBe('number')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Batch mode
+// ---------------------------------------------------------------------------
+
+describe('runBootstrap — batch mode', () => {
+  it('batches multiple small chunks into fewer LLM calls', async () => {
+    // Create 10 small files that fit within a single batch
+    const files: Record<string, string> = {
+      '/workspace/memory/omg/nodes/.keep': '',
+    }
+    for (let i = 0; i < 10; i++) {
+      files[`/workspace/memory/file${i}.md`] = `# File ${i}\n\nContent for file ${i} to be processed.`
+    }
+    vol.fromJSON(files)
+
+    await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    // Default batchCharBudget=24000, each chunk is ~50 chars → all 10 fit in one batch
+    const callCount = vi.mocked(runObservation).mock.calls.length
+    expect(callCount).toBeLessThan(10)
+    expect(callCount).toBeGreaterThan(0)
+  })
+
+  it('returns batchCount in result', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nSome content to process.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+    expect(result.batchCount).toBe(1)
+  })
+
+  it('passes maxOutputTokens to runObservation for multi-chunk batches', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    // Verify runObservation was called with maxOutputTokens
+    const calls = vi.mocked(runObservation).mock.calls
+    expect(calls.length).toBeGreaterThan(0)
+    for (const call of calls) {
+      expect(call[0].maxOutputTokens).toBeDefined()
+      expect(typeof call[0].maxOutputTokens).toBe('number')
+    }
+  })
+
+  it('with batchCharBudget=0, produces one LLM call per chunk (legacy behavior)', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    await runBootstrap(makeBootstrapParams({ config: noBatchConfig, source: 'memory' }))
+
+    expect(vi.mocked(runObservation).mock.calls.length).toBe(3)
+  })
+
+  it('deduplicates MOC domains across operations in a batch', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nContent.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    vi.mocked(runObservation).mockResolvedValueOnce({
+      operations: [],
+      nowUpdate: null,
+      // Duplicate domain entries — should be deduped
+      mocUpdates: ['preferences', 'preferences', 'tools'],
+    })
+
+    // Should not throw
+    await expect(runBootstrap(makeBootstrapParams({ source: 'memory' }))).resolves.toBeDefined()
+  })
+
+  it('writes now-node once per batch, not per chunk', async () => {
+    const { writeNowNode } = await import('../../../src/graph/node-writer.js')
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    vi.mocked(runObservation).mockResolvedValue({
+      operations: [{
+        kind: 'upsert',
+        canonicalKey: 'facts.test',
+        type: 'fact',
+        title: 'Test',
+        description: 'test',
+        body: 'body',
+        priority: 'low',
+      }],
+      nowUpdate: '## Current Focus\nBootstrap',
+      mocUpdates: [],
+    })
+
+    await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    // With default budget, both chunks should be in one batch → one now-node write
+    const nowCalls = vi.mocked(writeNowNode).mock.calls.length
+    expect(nowCalls).toBeLessThanOrEqual(vi.mocked(runObservation).mock.calls.length)
   })
 })

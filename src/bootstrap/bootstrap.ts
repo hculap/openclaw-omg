@@ -5,6 +5,9 @@
  * memory-core SQLite) into OMG graph nodes using the Observer LLM pipeline.
  * Runs once at first `gateway_start` when the graph is empty, then writes a
  * sentinel file to prevent re-ingestion.
+ *
+ * Source chunks are packed into batches (controlled by `config.bootstrap.batchCharBudget`)
+ * to reduce the number of LLM calls while preserving the same XML parser pipeline.
  */
 
 import path from 'node:path'
@@ -16,11 +19,13 @@ import { writeObservationNode, writeNowNode } from '../graph/node-writer.js'
 import { regenerateMoc, applyMocUpdate } from '../graph/moc-manager.js'
 import { resolveOmgRoot, resolveMocPath } from '../utils/paths.js'
 import { readWorkspaceMemory, readOpenclawLogs, readSqliteChunks } from './sources.js'
-import { chunkText, chunkToMessages } from './chunker.js'
+import { chunkText } from './chunker.js'
+import { batchChunks, batchToMessages, computeBatchMaxTokens } from './batcher.js'
 import { readSentinel, writeSentinel } from './sentinel.js'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
+import type { SourceBatch } from './batcher.js'
 import type { GraphNode, ObserverOutput } from '../types.js'
 
 // ---------------------------------------------------------------------------
@@ -58,10 +63,12 @@ export interface BootstrapResult {
   readonly ran: boolean
   /** Total chunks processed (0 if `ran` is false). */
   readonly chunksProcessed: number
-  /** Chunks that produced at least one written node. */
+  /** Chunks in batches that completed without error. */
   readonly chunksSucceeded: number
   /** Total nodes written across all chunks. */
   readonly nodesWritten: number
+  /** Number of batches (LLM calls). Undefined for pre-batch runs. */
+  readonly batchCount?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -101,48 +108,56 @@ async function runWithConcurrency<T>(
 }
 
 // ---------------------------------------------------------------------------
-// processChunk — mirrors tryRunObservation phases 1–3, no session state
+// processBatch — replaces per-chunk processChunk
 // ---------------------------------------------------------------------------
 
-interface ChunkResult {
+interface BatchResult {
   readonly nodesWritten: number
+  readonly chunkCount: number
+  /** Whether the LLM observation completed without error. */
+  readonly observationSucceeded: boolean
 }
 
 /**
- * Processes a single bootstrap chunk:
- *   1. Snapshot existing node index
- *   2. Read current now.md
- *   3. Run LLM observation
+ * Processes a batch of bootstrap chunks in a single LLM call:
+ *   1. Read node index + now.md once per batch
+ *   2. Build messages via batchToMessages
+ *   3. Run LLM observation with scaled maxOutputTokens
  *   4. Write nodes (Promise.allSettled)
- *   5. Update MOCs
- *   6. Update now node
+ *   5. Deduplicate and apply MOC updates
+ *   6. Write now-node once per batch
  *
- * Returns the number of nodes successfully written.
  * Never throws — all errors are caught and logged.
  */
-async function processChunk(
-  chunk: SourceChunk,
+async function processBatch(
+  batch: SourceBatch,
   omgRoot: string,
   scope: string,
   config: OmgConfig,
   llmClient: LlmClient
-): Promise<ChunkResult> {
+): Promise<BatchResult> {
+  const batchLabel = batch.chunks.length === 1
+    ? batch.chunks[0]!.source
+    : `batch ${batch.batchIndex} (${batch.chunks.length} chunks)`
+
   // Phase 1: gather inputs and run LLM observation
   let observerOutput: ObserverOutput
   try {
-    const existingNodeIndex = await getNodeIndex(omgRoot)
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
+    const messages = batchToMessages(batch)
+    const maxOutputTokens = computeBatchMaxTokens(batch.chunks.length)
 
     observerOutput = await runObservation({
-      unobservedMessages: chunkToMessages(chunk),
+      unobservedMessages: messages,
       nowNode: nowContent,
       config,
       llmClient,
-      sessionContext: { source: 'bootstrap', label: chunk.source },
+      sessionContext: { source: 'bootstrap', label: batchLabel },
+      maxOutputTokens,
     })
   } catch (err) {
-    console.error(`[omg] bootstrap: observation failed for "${chunk.source}":`, err)
-    return { nodesWritten: 0 }
+    console.error(`[omg] bootstrap: observation failed for "${batchLabel}":`, err)
+    return { nodesWritten: 0, chunkCount: batch.chunks.length, observationSucceeded: false }
   }
 
   // Phase 2: write nodes
@@ -158,17 +173,17 @@ async function processChunk(
   const failedWrites = writeResults.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
   if (failedWrites.length > 0) {
     console.error(
-      `[omg] bootstrap: ${failedWrites.length}/${writeResults.length} write(s) failed for "${chunk.source}":`,
+      `[omg] bootstrap: ${failedWrites.length}/${writeResults.length} write(s) failed for "${batchLabel}":`,
       failedWrites.map((f) => f.reason)
     )
   }
 
-  // Phase 3: update MOCs — use registry for domain filtering, hydrate only matching nodes
-  // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
+  // Phase 3: update MOCs — deduplicate domains across all operations in the batch
   if (observerOutput.mocUpdates.length > 0) {
+    const uniqueDomains = [...new Set(observerOutput.mocUpdates)]
     try {
       const allEntries = await getRegistryEntries(omgRoot)
-      for (const domain of observerOutput.mocUpdates) {
+      for (const domain of uniqueDomains) {
         const mocId = `omg/moc-${domain}`
         const domainEntries = allEntries.filter(([, e]) => e.links?.includes(mocId))
         if (domainEntries.length > 0) {
@@ -191,41 +206,42 @@ async function processChunk(
         }
       }
     } catch (err) {
-      console.error(`[omg] bootstrap: MOC update failed for "${chunk.source}":`, err)
+      console.error(`[omg] bootstrap: MOC update failed for "${batchLabel}":`, err)
     }
   }
 
-  // Phase 4: update now node
+  // Phase 4: update now node — once per batch
   if (observerOutput.nowUpdate !== null && writtenNodes.length > 0) {
     try {
       const writtenIds = writtenNodes.map((n) => n.frontmatter.id)
       await writeNowNode(observerOutput.nowUpdate, writtenIds, writeContext)
     } catch (err) {
-      console.error(`[omg] bootstrap: now-node update failed for "${chunk.source}":`, err)
+      console.error(`[omg] bootstrap: now-node update failed for "${batchLabel}":`, err)
     }
   }
 
   const nodesWritten = writtenNodes.length
   console.log(
-    `[omg] bootstrap: processed "${chunk.source}" → ${nodesWritten} node${nodesWritten !== 1 ? 's' : ''}`
+    `[omg] bootstrap: processed "${batchLabel}" → ${nodesWritten} node${nodesWritten !== 1 ? 's' : ''}`
   )
 
-  return { nodesWritten }
+  return { nodesWritten, chunkCount: batch.chunks.length, observationSucceeded: true }
 }
 
 // ---------------------------------------------------------------------------
 // Main orchestrator
 // ---------------------------------------------------------------------------
 
-/** Default concurrency limit for parallel chunk processing. */
+/** Default concurrency limit for parallel batch processing. */
 const DEFAULT_CONCURRENCY = 3
 
 /**
  * Runs the bootstrap ingestion pipeline.
  *
- * Reads from up to three sources, chunks the content, and processes each
- * chunk through the Observer LLM pipeline with bounded concurrency.
- * Writes a sentinel file on completion to prevent re-ingestion.
+ * Reads from up to three sources, chunks the content, packs chunks into
+ * batches, and processes each batch through the Observer LLM pipeline with
+ * bounded concurrency. Writes a sentinel file on completion to prevent
+ * re-ingestion.
  *
  * Fire-and-forget safe: never throws (all errors are caught and logged).
  */
@@ -280,8 +296,12 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
   }
 
   const totalChunks = allChunks.length
+
+  // Pack chunks into batches
+  const batches = batchChunks(allChunks, config.bootstrap.batchCharBudget)
+
   console.log(
-    `[omg] bootstrap: starting — ${[memoryEntries, logEntries, sqliteEntries].filter((e) => e.length > 0).length} sources, ${totalChunks} chunks`
+    `[omg] bootstrap: starting — ${[memoryEntries, logEntries, sqliteEntries].filter((e) => e.length > 0).length} sources, ${totalChunks} chunks, ${batches.length} batches`
   )
 
   // Write sentinel immediately so a gateway restart does not re-trigger
@@ -294,25 +314,25 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
 
   if (totalChunks === 0) {
     console.log('[omg] bootstrap: no content found — sentinel written, skipping future runs')
-    return { ran: true, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
+    return { ran: true, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0, batchCount: 0 }
   }
 
-  // Process chunks with bounded concurrency
-  const tasks = allChunks.map((chunk) => () => processChunk(chunk, omgRoot, scope, config, llmClient))
+  // Process batches with bounded concurrency
+  const tasks = batches.map((batch) => () => processBatch(batch, omgRoot, scope, config, llmClient))
   const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
 
   // Tally results
   let chunksSucceeded = 0
   let nodesWritten = 0
   for (const result of results) {
-    if (result.status === 'fulfilled' && result.value.nodesWritten > 0) {
-      chunksSucceeded++
+    if (result.status === 'fulfilled' && result.value.observationSucceeded) {
+      chunksSucceeded += result.value.chunkCount
       nodesWritten += result.value.nodesWritten
     }
   }
 
   console.log(
-    `[omg] bootstrap: complete — ${chunksSucceeded}/${totalChunks} chunks succeeded, ${nodesWritten} nodes written`
+    `[omg] bootstrap: complete — ${chunksSucceeded}/${totalChunks} chunks succeeded (${batches.length} batches), ${nodesWritten} nodes written`
   )
 
   // Write sentinel
@@ -322,5 +342,5 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
     chunksSucceeded,
   })
 
-  return { ran: true, chunksProcessed: totalChunks, chunksSucceeded, nodesWritten }
+  return { ran: true, chunksProcessed: totalChunks, chunksSucceeded, nodesWritten, batchCount: batches.length }
 }
