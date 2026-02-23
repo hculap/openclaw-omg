@@ -280,13 +280,16 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
     `[omg] bootstrap: starting — ${[memoryEntries, logEntries, sqliteEntries].filter((e) => e.length > 0).length} sources, ${totalChunks} chunks`
   )
 
+  // Write sentinel immediately so a gateway restart does not re-trigger
+  // bootstrap from scratch while processing is already underway.
+  await writeSentinel(omgRoot, {
+    completedAt: new Date().toISOString(),
+    chunksProcessed: totalChunks,
+    chunksSucceeded: 0,
+  })
+
   if (totalChunks === 0) {
     console.log('[omg] bootstrap: no content found — sentinel written, skipping future runs')
-    await writeSentinel(omgRoot, {
-      completedAt: new Date().toISOString(),
-      chunksProcessed: 0,
-      chunksSucceeded: 0,
-    })
     return { ran: true, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
   }
 
