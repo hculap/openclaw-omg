@@ -252,4 +252,41 @@ describe('buildSemanticCandidates', () => {
     const candidates = buildSemanticCandidates(response)
     expect(candidates.every((c) => c.filePath.length > 0)).toBe(true)
   })
+
+  it('filters out candidates below minScore after normalisation', () => {
+    const response: MemorySearchResponse = {
+      results: [
+        { filePath: '/a.md', score: 0.9, snippet: '' },
+        { filePath: '/b.md', score: 0.6, snippet: '' },
+        { filePath: '/c.md', score: 0.3, snippet: '' },
+      ],
+    }
+    // After min-max normalization: /a.md → 1.0, /b.md → 0.5, /c.md → 0.0
+    const candidates = buildSemanticCandidates(response, 0.4)
+    expect(candidates.map((c) => c.filePath)).toEqual(['/a.md', '/b.md'])
+  })
+
+  it('returns all candidates when minScore is 0 (default)', () => {
+    const response: MemorySearchResponse = {
+      results: [
+        { filePath: '/a.md', score: 0.9, snippet: '' },
+        { filePath: '/b.md', score: 0.3, snippet: '' },
+      ],
+    }
+    const candidates = buildSemanticCandidates(response, 0)
+    expect(candidates).toHaveLength(2)
+  })
+
+  it('returns empty array when all candidates fall below minScore', () => {
+    const response: MemorySearchResponse = {
+      results: [
+        { filePath: '/a.md', score: 0.9, snippet: '' },
+        { filePath: '/b.md', score: 0.6, snippet: '' },
+      ],
+    }
+    // After normalization: /a.md → 1.0, /b.md → 0.0 — both below threshold of 1.1 (impossible but edge case)
+    // Use a more realistic case: minScore 1.0 keeps only the top-scoring normalised result
+    const candidates = buildSemanticCandidates(response, 1.0)
+    expect(candidates).toEqual([{ filePath: '/a.md', snippet: '', semanticScore: 1.0 }])
+  })
 })

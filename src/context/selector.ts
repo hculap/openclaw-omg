@@ -146,7 +146,7 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
   const [scoredEntries, semanticCandidates] = await Promise.all([
     Promise.resolve(scoreRegistryEntries(registryEntries, keywords)),
     shouldUseSemantic
-      ? runMemorySearch(memoryTools!, injection.semantic.maxResults, recentMessages, nowContent, keywords)
+      ? runMemorySearch(memoryTools!, injection.semantic.maxResults, injection.semantic.minScore, recentMessages, nowContent, keywords)
       : Promise.resolve([] as readonly SemanticCandidate[]),
   ])
 
@@ -208,6 +208,7 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
 async function runMemorySearch(
   memoryTools: MemoryTools,
   maxResults: number,
+  minScore: number,
   recentMessages: readonly Message[],
   nowContent: string | null,
   keywords: ReadonlySet<string>
@@ -219,7 +220,7 @@ async function runMemorySearch(
     const response = await memoryTools.search(query.length > 0 ? `${query} limit:${maxResults}` : `limit:${maxResults}`)
     if (!response) return []
 
-    return buildSemanticCandidates(response)
+    return buildSemanticCandidates(response, minScore)
   } catch {
     return []
   }

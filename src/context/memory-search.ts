@@ -158,7 +158,8 @@ export function buildSearchQuery(
  * - Normalizes scores to [0, 1] via min-max scaling
  */
 export function buildSemanticCandidates(
-  response: MemorySearchResponse
+  response: MemorySearchResponse,
+  minScore: number = 0
 ): readonly SemanticCandidate[] {
   if (response.disabled) return []
   if (response.results.length === 0) return []
@@ -184,11 +185,14 @@ export function buildSemanticCandidates(
   const max = Math.max(...scores)
   const range = max - min
 
-  return deduped.map((r) => ({
+  const normalized = deduped.map((r) => ({
     filePath: r.filePath,
     snippet: r.snippet,
     // When all scores are equal (range === 0, e.g. single result), normalize to 1.0
     // so the result still contributes as a semantic signal.
     semanticScore: range === 0 ? 1.0 : (r.score - min) / range,
   }))
+
+  // Apply minScore threshold on normalised scores
+  return minScore > 0 ? normalized.filter((c) => c.semanticScore >= minScore) : normalized
 }
