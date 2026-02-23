@@ -120,6 +120,8 @@ export interface NodeFrontmatter {
   readonly canonicalKey?: string
   /** Alternative identifiers or slugs this node was previously known by. */
   readonly aliases?: readonly string[]
+  /** Node ID this node was merged into during semantic dedup. Set when the node is archived by the dedup process. */
+  readonly mergedInto?: string
 }
 
 // ---------------------------------------------------------------------------

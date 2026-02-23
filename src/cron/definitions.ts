@@ -2,20 +2,17 @@
  * Cron job definitions for background OMG maintenance tasks.
  *
  * Two scheduled jobs:
- *   - `omg-reflection`  — nightly reflection pass over aged observation nodes.
- *   - `omg-maintenance` — weekly link repair and deduplication audit.
+ *   - `omg-reflection` — nightly semantic dedup followed by reflection pass.
+ *   - `omg-maintenance`       — weekly link repair and text-exact deduplication audit.
  */
 
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import { runReflection } from '../reflector/reflector.js'
+import { runDedup } from '../dedup/dedup.js'
 import { readGraphNode } from '../graph/node-reader.js'
 import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /** A single cron job definition. */
 export interface CronDefinition {
@@ -31,29 +28,34 @@ export interface CronContext {
   readonly llmClient: LlmClient
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/** Age threshold in milliseconds (7 days) for the reflection cron. */
+/** Age threshold in milliseconds (7 days) for the reflection step. */
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 
 /** Fixed schedule for the maintenance cron (Sunday 4 AM). */
 const MAINTENANCE_SCHEDULE = '0 4 * * 0'
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
 /**
- * Runs a reflection pass over observation nodes older than 7 days.
+ * Runs the combined graph maintenance pass: semantic dedup then reflection.
+ * Dedup failure is non-fatal — reflection still runs.
  * Never throws — errors are logged.
  */
-async function reflectionCronHandler(ctx: CronContext): Promise<void> {
+export async function graphMaintenanceCronHandler(ctx: CronContext): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
+
+  // Step 1: Semantic dedup
+  try {
+    const dedupResult = await runDedup({ omgRoot, config: ctx.config, llmClient: ctx.llmClient })
+    console.warn(
+      `[omg] cron omg-reflection: dedup — ${dedupResult.mergesExecuted} merge(s), ` +
+        `${dedupResult.nodesArchived} archived, ${dedupResult.tokensUsed} tokens`
+    )
+  } catch (err) {
+    console.error('[omg] cron omg-reflection: dedup failed (continuing to reflection):', err)
+  }
+
+  // Step 2: Reflection pass over aged non-archived nodes
   const cutoffMs = Date.now() - SEVEN_DAYS_MS
 
-  // Use registry for metadata-only filtering — zero disk reads for filtering phase
   let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
     const allEntries = await getRegistryEntries(omgRoot)
@@ -64,16 +66,15 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
       return updatedMs < cutoffMs
     })
   } catch (err) {
-    console.error('[omg] cron omg-reflection: failed to read registry:', err)
+    console.error('[omg] cron omg-reflection: failed to read registry for reflection:', err)
     return
   }
 
   if (eligibleEntries.length === 0) {
-    console.warn('[omg] cron omg-reflection: no eligible nodes found (none older than 7 days or all archived)')
+    console.warn('[omg] cron omg-reflection: no nodes eligible for reflection (none older than 7 days)')
     return
   }
 
-  // Hydrate only the qualifying nodes for reflection
   const nodeIds = eligibleEntries.map(([id]) => id)
   let observationNodes: Awaited<ReturnType<typeof readGraphNode>>[]
   try {
@@ -82,13 +83,13 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
       [...filePaths.values()].map((fp) => readGraphNode(fp))
     )
   } catch (err) {
-    console.error('[omg] cron omg-reflection: failed to hydrate eligible nodes:', err)
+    console.error('[omg] cron omg-reflection: failed to hydrate nodes for reflection:', err)
     return
   }
   const validNodes = observationNodes.filter((n): n is NonNullable<typeof n> => n !== null)
 
   if (validNodes.length === 0) {
-    console.warn('[omg] cron omg-reflection: no eligible nodes found after hydration')
+    console.warn('[omg] cron omg-reflection: no valid nodes for reflection after hydration')
     return
   }
 
@@ -101,8 +102,8 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
       sessionKey: 'cron:omg-reflection',
     })
     console.warn(
-      `[omg] cron omg-reflection: completed — ${result.edits.length} reflection node(s) written, ` +
-        `${result.deletions.length} node(s) archived, ${result.tokensUsed} tokens used`,
+      `[omg] cron omg-reflection: reflection — ${result.edits.length} node(s) written, ` +
+        `${result.deletions.length} archived, ${result.tokensUsed} tokens`
     )
   } catch (err) {
     console.error('[omg] cron omg-reflection: reflection pass failed:', err)
@@ -116,7 +117,6 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
 async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
 
-  // Use registry for all maintenance checks — zero disk reads required
   let allEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
     allEntries = await getRegistryEntries(omgRoot)
@@ -125,7 +125,6 @@ async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
     return
   }
 
-  // --- Link repair ---
   const nodeIdSet = new Set(allEntries.map(([id]) => id))
   let brokenLinkCount = 0
   for (const [id, entry] of allEntries) {
@@ -140,7 +139,6 @@ async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
     }
   }
 
-  // --- Deduplication audit (confidence-based, no auto-delete) ---
   const descriptionMap = new Map<string, string[]>()
   for (const [id, entry] of allEntries) {
     if (entry.archived) continue
@@ -166,19 +164,19 @@ async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
 /**
  * Creates all cron job definitions with their handlers bound to `ctx`.
+ * Returns two definitions: `omg-graph-maintenance` and `omg-maintenance`.
  */
 export function createCronDefinitions(ctx: CronContext): readonly CronDefinition[] {
+  const graphMaintenanceSchedule =
+    ctx.config.graphMaintenance.cronSchedule ?? ctx.config.reflection.cronSchedule
+
   return [
     {
       id: 'omg-reflection',
-      schedule: ctx.config.reflection.cronSchedule,
-      handler: () => reflectionCronHandler(ctx),
+      schedule: graphMaintenanceSchedule,
+      handler: () => graphMaintenanceCronHandler(ctx),
     },
     {
       id: 'omg-maintenance',

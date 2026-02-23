@@ -727,3 +727,95 @@ describe('parseConfig — scope field', () => {
     expect(() => parseConfig({ scope: '' })).toThrow(ConfigValidationError)
   })
 })
+
+// ---------------------------------------------------------------------------
+// dedup config
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — dedup', () => {
+  it('dedup defaults applied when not specified', () => {
+    const result = parseConfig({})
+    expect(result.dedup.similarityThreshold).toBe(0.45)
+    expect(result.dedup.maxClustersPerRun).toBe(30)
+    expect(result.dedup.maxClusterSize).toBe(8)
+    expect(result.dedup.maxPairsPerBucket).toBe(20)
+    expect(result.dedup.staleDaysThreshold).toBe(90)
+    expect(result.dedup.stableTypes).toEqual(['identity', 'preference', 'decision', 'project'])
+  })
+
+  it('custom dedup values → applied', () => {
+    const result = parseConfig({
+      dedup: {
+        similarityThreshold: 0.6,
+        maxClustersPerRun: 10,
+        maxClusterSize: 5,
+        maxPairsPerBucket: 15,
+        staleDaysThreshold: 30,
+        stableTypes: ['identity'],
+      },
+    })
+    expect(result.dedup.similarityThreshold).toBe(0.6)
+    expect(result.dedup.maxClustersPerRun).toBe(10)
+    expect(result.dedup.maxClusterSize).toBe(5)
+    expect(result.dedup.maxPairsPerBucket).toBe(15)
+    expect(result.dedup.staleDaysThreshold).toBe(30)
+    expect(result.dedup.stableTypes).toEqual(['identity'])
+  })
+
+  it('similarityThreshold < 0 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ dedup: { similarityThreshold: -0.1 } }),
+      'dedup.similarityThreshold'
+    )
+  })
+
+  it('similarityThreshold > 1 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ dedup: { similarityThreshold: 1.1 } }),
+      'dedup.similarityThreshold'
+    )
+  })
+
+  it('maxClusterSize < 2 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ dedup: { maxClusterSize: 1 } }),
+      'dedup.maxClusterSize'
+    )
+  })
+
+  it('maxClusterSize > 20 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ dedup: { maxClusterSize: 21 } }),
+      'dedup.maxClusterSize'
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// graphMaintenance config
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — graphMaintenance', () => {
+  it('graphMaintenance defaults applied when not specified', () => {
+    const result = parseConfig({})
+    expect(result.graphMaintenance.cronSchedule).toBe('0 3 * * *')
+  })
+
+  it('custom graphMaintenance.cronSchedule → applied', () => {
+    const result = parseConfig({ graphMaintenance: { cronSchedule: '0 2 * * *' } })
+    expect(result.graphMaintenance.cronSchedule).toBe('0 2 * * *')
+  })
+
+  it('invalid graphMaintenance.cronSchedule → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ graphMaintenance: { cronSchedule: 'not-a-cron' } }),
+      'graphMaintenance.cronSchedule'
+    )
+  })
+
+  it('falls back to reflection.cronSchedule when graphMaintenance.cronSchedule not set', () => {
+    // Both unset → both get default '0 3 * * *'
+    const result = parseConfig({})
+    expect(result.graphMaintenance.cronSchedule).toBe(result.reflection.cronSchedule)
+  })
+})

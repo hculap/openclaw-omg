@@ -215,26 +215,6 @@ const injectionSchema = z
   .strip()
 
 /**
- * Controls which sources the bootstrap pipeline reads during cold-start ingestion.
- */
-const bootstrapSchema = z
-  .object({
-    sources: z
-      .object({
-        /** Whether to read workspace markdown memory files (e.g. MEMORY.md). */
-        workspaceMemory: z.boolean().default(true),
-        /** Whether to read OpenClaw session logs. */
-        openclawLogs: z.boolean().default(false),
-        /** Whether to read OpenClaw SQLite session summaries. */
-        openclawSessions: z.boolean().default(true),
-      })
-      .strip()
-      .default({}),
-  })
-  .strip()
-  .default({})
-
-/**
  * Controls how the plugin identifies "who" is being observed across sessions.
  * Additional modes (e.g. user-account scoping) are planned for future releases.
  */
@@ -252,6 +232,81 @@ const identitySchema = z
 // ---------------------------------------------------------------------------
 // Bootstrap schema
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Dedup schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls how the semantic deduplication cron job clusters and merges nodes.
+ */
+const dedupSchema = z
+  .object({
+    /**
+     * Minimum combined similarity score (heuristic) for a candidate pair to
+     * pass to LLM confirmation. Range [0, 1].
+     */
+    similarityThreshold: z
+      .number()
+      .min(0, 'similarityThreshold must be >= 0')
+      .max(1, 'similarityThreshold must be <= 1')
+      .default(0.45),
+    /** Maximum clusters processed per dedup run. */
+    maxClustersPerRun: z
+      .number()
+      .int()
+      .positive('maxClustersPerRun must be a positive integer')
+      .default(30),
+    /** Maximum nodes in a single cluster. Range [2, 20]. */
+    maxClusterSize: z
+      .number()
+      .int()
+      .min(2, 'maxClusterSize must be at least 2')
+      .max(20, 'maxClusterSize must be at most 20')
+      .default(8),
+    /** Maximum pairs evaluated per (type, keyPrefix) bucket. */
+    maxPairsPerBucket: z
+      .number()
+      .int()
+      .positive('maxPairsPerBucket must be a positive integer')
+      .default(20),
+    /**
+     * For volatile node types (episode, fact), pairs whose nodes are further
+     * apart than this many days are skipped.
+     */
+    staleDaysThreshold: z
+      .number()
+      .int()
+      .positive('staleDaysThreshold must be a positive integer')
+      .default(90),
+    /**
+     * Node types considered stable enough for aggressive dedup.
+     * Volatile types (episode, fact) are subject to staleDaysThreshold.
+     */
+    stableTypes: z
+      .array(z.string().min(1))
+      .default(['identity', 'preference', 'decision', 'project']),
+  })
+  .strip()
+
+// ---------------------------------------------------------------------------
+// Graph maintenance schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls the combined graph-maintenance cron that runs semantic dedup
+ * followed by a reflection pass on the cleaned graph.
+ */
+const graphMaintenanceSchema = z
+  .object({
+    /**
+     * 5-field cron schedule for the combined graph-maintenance job.
+     * Replaces the deprecated `reflection.cronSchedule` for scheduling.
+     * Falls back to `reflection.cronSchedule` when not set.
+     */
+    cronSchedule: cronField.default('0 3 * * *'),
+  })
+  .strip()
 
 /**
  * Controls which data sources are used during the cold-start bootstrap pass.
@@ -310,7 +365,8 @@ export const omgConfigSchema = z
     observation: observationSchema.default({}),
     reflection: reflectionSchema.default({}),
     injection: injectionSchema.default({}),
-    bootstrap: bootstrapSchema,
+    dedup: dedupSchema.default({}),
+    graphMaintenance: graphMaintenanceSchema.default({}),
     identity: identitySchema,
     bootstrap: bootstrapSchema.default({}),
     /**
@@ -384,9 +440,10 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   observation: new Set(Object.keys(observationSchema.shape)),
   reflection: new Set(Object.keys(reflectionSchema.shape)),
   injection: new Set(Object.keys(injectionSchema.shape)),
-  bootstrap: new Set(Object.keys(bootstrapSchema.removeDefault().shape)),
-  identity: new Set(['mode']),
+  dedup: new Set(Object.keys(dedupSchema.shape)),
+  graphMaintenance: new Set(Object.keys(graphMaintenanceSchema.shape)),
   bootstrap: new Set(Object.keys(bootstrapSchema.shape)), // includes: sources
+  identity: new Set(['mode']),
 }
 
 /**

@@ -34,6 +34,8 @@ export interface RegistryNodeEntry {
   readonly archived?: boolean
   readonly links?: readonly string[]
   readonly tags?: readonly string[]
+  /** Stable dotted-path key (e.g. "preferences.editor_theme"). Populated on next rebuildRegistry after upsert. */
+  readonly canonicalKey?: string
 }
 
 export interface RegistryData {
@@ -52,6 +54,7 @@ const registryNodeEntrySchema = z.object({
   archived: z.boolean().optional(),
   links: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
+  canonicalKey: z.string().optional(),
 }).strip()
 
 const registryDataSchema = z.object({
@@ -389,5 +392,6 @@ export function buildRegistryEntry(
     ...(node.frontmatter.archived !== undefined && { archived: node.frontmatter.archived }),
     ...(node.frontmatter.links !== undefined && { links: node.frontmatter.links }),
     ...(node.frontmatter.tags !== undefined && { tags: node.frontmatter.tags }),
+    ...(node.frontmatter.canonicalKey !== undefined && { canonicalKey: node.frontmatter.canonicalKey }),
   }
 }
