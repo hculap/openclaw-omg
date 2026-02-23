@@ -21,12 +21,22 @@ export async function loadDedupState(omgRoot: string): Promise<DedupState> {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
-  } catch {
+  } catch (err) {
+    console.warn(
+      '[omg] dedup: state file contains invalid JSON — resetting to defaults. Error:',
+      err instanceof Error ? err.message : String(err)
+    )
     return getDefaultDedupState()
   }
 
   const result = dedupStateSchema.safeParse(parsed)
-  if (!result.success) return getDefaultDedupState()
+  if (!result.success) {
+    console.warn(
+      '[omg] dedup: state file failed schema validation — resetting to defaults. This will trigger a full graph rescan.',
+      result.error.message
+    )
+    return getDefaultDedupState()
+  }
 
   return result.data as DedupState
 }

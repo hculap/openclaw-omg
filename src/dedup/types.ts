@@ -97,6 +97,20 @@ export interface DedupAuditEntry {
   readonly patch: MergePlan['patch']
 }
 
+export const dedupAuditEntrySchema = z.object({
+  timestamp: z.string(),
+  keepNodeId: z.string(),
+  mergedNodeIds: z.array(z.string()),
+  aliasKeys: z.array(z.string()),
+  conflicts: z.array(z.string()),
+  patch: z.object({
+    description: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    links: z.array(z.string()).optional(),
+    bodyAppend: z.string().optional(),
+  }),
+})
+
 // ---------------------------------------------------------------------------
 // DedupState
 // ---------------------------------------------------------------------------

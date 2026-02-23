@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { vol } from 'memfs'
-import { applyPatch, archiveAsMerged } from '../../../src/dedup/merge.js'
+import { applyPatch, archiveAsMerged, executeMerge } from '../../../src/dedup/merge.js'
 import type { NodeFrontmatter } from '../../../src/types.js'
 import type { MergePlan } from '../../../src/dedup/types.js'
 import { clearRegistryCache } from '../../../src/graph/registry.js'
@@ -177,5 +177,170 @@ Old content.`
     await expect(
       archiveAsMerged(`${OMG_ROOT}/nodes/preference/nonexistent.md`, 'omg/preference/nonexistent', 'omg/preference/keeper', OMG_ROOT)
     ).resolves.not.toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// executeMerge
+// ---------------------------------------------------------------------------
+
+const KEEPER_CONTENT = `---
+id: omg/preference/keeper
+description: Keeper preference
+type: preference
+priority: high
+created: 2024-01-01T00:00:00Z
+updated: 2024-01-01T00:00:00Z
+tags:
+  - keeper-tag
+---
+Keeper body.`
+
+const LOSER_CONTENT = `---
+id: omg/preference/loser
+description: Loser preference
+type: preference
+priority: low
+created: 2024-01-01T00:00:00Z
+updated: 2024-01-01T00:00:00Z
+tags:
+  - loser-tag
+---
+Loser body.`
+
+function makePlan(overrides: Partial<MergePlan> = {}): MergePlan {
+  return {
+    keepUid: 'uid-keeper',
+    keepNodeId: 'omg/preference/keeper',
+    mergeUids: ['uid-loser'],
+    mergeNodeIds: ['omg/preference/loser'],
+    aliasKeys: ['preference.old_key'],
+    conflicts: [],
+    patch: { description: 'Merged description', tags: ['loser-tag'] },
+    ...overrides,
+  }
+}
+
+describe('executeMerge — happy path', () => {
+  it('patches the keeper and archives the loser, returning accurate counts', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/nodes/preference/keeper.md`]: KEEPER_CONTENT,
+      [`${OMG_ROOT}/nodes/preference/loser.md`]: LOSER_CONTENT,
+    })
+
+    const filePaths = new Map([
+      ['omg/preference/keeper', `${OMG_ROOT}/nodes/preference/keeper.md`],
+      ['omg/preference/loser', `${OMG_ROOT}/nodes/preference/loser.md`],
+    ])
+
+    const { auditEntry, nodesArchived } = await executeMerge(makePlan(), filePaths, OMG_ROOT)
+
+    // Keeper file is updated
+    const { promises: fs } = await import('node:fs')
+    const keeperWritten = await fs.readFile(`${OMG_ROOT}/nodes/preference/keeper.md`, 'utf-8')
+    expect(keeperWritten).toContain('description: Merged description')
+    expect(keeperWritten).toContain('loser-tag')
+    expect(keeperWritten).toContain('preference.old_key')
+
+    // Loser is archived
+    const loserWritten = await fs.readFile(`${OMG_ROOT}/nodes/preference/loser.md`, 'utf-8')
+    expect(loserWritten).toContain('archived: true')
+    expect(loserWritten).toContain('mergedInto: omg/preference/keeper')
+
+    // Result
+    expect(nodesArchived).toBe(1)
+    expect(auditEntry.keepNodeId).toBe('omg/preference/keeper')
+    expect(auditEntry.mergedNodeIds).toEqual(['omg/preference/loser'])
+  })
+})
+
+describe('executeMerge — keeper path missing (data-loss guard)', () => {
+  it('throws without archiving any losers when keeper has no file path', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/nodes/preference/loser.md`]: LOSER_CONTENT,
+    })
+
+    // filePaths has the loser but not the keeper
+    const filePaths = new Map([
+      ['omg/preference/loser', `${OMG_ROOT}/nodes/preference/loser.md`],
+    ])
+
+    await expect(executeMerge(makePlan(), filePaths, OMG_ROOT)).rejects.toThrow(
+      /Keeper node "omg\/preference\/keeper" has no resolved file path/
+    )
+
+    // Loser must NOT have been archived
+    const { promises: fs } = await import('node:fs')
+    const loserWritten = await fs.readFile(`${OMG_ROOT}/nodes/preference/loser.md`, 'utf-8')
+    expect(loserWritten).not.toContain('archived: true')
+  })
+})
+
+describe('executeMerge — keeper file read/parse fails (data-loss guard)', () => {
+  it('throws without archiving any losers when keeper file does not exist on disk', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/nodes/preference/loser.md`]: LOSER_CONTENT,
+    })
+
+    // filePaths has both, but keeper file is missing from the virtual FS
+    const filePaths = new Map([
+      ['omg/preference/keeper', `${OMG_ROOT}/nodes/preference/keeper.md`],
+      ['omg/preference/loser', `${OMG_ROOT}/nodes/preference/loser.md`],
+    ])
+
+    await expect(executeMerge(makePlan(), filePaths, OMG_ROOT)).rejects.toThrow()
+
+    // Loser must NOT have been archived
+    const { promises: fs } = await import('node:fs')
+    const loserWritten = await fs.readFile(`${OMG_ROOT}/nodes/preference/loser.md`, 'utf-8')
+    expect(loserWritten).not.toContain('archived: true')
+  })
+
+  it('throws without archiving any losers when keeper YAML parses to a non-object', async () => {
+    // A YAML block that the regex matches but parses to a scalar — parseFrontmatter throws
+    const scalarYaml = `---\njust a string\n---\nBody.`
+    vol.fromJSON({
+      [`${OMG_ROOT}/nodes/preference/keeper.md`]: scalarYaml,
+      [`${OMG_ROOT}/nodes/preference/loser.md`]: LOSER_CONTENT,
+    })
+
+    const filePaths = new Map([
+      ['omg/preference/keeper', `${OMG_ROOT}/nodes/preference/keeper.md`],
+      ['omg/preference/loser', `${OMG_ROOT}/nodes/preference/loser.md`],
+    ])
+
+    await expect(executeMerge(makePlan(), filePaths, OMG_ROOT)).rejects.toThrow(
+      /parsed to string instead of object/
+    )
+
+    const { promises: fs } = await import('node:fs')
+    const loserWritten = await fs.readFile(`${OMG_ROOT}/nodes/preference/loser.md`, 'utf-8')
+    expect(loserWritten).not.toContain('archived: true')
+  })
+})
+
+describe('executeMerge — loser path missing', () => {
+  it('skips missing loser paths and only counts actually archived nodes', async () => {
+    vol.fromJSON({
+      [`${OMG_ROOT}/nodes/preference/keeper.md`]: KEEPER_CONTENT,
+      [`${OMG_ROOT}/nodes/preference/loser-a.md`]: LOSER_CONTENT,
+      // loser-b intentionally absent from filePaths
+    })
+
+    const filePaths = new Map([
+      ['omg/preference/keeper', `${OMG_ROOT}/nodes/preference/keeper.md`],
+      ['omg/preference/loser-a', `${OMG_ROOT}/nodes/preference/loser-a.md`],
+      // loser-b NOT in the map
+    ])
+
+    const plan = makePlan({
+      mergeNodeIds: ['omg/preference/loser-a', 'omg/preference/loser-b'],
+      mergeUids: ['uid-loser-a', 'uid-loser-b'],
+    })
+
+    const { nodesArchived } = await executeMerge(plan, filePaths, OMG_ROOT)
+
+    // Only loser-a was actually archived; loser-b had no path so was skipped
+    expect(nodesArchived).toBe(1)
   })
 })

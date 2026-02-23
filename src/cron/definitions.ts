@@ -166,7 +166,7 @@ async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
 
 /**
  * Creates all cron job definitions with their handlers bound to `ctx`.
- * Returns two definitions: `omg-graph-maintenance` and `omg-maintenance`.
+ * Returns two definitions: `omg-reflection` and `omg-maintenance`.
  */
 export function createCronDefinitions(ctx: CronContext): readonly CronDefinition[] {
   const graphMaintenanceSchedule =

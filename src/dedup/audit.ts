@@ -4,7 +4,7 @@
 import { join } from 'node:path'
 import { appendFile } from 'node:fs/promises'
 import { readFileOrNull } from '../utils/fs.js'
-import type { DedupAuditEntry } from './types.js'
+import { type DedupAuditEntry, dedupAuditEntrySchema } from './types.js'
 
 function auditPath(omgRoot: string): string {
   return join(omgRoot, '.dedup-audit.jsonl')
@@ -26,15 +26,32 @@ export async function readAuditLog(omgRoot: string): Promise<DedupAuditEntry[]> 
   if (raw === null || raw.trim() === '') return []
 
   const entries: DedupAuditEntry[] = []
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim()
+  const lines = raw.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = (lines[i] ?? '').trim()
     if (trimmed === '') continue
+
+    let parsed: unknown
     try {
-      const parsed = JSON.parse(trimmed) as DedupAuditEntry
-      entries.push(parsed)
-    } catch {
-      // Skip malformed lines
+      parsed = JSON.parse(trimmed)
+    } catch (err) {
+      console.warn(
+        `[omg] dedup: audit log line ${i + 1} is malformed JSON — skipping. Error:`,
+        err instanceof Error ? err.message : String(err)
+      )
+      continue
     }
+
+    const result = dedupAuditEntrySchema.safeParse(parsed)
+    if (!result.success) {
+      console.warn(
+        `[omg] dedup: audit log line ${i + 1} failed schema validation — skipping. Error:`,
+        result.error.message
+      )
+      continue
+    }
+
+    entries.push(result.data)
   }
   return entries
 }

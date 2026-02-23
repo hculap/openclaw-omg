@@ -16,7 +16,7 @@ import { dedupLlmResponseSchema } from './types.js'
 import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { generateCandidatePairs, clusterCandidates } from './candidates.js'
 import { buildDedupSystemPrompt, buildDedupUserPrompt } from './prompts.js'
-import { executeMerge } from './merge.js'
+import { executeMerge, type MergeResult } from './merge.js'
 import { appendAuditEntry } from './audit.js'
 import { loadDedupState, saveDedupState } from './state.js'
 
@@ -69,11 +69,15 @@ export async function runDedup(params: DedupParams): Promise<DedupRunResult> {
 
   if (pairs.length === 0) {
     console.warn('[omg] dedup: no candidate pairs found — skipping LLM call')
-    await saveDedupState(omgRoot, {
-      ...state,
-      lastDedupAt: new Date().toISOString(),
-      runsCompleted: state.runsCompleted + 1,
-    })
+    try {
+      await saveDedupState(omgRoot, {
+        ...state,
+        lastDedupAt: new Date().toISOString(),
+        runsCompleted: state.runsCompleted + 1,
+      })
+    } catch (err) {
+      console.error('[omg] dedup: failed to save state (no-pairs path):', err)
+    }
     return { clustersProcessed, mergesExecuted, nodesArchived, conflictsDetected, tokensUsed, errors }
   }
 
@@ -143,23 +147,27 @@ export async function runDedup(params: DedupParams): Promise<DedupRunResult> {
     console.error('[omg] dedup:', msg)
     errors.push(msg)
     // Still advance state — the LLM call succeeded, error is in file resolution
-    await saveDedupState(omgRoot, {
-      ...state,
-      lastDedupAt: new Date().toISOString(),
-      runsCompleted: state.runsCompleted + 1,
-    })
+    try {
+      await saveDedupState(omgRoot, {
+        ...state,
+        lastDedupAt: new Date().toISOString(),
+        runsCompleted: state.runsCompleted + 1,
+      })
+    } catch (saveErr) {
+      console.error('[omg] dedup: failed to save state (file-paths error path):', saveErr)
+    }
     return { clustersProcessed, mergesExecuted, nodesArchived, conflictsDetected, tokensUsed, errors }
   }
 
   for (const plan of mergePlans) {
     try {
-      const auditEntry = await executeMerge(plan, filePaths, omgRoot)
+      const result: MergeResult = await executeMerge(plan, filePaths, omgRoot)
       mergesExecuted++
-      nodesArchived += plan.mergeNodeIds.length
+      nodesArchived += result.nodesArchived
       conflictsDetected += plan.conflicts.length
 
       try {
-        await appendAuditEntry(omgRoot, auditEntry)
+        await appendAuditEntry(omgRoot, result.auditEntry)
       } catch (err) {
         console.error(`[omg] dedup: failed to append audit entry for "${plan.keepNodeId}":`, err)
       }
@@ -174,11 +182,15 @@ export async function runDedup(params: DedupParams): Promise<DedupRunResult> {
   // Persist state — only on full success (LLM call succeeded)
   // -------------------------------------------------------------------------
 
-  await saveDedupState(omgRoot, {
-    lastDedupAt: new Date().toISOString(),
-    runsCompleted: state.runsCompleted + 1,
-    totalMerges: state.totalMerges + mergesExecuted,
-  })
+  try {
+    await saveDedupState(omgRoot, {
+      lastDedupAt: new Date().toISOString(),
+      runsCompleted: state.runsCompleted + 1,
+      totalMerges: state.totalMerges + mergesExecuted,
+    })
+  } catch (err) {
+    console.error('[omg] dedup: failed to save state after merge execution:', err)
+  }
 
   console.warn(
     `[omg] dedup: completed — ${clustersProcessed} cluster(s), ` +

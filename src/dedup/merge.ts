@@ -112,76 +112,94 @@ export async function archiveAsMerged(
 // executeMerge
 // ---------------------------------------------------------------------------
 
+/** Result of a single merge execution. */
+export interface MergeResult {
+  readonly auditEntry: DedupAuditEntry
+  readonly nodesArchived: number
+}
+
 /**
  * Executes a single merge plan: patches the keeper node and archives losers.
- * Returns an audit entry for the merge.
+ * Throws if the keeper cannot be patched — this prevents losers from being
+ * archived without their content being preserved in the keeper (data loss).
+ * Returns an audit entry and the count of losers successfully archived.
  */
 export async function executeMerge(
   plan: MergePlan,
   filePaths: Map<string, string>,
   omgRoot: string
-): Promise<DedupAuditEntry> {
-  // Read keeper node
+): Promise<MergeResult> {
+  // Read and patch keeper node — must succeed before any losers are archived
   const keeperPath = filePaths.get(plan.keepNodeId)
-  if (keeperPath) {
-    try {
-      const raw = await fs.readFile(keeperPath, 'utf-8')
-      const { frontmatter: rawFm, body } = parseFrontmatter(raw)
-
-      // Build typed frontmatter
-      const fm: NodeFrontmatter = rawFm as unknown as NodeFrontmatter
-      const { frontmatter: patchedFm, body: patchedBody } = applyPatch(fm, body, plan.patch, plan.aliasKeys)
-
-      // Serialize and write back
-      const record: Record<string, unknown> = {
-        id: patchedFm.id,
-        description: patchedFm.description,
-        type: patchedFm.type,
-        priority: patchedFm.priority,
-        created: patchedFm.created,
-        updated: patchedFm.updated,
-        ...(patchedFm.uid !== undefined && { uid: patchedFm.uid }),
-        ...(patchedFm.canonicalKey !== undefined && { canonicalKey: patchedFm.canonicalKey }),
-        ...(patchedFm.aliases !== undefined && { aliases: patchedFm.aliases }),
-        ...(patchedFm.links !== undefined && { links: patchedFm.links }),
-        ...(patchedFm.tags !== undefined && { tags: patchedFm.tags }),
-        ...(patchedFm.archived !== undefined && { archived: patchedFm.archived }),
-      }
-      await atomicWrite(keeperPath, serializeFrontmatter(record, patchedBody))
-
-      // Update registry
-      try {
-        await updateRegistryEntry(omgRoot, plan.keepNodeId, {
-          description: patchedFm.description,
-          updated: patchedFm.updated,
-          tags: patchedFm.tags ? [...patchedFm.tags] : undefined,
-          links: patchedFm.links ? [...patchedFm.links] : undefined,
-        })
-      } catch (err) {
-        console.error(`[omg] dedup: registry update failed for keeper "${plan.keepNodeId}":`, err)
-      }
-    } catch (err) {
-      console.error(`[omg] dedup: failed to patch keeper "${plan.keepNodeId}":`, err)
-    }
+  if (!keeperPath) {
+    throw new Error(
+      `Keeper node "${plan.keepNodeId}" has no resolved file path — aborting merge to prevent data loss`
+    )
   }
 
-  // Archive losers
+  const raw = await fs.readFile(keeperPath, 'utf-8')
+  const { frontmatter: rawFm, body } = parseFrontmatter(raw)
+
+  // Build typed frontmatter
+  const fm: NodeFrontmatter = rawFm as unknown as NodeFrontmatter
+  const { frontmatter: patchedFm, body: patchedBody } = applyPatch(fm, body, plan.patch, plan.aliasKeys)
+
+  // Serialize and write back
+  const record: Record<string, unknown> = {
+    id: patchedFm.id,
+    description: patchedFm.description,
+    type: patchedFm.type,
+    priority: patchedFm.priority,
+    created: patchedFm.created,
+    updated: patchedFm.updated,
+    ...(patchedFm.uid !== undefined && { uid: patchedFm.uid }),
+    ...(patchedFm.canonicalKey !== undefined && { canonicalKey: patchedFm.canonicalKey }),
+    ...(patchedFm.aliases !== undefined && { aliases: patchedFm.aliases }),
+    ...(patchedFm.links !== undefined && { links: patchedFm.links }),
+    ...(patchedFm.tags !== undefined && { tags: patchedFm.tags }),
+    ...(patchedFm.archived !== undefined && { archived: patchedFm.archived }),
+  }
+  await atomicWrite(keeperPath, serializeFrontmatter(record, patchedBody))
+
+  // Update registry
+  try {
+    await updateRegistryEntry(omgRoot, plan.keepNodeId, {
+      description: patchedFm.description,
+      updated: patchedFm.updated,
+      tags: patchedFm.tags ? [...patchedFm.tags] : undefined,
+      links: patchedFm.links ? [...patchedFm.links] : undefined,
+    })
+  } catch (err) {
+    console.error(`[omg] dedup: registry update failed for keeper "${plan.keepNodeId}":`, err)
+  }
+
+  // Archive losers — only reached after keeper is successfully patched
+  let nodesArchived = 0
   for (const loserNodeId of plan.mergeNodeIds) {
     const loserPath = filePaths.get(loserNodeId)
-    if (!loserPath) continue
+    if (!loserPath) {
+      console.warn(
+        `[omg] dedup: loser "${loserNodeId}" has no resolved file path — skipping archive (registry/disk desync?)`
+      )
+      continue
+    }
     try {
       await archiveAsMerged(loserPath, loserNodeId, plan.keepNodeId, omgRoot)
+      nodesArchived++
     } catch (err) {
       console.error(`[omg] dedup: failed to archive loser "${loserNodeId}":`, err)
     }
   }
 
   return {
-    timestamp: new Date().toISOString(),
-    keepNodeId: plan.keepNodeId,
-    mergedNodeIds: plan.mergeNodeIds,
-    aliasKeys: plan.aliasKeys,
-    conflicts: plan.conflicts,
-    patch: plan.patch,
+    auditEntry: {
+      timestamp: new Date().toISOString(),
+      keepNodeId: plan.keepNodeId,
+      mergedNodeIds: plan.mergeNodeIds,
+      aliasKeys: plan.aliasKeys,
+      conflicts: plan.conflicts,
+      patch: plan.patch,
+    },
+    nodesArchived,
   }
 }
