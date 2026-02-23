@@ -215,6 +215,26 @@ const injectionSchema = z
   .strip()
 
 /**
+ * Controls which sources the bootstrap pipeline reads during cold-start ingestion.
+ */
+const bootstrapSchema = z
+  .object({
+    sources: z
+      .object({
+        /** Whether to read workspace markdown memory files (e.g. MEMORY.md). */
+        workspaceMemory: z.boolean().default(true),
+        /** Whether to read OpenClaw session logs. */
+        openclawLogs: z.boolean().default(false),
+        /** Whether to read OpenClaw SQLite session summaries. */
+        openclawSessions: z.boolean().default(true),
+      })
+      .strip()
+      .default({}),
+  })
+  .strip()
+  .default({})
+
+/**
  * Controls how the plugin identifies "who" is being observed across sessions.
  * Additional modes (e.g. user-account scoping) are planned for future releases.
  */
@@ -290,6 +310,7 @@ export const omgConfigSchema = z
     observation: observationSchema.default({}),
     reflection: reflectionSchema.default({}),
     injection: injectionSchema.default({}),
+    bootstrap: bootstrapSchema,
     identity: identitySchema,
     bootstrap: bootstrapSchema.default({}),
     /**
@@ -363,6 +384,7 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   observation: new Set(Object.keys(observationSchema.shape)),
   reflection: new Set(Object.keys(reflectionSchema.shape)),
   injection: new Set(Object.keys(injectionSchema.shape)),
+  bootstrap: new Set(Object.keys(bootstrapSchema.removeDefault().shape)),
   identity: new Set(['mode']),
   bootstrap: new Set(Object.keys(bootstrapSchema.shape)), // includes: sources
 }

@@ -9,7 +9,8 @@
 
 import path from 'node:path'
 import { readFileOrNull } from '../utils/fs.js'
-import { listAllNodes } from '../graph/node-reader.js'
+import { readGraphNode } from '../graph/node-reader.js'
+import { getNodeIndex, getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { runObservation } from '../observer/observer.js'
 import { writeObservationNode, writeNowNode } from '../graph/node-writer.js'
 import { regenerateMoc, applyMocUpdate } from '../graph/moc-manager.js'
@@ -129,6 +130,7 @@ async function processChunk(
   // Phase 1: gather inputs and run LLM observation
   let observerOutput: ObserverOutput
   try {
+    const existingNodeIndex = await getNodeIndex(omgRoot)
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
 
     observerOutput = await runObservation({
@@ -161,17 +163,23 @@ async function processChunk(
     )
   }
 
-  // Phase 3: update MOCs
+  // Phase 3: update MOCs — use registry for domain filtering, hydrate only matching nodes
   // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
-  // Tags are semantic keywords; the MOC link is the reliable domain membership signal.
   if (observerOutput.mocUpdates.length > 0) {
     try {
-      const allNodes = await listAllNodes(omgRoot)
+      const allEntries = await getRegistryEntries(omgRoot)
       for (const domain of observerOutput.mocUpdates) {
         const mocId = `omg/moc-${domain}`
-        const domainNodes = allNodes.filter((n) => n.frontmatter.links?.includes(mocId))
-        if (domainNodes.length > 0) {
-          await regenerateMoc(domain, domainNodes, omgRoot)
+        const domainEntries = allEntries.filter(([, e]) => e.links?.includes(mocId))
+        if (domainEntries.length > 0) {
+          const nodeIds = domainEntries.map(([id]) => id)
+          const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+          const domainNodes = (await Promise.all(
+            [...filePaths.values()].map((fp) => readGraphNode(fp))
+          )).filter((n): n is NonNullable<typeof n> => n !== null)
+          if (domainNodes.length > 0) {
+            await regenerateMoc(domain, domainNodes, omgRoot)
+          }
         } else {
           const mocPath = resolveMocPath(omgRoot, domain)
           const domainWrittenIds = writtenNodes

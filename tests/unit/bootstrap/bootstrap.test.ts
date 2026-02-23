@@ -26,14 +26,15 @@ vi.mock('../../../src/graph/moc-manager.js', () => ({
   regenerateMoc: vi.fn(),
   applyMocUpdate: vi.fn(),
 }))
-vi.mock('../../../src/graph/node-reader.js', () => ({
-  listAllNodes: vi.fn(),
+vi.mock('../../../src/graph/registry.js', () => ({
+  getNodeIndex: vi.fn().mockResolvedValue([]),
+  getRegistryEntries: vi.fn().mockResolvedValue([]),
+  getNodeFilePaths: vi.fn().mockResolvedValue(new Map()),
 }))
 
 import { runBootstrap } from '../../../src/bootstrap/bootstrap.js'
 import { runObservation } from '../../../src/observer/observer.js'
 import { writeObservationNode } from '../../../src/graph/node-writer.js'
-import { listAllNodes } from '../../../src/graph/node-reader.js'
 import { parseConfig } from '../../../src/config.js'
 import type { LlmClient } from '../../../src/llm/client.js'
 
@@ -69,7 +70,6 @@ beforeEach(() => {
   vol.reset()
   vi.clearAllMocks()
   vi.mocked(runObservation).mockResolvedValue(EMPTY_OBSERVER_OUTPUT)
-  vi.mocked(listAllNodes).mockResolvedValue([])
   vi.mocked(writeObservationNode).mockResolvedValue({
     frontmatter: {
       id: 'omg/fact/test',

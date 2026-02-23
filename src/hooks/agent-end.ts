@@ -8,7 +8,8 @@ import { runObservation } from '../observer/observer.js'
 import { runReflection } from '../reflector/reflector.js'
 import { writeObservationNode, writeNowNode } from '../graph/node-writer.js'
 import { applyMocUpdate, regenerateMoc } from '../graph/moc-manager.js'
-import { listAllNodes } from '../graph/node-reader.js'
+import { readGraphNode } from '../graph/node-reader.js'
+import { getNodeIndex, getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { resolveOmgRoot, resolveMocPath } from '../utils/paths.js'
 import { readFileOrNull } from '../utils/fs.js'
 import path from 'node:path'
@@ -85,6 +86,7 @@ export async function tryRunObservation(
   let observerOutput!: ObserverOutput
   try {
     const unobservedMessages = Array.from(messages.slice(state.observationBoundaryMessageIndex))
+    const existingNodeIndex = await getNodeIndex(omgRoot)
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
     observerOutput = await runObservation({
       unobservedMessages,
@@ -122,17 +124,24 @@ export async function tryRunObservation(
     return state
   }
 
-  // Phase 3: update MOCs
+  // Phase 3: update MOCs — use registry for domain filtering, hydrate only matching nodes
   try {
-    // Apply MOC updates — read the graph once after all writes, not once per domain.
     // Nodes belong to a domain if they link to [[omg/moc-{domain}]], NOT by tags.
     // Tags are semantic keywords; the MOC link is the reliable domain membership signal.
-    const updatedNodes = await listAllNodes(omgRoot)
+    const allEntries = await getRegistryEntries(omgRoot)
     for (const domain of observerOutput.mocUpdates) {
       const mocId = `omg/moc-${domain}`
-      const domainNodes = updatedNodes.filter((n) => n.frontmatter.links?.includes(mocId))
-      if (domainNodes.length > 0) {
-        await regenerateMoc(domain, domainNodes, omgRoot)
+      const domainEntries = allEntries.filter(([, e]) => e.links?.includes(mocId))
+      if (domainEntries.length > 0) {
+        // Hydrate only the matching nodes for MOC regeneration
+        const nodeIds = domainEntries.map(([id]) => id)
+        const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+        const domainNodes = (await Promise.all(
+          [...filePaths.values()].map((fp) => readGraphNode(fp))
+        )).filter((n): n is NonNullable<typeof n> => n !== null)
+        if (domainNodes.length > 0) {
+          await regenerateMoc(domain, domainNodes, omgRoot)
+        }
       } else {
         // No nodes link to this MOC yet — add only the written nodes that belong here
         const mocPath = resolveMocPath(omgRoot, domain)
@@ -186,12 +195,21 @@ export async function tryRunObservation(
   // the last reflection pass. After the pass (successful or not) we advance the
   // watermark so reflection does not re-fire on the very next turn.
   if (shouldTriggerReflection(updatedState, config)) {
-    const allNodes = await listAllNodes(omgRoot)
-    const observationNodes = allNodes.filter(
-      (n) => n.frontmatter.type !== 'reflection' && !n.frontmatter.archived
-    )
-    await runReflection({ observationNodes, config, llmClient, omgRoot, sessionKey })
-      .catch((err) => console.error(`[omg] agent_end [${sessionKey}]: reflection failed:`, err))
+    try {
+      // Use registry for metadata-only filter, then hydrate qualifying nodes
+      const eligibleEntries = await getRegistryEntries(omgRoot, { archived: false })
+      const nonReflectionEntries = eligibleEntries.filter(([, e]) => e.type !== 'reflection')
+      const nodeIds = nonReflectionEntries.map(([id]) => id)
+      const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+      const observationNodes = (await Promise.all(
+        [...filePaths.values()].map((fp) => readGraphNode(fp))
+      )).filter((n): n is NonNullable<typeof n> => n !== null)
+      await runReflection({ observationNodes, config, llmClient, omgRoot, sessionKey })
+        .catch((err) => console.error(`[omg] agent_end [${sessionKey}]: reflection failed:`, err))
+    } catch (err) {
+      console.error(`[omg] agent_end [${sessionKey}]: reflection setup failed — watermark not advanced:`, err)
+      return updatedState
+    }
     // Advance the watermark regardless of outcome — prevents infinite re-triggering.
     updatedState = { ...updatedState, lastReflectionTotalTokens: updatedState.totalObservationTokens }
   }

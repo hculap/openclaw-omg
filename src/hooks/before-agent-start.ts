@@ -1,7 +1,8 @@
 import type { OmgConfig } from '../config.js'
-import { listAllNodes } from '../graph/node-reader.js'
+import { readGraphNode } from '../graph/node-reader.js'
+import { getNodeCount, getRegistryEntries, type RegistryNodeEntry } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
-import { selectContext } from '../context/selector.js'
+import { selectContextV2 } from '../context/selector.js'
 import { renderContextBlock } from '../context/renderer.js'
 import { readFileOrNull } from '../utils/fs.js'
 import path from 'node:path'
@@ -41,17 +42,18 @@ export async function beforeAgentStart(
     const { workspaceDir, config } = ctx
     const omgRoot = resolveOmgRoot(workspaceDir, config)
 
-    const [indexContent, nowContent, allNodes] = await Promise.all([
+    const [indexContent, nowContent, nodeCount, registryEntries] = await Promise.all([
       readFileOrNull(path.join(omgRoot, 'index.md')),
       readFileOrNull(path.join(omgRoot, 'now.md')),
-      listAllNodes(omgRoot).catch((err) => {
-        console.error('[omg] before_agent_start: failed to list graph nodes:', err)
-        return []
+      getNodeCount(omgRoot).catch(() => 0),
+      getRegistryEntries(omgRoot).catch((err) => {
+        console.error('[omg] before_agent_start: failed to load registry entries:', err)
+        return [] as readonly [string, RegistryNodeEntry][]
       }),
     ])
 
     // Nothing to inject when graph doesn't exist yet
-    if (indexContent === null && allNodes.length === 0) {
+    if (indexContent === null && nodeCount === 0) {
       return undefined
     }
 
@@ -59,12 +61,13 @@ export async function beforeAgentStart(
       ? [{ role: 'user' as const, content: event.prompt }]
       : []
 
-    const slice = selectContext({
+    const slice = await selectContextV2({
       indexContent: indexContent ?? '',
       nowContent,
-      allNodes,
+      registryEntries,
       recentMessages,
       config,
+      hydrateNode: readGraphNode,
     })
 
     const prependContext = renderContextBlock(slice)

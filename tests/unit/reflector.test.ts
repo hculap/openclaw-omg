@@ -3,6 +3,7 @@ import { vol } from 'memfs'
 import type { LlmClient } from '../../src/llm/client.js'
 import type { GraphNode } from '../../src/types.js'
 import { parseConfig } from '../../src/config.js'
+import { clearRegistryCache } from '../../src/graph/registry.js'
 
 vi.mock('node:fs', async () => {
   const m = await vi.importActual<typeof import('memfs')>('memfs')
@@ -71,6 +72,7 @@ function makeObservationNode(id: string, body = 'Some observation body content.'
 
 beforeEach(() => {
   vol.reset()
+  clearRegistryCache()
   vol.fromJSON({
     [`${OMG_ROOT}/nodes/preference/preference-dark-mode-2026-01-01.md`]: `---
 id: omg/preference-dark-mode

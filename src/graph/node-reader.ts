@@ -76,6 +76,10 @@ export async function listNodesByType(omgRoot: string, type: NodeType): Promise<
  * The initial readdir is a lightweight existence check; if the `nodes/`
  * directory does not exist (ENOENT), an empty array is returned early.
  * Throws for unexpected filesystem errors (e.g. EACCES, EIO).
+ *
+ * @deprecated Use the registry API (`getRegistryEntries`, `getNodeIndex`) for
+ * O(1) metadata lookups. This function is retained for `rebuildRegistry`'s
+ * cold-start scan only.
  */
 export async function listAllNodes(omgRoot: string): Promise<GraphNode[]> {
   const nodesDir = path.join(omgRoot, 'nodes')

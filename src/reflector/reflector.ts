@@ -16,7 +16,8 @@ import type { LlmClient } from '../llm/client.js'
 import { buildReflectorSystemPrompt, buildReflectorUserPrompt } from './prompts.js'
 import { parseReflectorOutput, type ReflectorXmlOutput } from './parser.js'
 import { writeReflectionNode } from '../graph/node-writer.js'
-import { listAllNodes } from '../graph/node-reader.js'
+import { getRegistryEntry, updateRegistryEntry } from '../graph/registry.js'
+import { readGraphNode } from '../graph/node-reader.js'
 import { applyMocUpdate } from '../graph/moc-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
@@ -63,7 +64,7 @@ function emptyOutput(): ReflectorOutput {
  * Reads a node file, sets `archived: true` in frontmatter, and writes it back
  * atomically. Silently skips files that are not found or fail to parse.
  */
-async function markNodeArchived(filePath: string): Promise<void> {
+async function markNodeArchived(filePath: string, nodeId: string, omgRoot: string): Promise<void> {
   let raw: string
   try {
     raw = await fs.readFile(filePath, 'utf-8')
@@ -92,6 +93,12 @@ async function markNodeArchived(filePath: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true })
   const content = serializeFrontmatter(frontmatterRecord, body)
   await atomicWrite(filePath, content)
+
+  try {
+    await updateRegistryEntry(omgRoot, nodeId, { archived: true })
+  } catch (err) {
+    console.error(`[omg] Reflector: registry update failed for archive of "${nodeId}":`, err)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +191,25 @@ async function applyNodeFieldUpdate(
 
   const content = serializeFrontmatter(frontmatterRecord, body)
   await atomicWrite(node.filePath, content)
+
+  // Update registry with changed fields
+  try {
+    const registryUpdates: Record<string, unknown> = {}
+    if (field === 'description' && action === 'set') {
+      registryUpdates['description'] = value
+    } else if (field === 'priority' && action === 'set') {
+      registryUpdates['priority'] = value
+    } else if (field === 'tags') {
+      registryUpdates['tags'] = frontmatterRecord['tags']
+    } else if (field === 'links') {
+      registryUpdates['links'] = frontmatterRecord['links']
+    }
+    if (Object.keys(registryUpdates).length > 0) {
+      await updateRegistryEntry(omgRoot, nodeId, registryUpdates)
+    }
+  } catch (err) {
+    console.error(`[omg] Reflector: registry update failed for field update of "${nodeId}":`, err)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,12 +217,14 @@ async function applyNodeFieldUpdate(
 // ---------------------------------------------------------------------------
 
 /**
- * Finds a node by ID by scanning all graph nodes.
+ * Finds a node by ID using the registry for O(1) lookup,
+ * then hydrates the full GraphNode from disk.
  * Returns null if not found.
  */
 async function findNodeById(nodeId: string, omgRoot: string): Promise<GraphNode | null> {
-  const allNodes = await listAllNodes(omgRoot)
-  return allNodes.find((n) => n.frontmatter.id === nodeId) ?? null
+  const entry = await getRegistryEntry(omgRoot, nodeId)
+  if (!entry) return null
+  return readGraphNode(entry.filePath)
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +363,7 @@ export async function runReflection(params: ReflectionParams): Promise<Reflector
     xmlOutput.archiveNodeIds.map(async (nodeId) => {
       const node = await findNodeById(nodeId, omgRoot)
       if (node !== null) {
-        await markNodeArchived(node.filePath)
+        await markNodeArchived(node.filePath, nodeId, omgRoot)
       }
     }),
   )

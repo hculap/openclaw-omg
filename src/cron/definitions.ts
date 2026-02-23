@@ -9,7 +9,8 @@
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import { runReflection } from '../reflector/reflector.js'
-import { listAllNodes } from '../graph/node-reader.js'
+import { readGraphNode } from '../graph/node-reader.js'
+import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
 
 // ---------------------------------------------------------------------------
@@ -52,29 +53,48 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
   const cutoffMs = Date.now() - SEVEN_DAYS_MS
 
-  let allNodes: Awaited<ReturnType<typeof listAllNodes>>
+  // Use registry for metadata-only filtering — zero disk reads for filtering phase
+  let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
-    allNodes = await listAllNodes(omgRoot)
+    const allEntries = await getRegistryEntries(omgRoot)
+    eligibleEntries = allEntries.filter(([, e]) => {
+      if (e.archived) return false
+      if (e.type === 'reflection') return false
+      const updatedMs = new Date(e.updated).getTime()
+      return updatedMs < cutoffMs
+    })
   } catch (err) {
-    console.error('[omg] cron omg-reflection: failed to list nodes:', err)
+    console.error('[omg] cron omg-reflection: failed to read registry:', err)
     return
   }
 
-  const observationNodes = allNodes.filter((n) => {
-    if (n.frontmatter.archived) return false
-    if (n.frontmatter.type === 'reflection') return false
-    const updatedMs = new Date(n.frontmatter.updated).getTime()
-    return updatedMs < cutoffMs
-  })
-
-  if (observationNodes.length === 0) {
+  if (eligibleEntries.length === 0) {
     console.warn('[omg] cron omg-reflection: no eligible nodes found (none older than 7 days or all archived)')
+    return
+  }
+
+  // Hydrate only the qualifying nodes for reflection
+  const nodeIds = eligibleEntries.map(([id]) => id)
+  let observationNodes: Awaited<ReturnType<typeof readGraphNode>>[]
+  try {
+    const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+    observationNodes = await Promise.all(
+      [...filePaths.values()].map((fp) => readGraphNode(fp))
+    )
+  } catch (err) {
+    console.error('[omg] cron omg-reflection: failed to hydrate eligible nodes:', err)
+    return
+  }
+  const validNodes = observationNodes.filter((n): n is NonNullable<typeof n> => n !== null)
+
+  if (validNodes.length === 0) {
+    console.warn('[omg] cron omg-reflection: no eligible nodes found after hydration')
     return
   }
 
   try {
     const result = await runReflection({
-      observationNodes,
+      observationNodes: validNodes,
       config: ctx.config,
       llmClient: ctx.llmClient,
       omgRoot,
@@ -96,23 +116,24 @@ async function reflectionCronHandler(ctx: CronContext): Promise<void> {
 async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
 
-  let allNodes: Awaited<ReturnType<typeof listAllNodes>>
+  // Use registry for all maintenance checks — zero disk reads required
+  let allEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
-    allNodes = await listAllNodes(omgRoot)
+    allEntries = await getRegistryEntries(omgRoot)
   } catch (err) {
-    console.error('[omg] cron omg-maintenance: failed to list nodes:', err)
+    console.error('[omg] cron omg-maintenance: failed to read registry:', err)
     return
   }
 
   // --- Link repair ---
-  const nodeIds = new Set(allNodes.map((n) => n.frontmatter.id))
+  const nodeIdSet = new Set(allEntries.map(([id]) => id))
   let brokenLinkCount = 0
-  for (const node of allNodes) {
-    const links = node.frontmatter.links ?? []
+  for (const [id, entry] of allEntries) {
+    const links = entry.links ?? []
     for (const link of links) {
-      if (!nodeIds.has(link)) {
+      if (!nodeIdSet.has(link)) {
         console.warn(
-          `[omg] cron omg-maintenance: broken wikilink in "${node.frontmatter.id}" → "${link}" (target not found)`,
+          `[omg] cron omg-maintenance: broken wikilink in "${id}" → "${link}" (target not found)`,
         )
         brokenLinkCount++
       }
@@ -121,11 +142,11 @@ async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
 
   // --- Deduplication audit (confidence-based, no auto-delete) ---
   const descriptionMap = new Map<string, string[]>()
-  for (const node of allNodes) {
-    if (node.frontmatter.archived) continue
-    const key = node.frontmatter.description.toLowerCase().trim()
+  for (const [id, entry] of allEntries) {
+    if (entry.archived) continue
+    const key = entry.description.toLowerCase().trim()
     const existing = descriptionMap.get(key) ?? []
-    descriptionMap.set(key, [...existing, node.frontmatter.id])
+    descriptionMap.set(key, [...existing, id])
   }
 
   let duplicateGroupCount = 0
