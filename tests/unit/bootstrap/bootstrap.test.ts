@@ -34,6 +34,7 @@ vi.mock('../../../src/graph/registry.js', () => ({
 }))
 
 import { runBootstrap } from '../../../src/bootstrap/bootstrap.js'
+import { _clearActiveClaims } from '../../../src/bootstrap/lock.js'
 import { runObservation } from '../../../src/observer/observer.js'
 import { writeObservationNode } from '../../../src/graph/node-writer.js'
 import { parseConfig } from '../../../src/config.js'
@@ -91,6 +92,7 @@ function makeCompletedState(overrides: Partial<BootstrapState> = {}): BootstrapS
 beforeEach(() => {
   vol.reset()
   vi.clearAllMocks()
+  _clearActiveClaims()
   vi.mocked(runObservation).mockResolvedValue(EMPTY_OBSERVER_OUTPUT)
   vi.mocked(writeObservationNode).mockResolvedValue({
     frontmatter: {
@@ -556,5 +558,35 @@ describe('runBootstrap — resume', () => {
     expect(state.status).toBe('completed')
 
     consoleErrorSpy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Locking
+// ---------------------------------------------------------------------------
+
+describe('runBootstrap — locking', () => {
+  it('returns ran:false without processing when another process holds the lock', async () => {
+    const LOCK_PATH = `${OMG_ROOT}/.bootstrap-lock`
+    const now = new Date().toISOString()
+    vol.fromJSON({
+      [LOCK_PATH]: JSON.stringify({
+        pid: 99999,
+        token: '00000000-0000-0000-0000-000000000099',
+        startedAt: now,
+        updatedAt: now,
+      }),
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    // Foreign PID is alive — lock should not be stolen
+    vi.spyOn(process, 'kill').mockImplementation(() => true as never)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await runBootstrap(makeBootstrapParams())
+
+    expect(result.ran).toBe(false)
+    expect(result.chunksProcessed).toBe(0)
+    expect(runObservation).not.toHaveBeenCalled()
   })
 })

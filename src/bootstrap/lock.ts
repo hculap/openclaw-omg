@@ -8,12 +8,18 @@
  *   Layer 1 — Lock  (.bootstrap-lock)      — "is a process running RIGHT NOW?"
  *   Layer 2 — State (.bootstrap-state.json) — "what progress was made?"
  *
- * The lock records the owning PID and a heartbeat timestamp (`updatedAt`) that
- * the owner refreshes on each batch. Staleness is evaluated against `updatedAt`
- * (not `startedAt`) so a long-running process isn't falsely evicted.
+ * The lock records the owning PID, a unique acquisition token (UUID), and a
+ * heartbeat timestamp (`updatedAt`) that the owner refreshes on each batch.
+ * Staleness is evaluated against `updatedAt` (not `startedAt`) so a long-running
+ * process isn't falsely evicted.
+ *
+ * Token-based ownership: `acquireLock` writes a UUID and stores it in
+ * `activeClaims`. `releaseLock` and `refreshLock` verify both PID and token
+ * before modifying the file, closing the read-check-write TOCTOU window.
  */
 
 import { promises as fs } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { z } from 'zod'
 import { atomicWrite } from '../utils/fs.js'
@@ -27,14 +33,34 @@ const LOCK_FILENAME = '.bootstrap-lock'
 const LOCK_TTL_MS = 5 * 60 * 1000 // 5 min
 
 // ---------------------------------------------------------------------------
+// Claim registry (module-level, per process lifetime)
+// ---------------------------------------------------------------------------
+
+/** Maps omgRoot → UUID token written to disk when this process acquired the lock. */
+const activeClaims = new Map<string, string>()
+
+/**
+ * Clears all active claims.
+ * @internal — only for use in tests.
+ */
+export function _clearActiveClaims(): void {
+  activeClaims.clear()
+}
+
+// ---------------------------------------------------------------------------
 // Schema & types
 // ---------------------------------------------------------------------------
 
-const lockContentSchema = z.object({
-  pid: z.number().int().positive(),
-  startedAt: z.string(),
-  updatedAt: z.string(),
-})
+const lockContentSchema = z
+  .object({
+    pid: z.number().int().positive(),
+    token: z.string().uuid(),
+    startedAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
+  })
+  .refine((data) => data.startedAt <= data.updatedAt, {
+    message: 'updatedAt must be >= startedAt',
+  })
 
 type LockContent = z.infer<typeof lockContentSchema>
 
@@ -83,12 +109,23 @@ function lockPath(omgRoot: string): string {
 /**
  * Reads and parses the lock file.
  * Returns null if the file is missing or corrupt.
+ * Logs unexpected I/O errors (e.g. EACCES, EMFILE) to aid debugging.
  */
 async function readLock(omgRoot: string): Promise<LockContent | null> {
+  let raw: string
   try {
-    const raw = await fs.readFile(lockPath(omgRoot), 'utf-8')
+    raw = await fs.readFile(lockPath(omgRoot), 'utf-8')
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') {
+      console.error('[omg] lock: failed to read lock file:', err)
+    }
+    return null
+  }
+  try {
     return lockContentSchema.parse(JSON.parse(raw))
   } catch {
+    // Corrupt content — caller handles via the corrupt-lock recovery path
     return null
   }
 }
@@ -131,8 +168,10 @@ function shouldStealLock(lock: LockContent): boolean {
 export async function acquireLock(omgRoot: string): Promise<boolean> {
   const filePath = lockPath(omgRoot)
   const now = new Date().toISOString()
+  const token = randomUUID()
   const content: LockContent = {
     pid: process.pid,
+    token,
     startedAt: now,
     updatedAt: now,
   }
@@ -141,6 +180,7 @@ export async function acquireLock(omgRoot: string): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await fs.writeFile(filePath, serialised, { flag: 'wx', encoding: 'utf-8' })
+      activeClaims.set(omgRoot, token)
       return true
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
@@ -182,13 +222,18 @@ export async function acquireLock(omgRoot: string): Promise<boolean> {
 
 /**
  * Releases the lock if and only if it is owned by this process.
+ * Verifies both PID and the acquisition token to close the read-check-unlink
+ * TOCTOU window.
  * Best-effort — never throws.
  */
 export async function releaseLock(omgRoot: string): Promise<void> {
   try {
+    const ownToken = activeClaims.get(omgRoot)
+    if (ownToken === undefined) return
     const existing = await readLock(omgRoot)
-    if (existing === null || existing.pid !== process.pid) return
+    if (existing === null || existing.pid !== process.pid || existing.token !== ownToken) return
     await fs.unlink(lockPath(omgRoot))
+    activeClaims.delete(omgRoot)
   } catch {
     // Best-effort — ignore all errors on release
   }
@@ -197,12 +242,16 @@ export async function releaseLock(omgRoot: string): Promise<void> {
 /**
  * Refreshes `updatedAt` in the lock file (heartbeat).
  * Only updates if the lock is still owned by this process.
+ * Verifies both PID and the acquisition token to close the read-check-write
+ * TOCTOU window.
  * Best-effort — never throws.
  */
 export async function refreshLock(omgRoot: string): Promise<void> {
   try {
+    const ownToken = activeClaims.get(omgRoot)
+    if (ownToken === undefined) return
     const existing = await readLock(omgRoot)
-    if (existing === null || existing.pid !== process.pid) return
+    if (existing === null || existing.pid !== process.pid || existing.token !== ownToken) return
     const updated: LockContent = {
       ...existing,
       updatedAt: new Date().toISOString(),

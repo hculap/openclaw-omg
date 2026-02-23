@@ -16,6 +16,7 @@ import {
   refreshLock,
   isLockStale,
   checkPidStatus,
+  _clearActiveClaims,
 } from '../../../src/bootstrap/lock.js'
 
 // ---------------------------------------------------------------------------
@@ -25,13 +26,17 @@ import {
 const OMG_ROOT = '/workspace/memory/omg'
 const LOCK_PATH = `${OMG_ROOT}/.bootstrap-lock`
 
-function makeLockContent(overrides: { pid?: number; startedAt?: string; updatedAt?: string } = {}) {
+const TEST_TOKEN = '00000000-0000-0000-0000-000000000001'
+
+function makeLockContent(overrides: { pid?: number; startedAt?: string; updatedAt?: string; token?: string } = {}) {
   const now = new Date().toISOString()
+  const updatedAt = overrides.updatedAt ?? now
   return {
-    pid: process.pid,
-    startedAt: now,
-    updatedAt: now,
-    ...overrides,
+    pid: overrides.pid ?? process.pid,
+    token: overrides.token ?? TEST_TOKEN,
+    // Default startedAt to updatedAt so the schema invariant (startedAt <= updatedAt) always holds.
+    startedAt: overrides.startedAt ?? updatedAt,
+    updatedAt,
   }
 }
 
@@ -46,6 +51,7 @@ function writeLock(content: object) {
 beforeEach(() => {
   vol.reset()
   vi.restoreAllMocks()
+  _clearActiveClaims()
 })
 
 // ---------------------------------------------------------------------------
@@ -63,97 +69,112 @@ describe('acquireLock', () => {
     const raw = vol.readFileSync(LOCK_PATH, 'utf-8') as string
     const parsed = JSON.parse(raw)
     expect(parsed.pid).toBe(process.pid)
+    expect(typeof parsed.token).toBe('string')
     expect(typeof parsed.startedAt).toBe('string')
     expect(typeof parsed.updatedAt).toBe('string')
   })
 
   // Test 2: Fresh lock, PID alive → returns false
   it('returns false when a fresh lock with an alive PID exists', async () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as never)
+    vi.spyOn(process, 'kill').mockImplementation(() => true as never)
     writeLock(makeLockContent({ pid: 99999 }))
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await acquireLock(OMG_ROOT)
     expect(result).toBe(false)
-    killSpy.mockRestore()
-    consoleSpy.mockRestore()
   })
 
   // Test 3: Fresh lock, PID dead (ESRCH) → steals → returns true
   it('steals lock and returns true when PID is dead (ESRCH)', async () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
       const err: NodeJS.ErrnoException = new Error('ESRCH')
       err.code = 'ESRCH'
       throw err
     })
     writeLock(makeLockContent({ pid: 99999 }))
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await acquireLock(OMG_ROOT)
     expect(result).toBe(true)
     // Lock file should now belong to current process
     const raw = vol.readFileSync(LOCK_PATH, 'utf-8') as string
     expect(JSON.parse(raw).pid).toBe(process.pid)
-    killSpy.mockRestore()
-    consoleSpy.mockRestore()
   })
 
   // Test 4: Fresh lock, PID unknown (EPERM) → returns false (fresh timestamp, fall back to TTL)
   it('returns false when PID unknown (EPERM) and lock is fresh', async () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
       const err: NodeJS.ErrnoException = new Error('EPERM')
       err.code = 'EPERM'
       throw err
     })
     writeLock(makeLockContent({ pid: 99999 }))
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await acquireLock(OMG_ROOT)
     expect(result).toBe(false)
-    killSpy.mockRestore()
-    consoleSpy.mockRestore()
   })
 
   // Test 5: Stale lock (old updatedAt), PID unknown → steals → returns true
   it('steals stale lock when PID unknown (EPERM) but timestamp is old', async () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
       const err: NodeJS.ErrnoException = new Error('EPERM')
       err.code = 'EPERM'
       throw err
     })
     writeLock(makeLockContent({ pid: 99999, updatedAt: staleTimestamp() }))
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await acquireLock(OMG_ROOT)
     expect(result).toBe(true)
     const raw = vol.readFileSync(LOCK_PATH, 'utf-8') as string
     expect(JSON.parse(raw).pid).toBe(process.pid)
-    killSpy.mockRestore()
-    consoleSpy.mockRestore()
   })
 
   // Test 6: Alive PID + stale timestamp → returns false (alive wins)
   it('returns false when PID is alive even if timestamp is stale', async () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as never)
+    vi.spyOn(process, 'kill').mockImplementation(() => true as never)
     writeLock(makeLockContent({ pid: 99999, updatedAt: staleTimestamp() }))
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await acquireLock(OMG_ROOT)
     expect(result).toBe(false)
-    killSpy.mockRestore()
-    consoleSpy.mockRestore()
   })
 
   // Test 7: Corrupt lock file (EEXIST but unreadable) → steals → returns true
   it('steals corrupt lock file and returns true', async () => {
     vol.fromJSON({ [LOCK_PATH]: '{not valid json' })
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await acquireLock(OMG_ROOT)
     expect(result).toBe(true)
     const raw = vol.readFileSync(LOCK_PATH, 'utf-8') as string
     expect(JSON.parse(raw).pid).toBe(process.pid)
-    consoleSpy.mockRestore()
+  })
+
+  // Test 8: Double-contention fail-open — writeFile always throws EEXIST
+  it('fail-opens after 2 exhausted attempts when file keeps reappearing', async () => {
+    vol.fromJSON({ [`${OMG_ROOT}/.keep`]: '' })
+
+    // Simulate a third process that keeps recreating the lock after each unlink
+    const { promises: fsMod } = await import('node:fs')
+    let attempt = 0
+    vi.spyOn(fsMod, 'writeFile').mockImplementation(async () => {
+      attempt++
+      const err: NodeJS.ErrnoException = new Error('EEXIST')
+      err.code = 'EEXIST'
+      throw err
+    })
+    vi.spyOn(fsMod, 'readFile').mockImplementation(async () => {
+      // Always return a corrupt/missing lock so the corrupt-lock path runs
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    })
+
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const result = await acquireLock(OMG_ROOT)
+    // Fail-open: returns true despite exhausting both attempts
+    expect(result).toBe(true)
+    expect(attempt).toBe(2)
   })
 })
 
@@ -162,21 +183,25 @@ describe('acquireLock', () => {
 // ---------------------------------------------------------------------------
 
 describe('releaseLock', () => {
-  // Test 8: releaseLock deletes own lock
+  // Test 9: releaseLock deletes own lock (acquired via acquireLock)
   it('deletes the lock when owned by this process', async () => {
-    writeLock(makeLockContent())
+    vol.fromJSON({ [`${OMG_ROOT}/.keep`]: '' })
+    await acquireLock(OMG_ROOT)
+    expect(vol.existsSync(LOCK_PATH)).toBe(true)
+
     await releaseLock(OMG_ROOT)
     expect(vol.existsSync(LOCK_PATH)).toBe(false)
   })
 
-  // Test 9: releaseLock does not delete another process's lock
+  // Test 10: releaseLock does not delete another process's lock
   it('does not delete lock owned by a different PID', async () => {
     writeLock(makeLockContent({ pid: 99999 }))
     await releaseLock(OMG_ROOT)
+    // activeClaims is empty — exits early without touching file
     expect(vol.existsSync(LOCK_PATH)).toBe(true)
   })
 
-  // Test 10: releaseLock on missing file → no throw
+  // Test 11: releaseLock on missing file → no throw
   it('does not throw when lock file does not exist', async () => {
     vol.fromJSON({})
     await expect(releaseLock(OMG_ROOT)).resolves.toBeUndefined()
@@ -188,12 +213,14 @@ describe('releaseLock', () => {
 // ---------------------------------------------------------------------------
 
 describe('refreshLock', () => {
-  // Test 11: refreshLock updates updatedAt, preserves pid and startedAt
+  // Test 12: refreshLock updates updatedAt, preserves pid and startedAt
   it('updates updatedAt while preserving pid and startedAt', async () => {
     vol.fromJSON({ [`${OMG_ROOT}/.keep`]: '' })
-    const startedAt = new Date(Date.now() - 60_000).toISOString()
-    const original = makeLockContent({ startedAt, updatedAt: startedAt })
-    writeLock(original)
+    await acquireLock(OMG_ROOT)
+
+    // Record startedAt from the initial acquire
+    const rawBefore = vol.readFileSync(LOCK_PATH, 'utf-8') as string
+    const startedAt = JSON.parse(rawBefore).startedAt
 
     const before = Date.now()
     await refreshLock(OMG_ROOT)
@@ -208,16 +235,22 @@ describe('refreshLock', () => {
     expect(updatedTime).toBeLessThanOrEqual(after)
   })
 
-  // Test 12: refreshLock on another process's lock → no-op
+  // Test 13: refreshLock on another process's lock → no-op
   it('does not modify lock owned by a different PID', async () => {
-    const originalContent = makeLockContent({ pid: 99999, updatedAt: staleTimestamp() })
-    writeLock(originalContent)
+    writeLock(makeLockContent({ pid: 99999, updatedAt: staleTimestamp() }))
     const originalRaw = vol.readFileSync(LOCK_PATH, 'utf-8') as string
 
     await refreshLock(OMG_ROOT)
 
+    // activeClaims is empty — exits early without touching file
     const raw = vol.readFileSync(LOCK_PATH, 'utf-8') as string
     expect(raw).toBe(originalRaw)
+  })
+
+  // Test 14: refreshLock when no lock file exists → no-op, no throw
+  it('does nothing when lock file does not exist', async () => {
+    vol.fromJSON({})
+    await expect(refreshLock(OMG_ROOT)).resolves.toBeUndefined()
   })
 })
 
@@ -226,7 +259,6 @@ describe('refreshLock', () => {
 // ---------------------------------------------------------------------------
 
 describe('isLockStale', () => {
-  // Test 13: all combinations
   it('returns false for a fresh lock', () => {
     const lock = makeLockContent()
     expect(isLockStale(lock)).toBe(false)
@@ -252,7 +284,7 @@ describe('isLockStale', () => {
 
   it('is not affected by startedAt — only updatedAt matters', () => {
     const lock = makeLockContent({
-      startedAt: staleTimestamp(), // old startedAt
+      startedAt: staleTimestamp(), // old startedAt — purely diagnostic
       updatedAt: new Date().toISOString(), // fresh heartbeat
     })
     expect(isLockStale(lock)).toBe(false)
@@ -265,28 +297,25 @@ describe('isLockStale', () => {
 
 describe('checkPidStatus', () => {
   it('returns "alive" when kill(pid, 0) succeeds', () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true as never)
+    vi.spyOn(process, 'kill').mockImplementation(() => true as never)
     expect(checkPidStatus(12345)).toBe('alive')
-    killSpy.mockRestore()
   })
 
   it('returns "dead" when ESRCH is thrown', () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
       const err: NodeJS.ErrnoException = new Error('ESRCH')
       err.code = 'ESRCH'
       throw err
     })
     expect(checkPidStatus(12345)).toBe('dead')
-    killSpy.mockRestore()
   })
 
   it('returns "unknown" when EPERM is thrown', () => {
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
       const err: NodeJS.ErrnoException = new Error('EPERM')
       err.code = 'EPERM'
       throw err
     })
     expect(checkPidStatus(12345)).toBe('unknown')
-    killSpy.mockRestore()
   })
 })
