@@ -82,6 +82,12 @@ export async function runExtract(params: ExtractParams): Promise<ExtractOutput> 
     `[omg] Extract: tokens used — input: ${response.usage.inputTokens}, output: ${response.usage.outputTokens}`,
   )
 
+  if (effectiveMaxTokens > 0 && response.usage.outputTokens >= Math.floor(effectiveMaxTokens * 0.95)) {
+    console.warn(
+      `[omg] Extract: response may be truncated — used ${response.usage.outputTokens}/${effectiveMaxTokens} output tokens (${Math.round((response.usage.outputTokens / effectiveMaxTokens) * 100)}%). Consider reducing batchCharBudget if bootstrap chunks are being lost.`,
+    )
+  }
+
   const output = parseExtractOutput(response.content)
 
   // Belt-and-suspenders: re-filter candidates with invalid types

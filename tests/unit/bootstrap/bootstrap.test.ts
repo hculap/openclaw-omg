@@ -226,8 +226,23 @@ describe('runBootstrap — chunk processing', () => {
 
     const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
     expect(result.nodesWritten).toBe(1)
-    // With batching, chunksSucceeded counts all chunks in the successful batch
-    expect(result.chunksSucceeded).toBeGreaterThanOrEqual(1)
+    // chunksSucceeded counts all chunks in fulfilled (non-erroring) batches
+    expect(result.chunksSucceeded).toBe(1)
+  })
+
+  it('counts chunks as succeeded even when batch produces zero nodes', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nSome noise content.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    // EMPTY_OBSERVER_OUTPUT has 0 operations → 0 nodes written
+    vi.mocked(runObservation).mockResolvedValueOnce(EMPTY_OBSERVER_OUTPUT)
+
+    const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+    expect(result.nodesWritten).toBe(0)
+    // Batch fulfilled without error → chunks count as succeeded
+    expect(result.chunksSucceeded).toBe(result.chunksProcessed)
   })
 
   it('handles LLM errors gracefully and continues processing other batches', async () => {
@@ -250,6 +265,9 @@ describe('runBootstrap — chunk processing', () => {
     expect(result.ran).toBe(true)
     // Both batches were attempted
     expect(runObservation).toHaveBeenCalledTimes(2)
+    // Only the non-erroring batch counts its chunk as succeeded
+    expect(result.chunksSucceeded).toBe(1)
+    expect(result.chunksProcessed).toBe(2)
 
     consoleErrorSpy.mockRestore()
   })

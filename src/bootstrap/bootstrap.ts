@@ -63,7 +63,7 @@ export interface BootstrapResult {
   readonly ran: boolean
   /** Total chunks processed (0 if `ran` is false). */
   readonly chunksProcessed: number
-  /** Chunks that produced at least one written node. */
+  /** Chunks in batches that completed without error. */
   readonly chunksSucceeded: number
   /** Total nodes written across all chunks. */
   readonly nodesWritten: number
@@ -114,6 +114,8 @@ async function runWithConcurrency<T>(
 interface BatchResult {
   readonly nodesWritten: number
   readonly chunkCount: number
+  /** Whether the LLM observation completed without error. */
+  readonly observationSucceeded: boolean
 }
 
 /**
@@ -155,7 +157,7 @@ async function processBatch(
     })
   } catch (err) {
     console.error(`[omg] bootstrap: observation failed for "${batchLabel}":`, err)
-    return { nodesWritten: 0, chunkCount: batch.chunks.length }
+    return { nodesWritten: 0, chunkCount: batch.chunks.length, observationSucceeded: false }
   }
 
   // Phase 2: write nodes
@@ -223,7 +225,7 @@ async function processBatch(
     `[omg] bootstrap: processed "${batchLabel}" → ${nodesWritten} node${nodesWritten !== 1 ? 's' : ''}`
   )
 
-  return { nodesWritten, chunkCount: batch.chunks.length }
+  return { nodesWritten, chunkCount: batch.chunks.length, observationSucceeded: true }
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +325,7 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
   let chunksSucceeded = 0
   let nodesWritten = 0
   for (const result of results) {
-    if (result.status === 'fulfilled' && result.value.nodesWritten > 0) {
+    if (result.status === 'fulfilled' && result.value.observationSucceeded) {
       chunksSucceeded += result.value.chunkCount
       nodesWritten += result.value.nodesWritten
     }

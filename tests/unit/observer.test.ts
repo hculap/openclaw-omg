@@ -362,6 +362,47 @@ describe('runExtract', () => {
       expect(call.maxTokens).toBe(4096)
     })
 
+    it('warns when output tokens are near the max (potential truncation)', async () => {
+      const nearCapResponse: LlmResponse = {
+        content: VALID_XML,
+        usage: { inputTokens: 100, outputTokens: 3900 },
+      }
+      const client = makeMockClient(nearCapResponse)
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+      try {
+        await runExtract(makeExtractParams({ llmClient: client }))
+
+        const truncationWarn = warnSpy.mock.calls.find((args) =>
+          typeof args[0] === 'string' && (args[0] as string).includes('may be truncated'),
+        )
+        expect(truncationWarn).toBeDefined()
+      } finally {
+        warnSpy.mockRestore()
+        logSpy.mockRestore()
+      }
+    })
+
+    it('does not warn about truncation when output tokens are well below the max', async () => {
+      const client = makeMockClient()
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+      try {
+        // Default mock response has outputTokens: 50, well below 4096
+        await runExtract(makeExtractParams({ llmClient: client }))
+
+        const truncationWarn = warnSpy.mock.calls.find((args) =>
+          typeof args[0] === 'string' && (args[0] as string).includes('may be truncated'),
+        )
+        expect(truncationWarn).toBeUndefined()
+      } finally {
+        warnSpy.mockRestore()
+        logSpy.mockRestore()
+      }
+    })
+
     it('passes nowNode content into the LLM user prompt', async () => {
       const client = makeMockClient()
       await runExtract(makeExtractParams({
