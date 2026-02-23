@@ -151,7 +151,11 @@ export function parseMergeOutput(raw: string): MergeAction {
     const result = xmlParser.parse(`<root>${xmlSource}</root>`) as Record<string, unknown>
     if (typeof result !== 'object' || result === null) return KEEP_SEPARATE
     parsed = result
-  } catch {
+  } catch (err) {
+    console.error(
+      '[omg] Merge parser: XMLParser.parse() threw — defaulting to keep_separate.',
+      err instanceof Error ? err.message : String(err)
+    )
     return KEEP_SEPARATE
   }
 

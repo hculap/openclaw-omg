@@ -153,8 +153,13 @@ function applyBudget(content: string): string {
   const truncated = truncatedLines.join('\n')
 
   if (truncated.length <= MAX_CHARS) {
+    console.warn(`[omg] now-renderer: content truncated to ${MAX_LINES} lines (was ${lines.length} lines)`)
     return truncated
   }
 
+  console.warn(
+    `[omg] now-renderer: content truncated to ${MAX_CHARS} chars after line truncation ` +
+    `(was ${truncated.length} chars, ${lines.length} lines)`
+  )
   return truncated.slice(0, MAX_CHARS)
 }

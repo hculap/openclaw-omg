@@ -150,6 +150,22 @@ export async function tryRunObservation(
         if (result) {
           writtenIds.push(result.frontmatter.id)
           console.log(`[omg] merge: appended to existing node ${mergeAction.targetNodeId} (candidate: ${candidate.canonicalKey})`)
+        } else {
+          console.error(
+            `[omg] agent_end [${sessionKey}]: merge target "${mergeAction.targetNodeId}" not found in registry ` +
+            `for candidate "${candidate.canonicalKey}" — falling back to keep_separate`
+          )
+          const op = candidateToUpsertOperation(candidate)
+          try {
+            const written = await writeObservationNode(op, writeContext)
+            writtenIds.push(written.frontmatter.id)
+          } catch (writeErr) {
+            console.error(
+              `[omg] agent_end [${sessionKey}]: keep_separate fallback write failed for candidate "${candidate.canonicalKey}":`,
+              writeErr
+            )
+            writeFailureCount++
+          }
         }
       } else if (mergeAction.action === 'alias' && mergeAction.targetNodeId && (mergeAction as { aliasKey?: string }).aliasKey) {
         const aliasKey = (mergeAction as { aliasKey: string }).aliasKey
@@ -157,6 +173,22 @@ export async function tryRunObservation(
         if (result) {
           writtenIds.push(result.frontmatter.id)
           console.log(`[omg] merge: added alias "${aliasKey}" to node ${mergeAction.targetNodeId}`)
+        } else {
+          console.error(
+            `[omg] agent_end [${sessionKey}]: alias target "${mergeAction.targetNodeId}" not found in registry ` +
+            `for candidate "${candidate.canonicalKey}" — falling back to keep_separate`
+          )
+          const op = candidateToUpsertOperation(candidate)
+          try {
+            const written = await writeObservationNode(op, writeContext)
+            writtenIds.push(written.frontmatter.id)
+          } catch (writeErr) {
+            console.error(
+              `[omg] agent_end [${sessionKey}]: keep_separate fallback write failed for candidate "${candidate.canonicalKey}":`,
+              writeErr
+            )
+            writeFailureCount++
+          }
         }
       } else {
         // keep_separate — write as new node

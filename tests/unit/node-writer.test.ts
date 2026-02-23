@@ -14,6 +14,8 @@ import {
   writeObservationNode,
   writeReflectionNode,
   writeNowNode,
+  appendToExistingNode,
+  addAliasToNode,
 } from '../../src/graph/node-writer.js'
 import { parseFrontmatter } from '../../src/utils/frontmatter.js'
 import { clearRegistryCache } from '../../src/graph/registry.js'
@@ -468,5 +470,131 @@ describe('writeNowNode', () => {
 
     expect(memfs.existsSync('/fresh/omg/now.md')).toBe(true)
     expect(node.filePath).toBe('/fresh/omg/now.md')
+  })
+})
+
+// ─── appendToExistingNode ─────────────────────────────────────────────────────
+
+describe('appendToExistingNode', () => {
+  async function seedNode(canonicalKey = 'preferences.editor_theme'): Promise<string> {
+    const op = makeUpsertOperation({ canonicalKey })
+    const node = await writeObservationNode(op, context)
+    return node.frontmatter.id
+  }
+
+  it('returns null when node is not in the registry', async () => {
+    const result = await appendToExistingNode(OMG_ROOT, 'omg/preference/does-not-exist', 'extra')
+    expect(result).toBeNull()
+  })
+
+  it('appends bodyAppend to the existing body separated by a blank line', async () => {
+    const nodeId = await seedNode()
+    const result = await appendToExistingNode(OMG_ROOT, nodeId, 'Additional context.')
+
+    expect(result).not.toBeNull()
+    expect(result!.body).toContain('The user explicitly stated they prefer dark mode.')
+    expect(result!.body).toContain('Additional context.')
+    expect(result!.body).toMatch(/\n\nAdditional context\.$/)
+  })
+
+  it('leaves body unchanged when bodyAppend is empty', async () => {
+    const nodeId = await seedNode()
+    const result = await appendToExistingNode(OMG_ROOT, nodeId, '')
+
+    expect(result).not.toBeNull()
+    expect(result!.body).toBe('The user explicitly stated they prefer dark mode.')
+  })
+
+  it('updates the updated timestamp in frontmatter', async () => {
+    const nodeId = await seedNode()
+    const beforeWrite = Date.now()
+    const result = await appendToExistingNode(OMG_ROOT, nodeId, 'New info.')
+
+    expect(result).not.toBeNull()
+    const updatedMs = new Date(result!.frontmatter.updated).getTime()
+    expect(updatedMs).toBeGreaterThanOrEqual(beforeWrite)
+  })
+
+  it('persists the appended body to disk', async () => {
+    const nodeId = await seedNode()
+    const result = await appendToExistingNode(OMG_ROOT, nodeId, 'Persisted content.')
+
+    const filePath = result!.filePath
+    const raw = memfs.readFileSync(filePath, 'utf-8') as string
+    expect(raw).toContain('Persisted content.')
+  })
+
+  it('returns a GraphNode with the correct node id', async () => {
+    const nodeId = await seedNode()
+    const result = await appendToExistingNode(OMG_ROOT, nodeId, 'Content.')
+
+    expect(result!.frontmatter.id).toBe(nodeId)
+  })
+})
+
+// ─── addAliasToNode ───────────────────────────────────────────────────────────
+
+describe('addAliasToNode', () => {
+  async function seedNode(canonicalKey = 'preferences.editor_theme'): Promise<string> {
+    const op = makeUpsertOperation({ canonicalKey })
+    const node = await writeObservationNode(op, context)
+    return node.frontmatter.id
+  }
+
+  it('returns null when node is not in the registry', async () => {
+    const result = await addAliasToNode(OMG_ROOT, 'omg/preference/does-not-exist', 'preferences.dark_mode')
+    expect(result).toBeNull()
+  })
+
+  it('writes the aliasKey into frontmatter.aliases', async () => {
+    const nodeId = await seedNode()
+    const result = await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+
+    expect(result).not.toBeNull()
+    expect(result!.frontmatter.aliases).toContain('preferences.dark_mode')
+  })
+
+  it('deduplicates aliases when the same key is added twice', async () => {
+    const nodeId = await seedNode()
+    await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+    const result = await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+
+    const aliases = result!.frontmatter.aliases as string[]
+    const darkModeCount = aliases.filter((a) => a === 'preferences.dark_mode').length
+    expect(darkModeCount).toBe(1)
+  })
+
+  it('accumulates multiple distinct aliases', async () => {
+    const nodeId = await seedNode()
+    await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+    const result = await addAliasToNode(OMG_ROOT, nodeId, 'preferences.theme')
+
+    const aliases = result!.frontmatter.aliases as string[]
+    expect(aliases).toContain('preferences.dark_mode')
+    expect(aliases).toContain('preferences.theme')
+  })
+
+  it('persists the aliases to disk', async () => {
+    const nodeId = await seedNode()
+    const result = await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+
+    const raw = memfs.readFileSync(result!.filePath, 'utf-8') as string
+    expect(raw).toContain('preferences.dark_mode')
+  })
+
+  it('does not modify the body', async () => {
+    const nodeId = await seedNode()
+    const result = await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+
+    expect(result!.body).toBe('The user explicitly stated they prefer dark mode.')
+  })
+
+  it('updates the updated timestamp in frontmatter', async () => {
+    const nodeId = await seedNode()
+    const beforeWrite = Date.now()
+    const result = await addAliasToNode(OMG_ROOT, nodeId, 'preferences.dark_mode')
+
+    const updatedMs = new Date(result!.frontmatter.updated).getTime()
+    expect(updatedMs).toBeGreaterThanOrEqual(beforeWrite)
   })
 })

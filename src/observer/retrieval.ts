@@ -118,8 +118,12 @@ export async function findMergeTargets(
           }
         }
       }
-    } catch {
+    } catch (err) {
       // Semantic search failure is non-fatal — degrade to local-only
+      console.error(
+        `[omg] retrieval: semantic search failed for candidate "${candidate.canonicalKey}" — degrading to local-only:`,
+        err instanceof Error ? err.message : String(err)
+      )
     }
   }
 
