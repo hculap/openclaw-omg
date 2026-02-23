@@ -25,6 +25,7 @@ import { beforeAgentStart } from './hooks/before-agent-start.js'
 import { beforeCompaction } from './hooks/before-compaction.js'
 import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
+import { graphMaintenanceCronHandler } from './cron/definitions.js'
 import { scaffoldGraphIfNeeded } from './scaffold.js'
 import { runBootstrap } from './bootstrap/bootstrap.js'
 import { getNodeCount } from './graph/registry.js'
@@ -537,6 +538,12 @@ export function register(api: PluginApi): void {
         .then((count) => {
           if (count === 0) {
             return runBootstrap({ workspaceDir: effectiveWorkspaceDir, config, llmClient, force: false })
+              .then((result) => {
+                if (result?.ran) {
+                  graphMaintenanceCronHandler({ workspaceDir: effectiveWorkspaceDir, config, llmClient })
+                    .catch((err) => console.error('[omg] before_prompt_build: post-bootstrap graph maintenance failed:', err))
+                }
+              })
               .catch((err) => console.error('[omg] before_prompt_build: bootstrap failed:', err))
           }
         })

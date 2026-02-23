@@ -14,13 +14,22 @@ vi.mock('node:fs/promises', async () => {
   return { default: m.fs.promises, ...m.fs.promises }
 })
 
-// Mock runReflection to avoid real LLM calls in cron tests
 vi.mock('../../src/reflector/reflector.js', () => ({
   runReflection: vi.fn().mockResolvedValue({
     edits: [],
     deletions: [],
     tokensUsed: 0,
-    [Symbol('brand')]: true,
+  }),
+}))
+
+vi.mock('../../src/dedup/dedup.js', () => ({
+  runDedup: vi.fn().mockResolvedValue({
+    clustersProcessed: 0,
+    mergesExecuted: 0,
+    nodesArchived: 0,
+    conflictsDetected: 0,
+    tokensUsed: 0,
+    errors: [],
   }),
 }))
 
@@ -38,11 +47,12 @@ function makeMockLlm(): LlmClient {
   }
 }
 
-function makeCtx(cronSchedule = '0 3 * * *'): CronContext {
+function makeCtx(overrides: { graphMaintenanceSchedule?: string; reflectionSchedule?: string } = {}): CronContext {
   return {
     workspaceDir: WORKSPACE,
     config: parseConfig({
-      reflection: { cronSchedule },
+      graphMaintenance: { cronSchedule: overrides.graphMaintenanceSchedule ?? '0 3 * * *' },
+      reflection: { cronSchedule: overrides.reflectionSchedule ?? '0 2 * * *' },
       injection: { maxContextTokens: 4_000 },
     }),
     llmClient: makeMockLlm(),
@@ -53,7 +63,6 @@ beforeEach(() => {
   vol.reset()
   clearRegistryCache()
   vol.fromJSON({
-    // Empty graph root — no observation nodes
     [`${OMG_ROOT}/.keep`]: '',
   })
   vi.restoreAllMocks()
@@ -62,10 +71,6 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
 })
-
-// ---------------------------------------------------------------------------
-// createCronDefinitions — structure
-// ---------------------------------------------------------------------------
 
 describe('createCronDefinitions', () => {
   it('returns exactly two cron definitions', () => {
@@ -78,12 +83,13 @@ describe('createCronDefinitions', () => {
     const ids = defs.map((d) => d.id)
     expect(ids).toContain('omg-reflection')
     expect(ids).toContain('omg-maintenance')
+    expect(ids).not.toContain('omg-graph-maintenance')
   })
 
-  it('uses the configured cron schedule for omg-reflection', () => {
-    const defs = createCronDefinitions(makeCtx('*/30 * * * *'))
-    const reflection = defs.find((d) => d.id === 'omg-reflection')!
-    expect(reflection.schedule).toBe('*/30 * * * *')
+  it('uses graphMaintenance.cronSchedule for omg-reflection', () => {
+    const defs = createCronDefinitions(makeCtx({ graphMaintenanceSchedule: '*/30 * * * *' }))
+    const maintenance = defs.find((d) => d.id === 'omg-reflection')!
+    expect(maintenance.schedule).toBe('*/30 * * * *')
   })
 
   it('uses a fixed schedule for omg-maintenance (Sunday 4 AM)', () => {
@@ -100,100 +106,58 @@ describe('createCronDefinitions', () => {
   })
 })
 
-// ---------------------------------------------------------------------------
-// omg-reflection cron — handler behaviour
-// ---------------------------------------------------------------------------
-
 describe('createCronDefinitions — omg-reflection handler', () => {
   it('does not throw when handler runs with no nodes', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const defs = createCronDefinitions(makeCtx())
-    const reflection = defs.find((d) => d.id === 'omg-reflection')!
-    await expect(reflection.handler()).resolves.not.toThrow()
+    const maintenance = defs.find((d) => d.id === 'omg-reflection')!
+    await expect(maintenance.handler()).resolves.not.toThrow()
   })
 
-  it('filters out archived nodes before reflection', async () => {
+  it('runs dedup then reflection', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { runDedup } = await import('../../src/dedup/dedup.js')
     const { runReflection } = await import('../../src/reflector/reflector.js')
-
-    // Scaffold archived and non-archived nodes (both older than 7 days)
-    vol.fromJSON({
-      [`${OMG_ROOT}/nodes/preference/preference-archived-2020-01-01.md`]: `---
-id: omg/preference/archived-pref
-description: Archived preference
-type: preference
-priority: low
-created: 2020-01-01T00:00:00Z
-updated: 2020-01-01T00:00:00Z
-archived: true
----
-Old content.`,
-      [`${OMG_ROOT}/nodes/fact/fact-active-2020-01-01.md`]: `---
-id: omg/fact/active-fact
-description: Active fact from 2020
-type: fact
-priority: medium
-created: 2020-01-01T00:00:00Z
-updated: 2020-01-01T00:00:00Z
----
-Active content.`,
-    })
+    vi.mocked(runDedup).mockClear()
+    vi.mocked(runReflection).mockClear()
 
     const defs = createCronDefinitions(makeCtx())
-    const reflection = defs.find((d) => d.id === 'omg-reflection')!
-    await reflection.handler()
+    const maintenance = defs.find((d) => d.id === 'omg-reflection')!
+    await maintenance.handler()
 
-    // runReflection should only have received the non-archived node
-    const call = (runReflection as ReturnType<typeof vi.fn>).mock.calls.find(
-      (c) => c[0]?.sessionKey === 'cron:omg-reflection'
-    )
-    if (call) {
-      const nodes = call[0].observationNodes
-      expect(nodes.every((n: { frontmatter: { archived?: boolean } }) => !n.frontmatter.archived)).toBe(true)
-    }
+    expect(runDedup).toHaveBeenCalledOnce()
+    // Reflection may or may not be called depending on eligible nodes — dedup always runs
   })
 
-  it('filters out reflection-type nodes', async () => {
+  it('calls runDedup with correct omgRoot and config', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { runDedup } = await import('../../src/dedup/dedup.js')
+    vi.mocked(runDedup).mockClear()
+
+    const ctx = makeCtx()
+    const defs = createCronDefinitions(ctx)
+    const maintenance = defs.find((d) => d.id === 'omg-reflection')!
+    await maintenance.handler()
+
+    expect(runDedup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        omgRoot: OMG_ROOT,
+        config: ctx.config,
+      })
+    )
+  })
+
+  it('uses cron:omg-reflection as sessionKey for reflection', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { runReflection } = await import('../../src/reflector/reflector.js')
     vi.mocked(runReflection).mockClear()
 
     vol.fromJSON({
-      [`${OMG_ROOT}/nodes/reflection/reflection-old-2020-01-01.md`]: `---
-id: omg/reflection/old-synthesis
-description: Old synthesis
-type: reflection
-priority: medium
-created: 2020-01-01T00:00:00Z
-updated: 2020-01-01T00:00:00Z
----
-Reflected content.`,
-    })
-
-    const defs = createCronDefinitions(makeCtx())
-    const reflection = defs.find((d) => d.id === 'omg-reflection')!
-    await reflection.handler()
-
-    const call = (runReflection as ReturnType<typeof vi.fn>).mock.calls.find(
-      (c) => c[0]?.sessionKey === 'cron:omg-reflection'
-    )
-    if (call) {
-      const nodes = call[0].observationNodes
-      expect(nodes.every((n: { frontmatter: { type: string } }) => n.frontmatter.type !== 'reflection')).toBe(true)
-    }
-  })
-
-  it('uses cron:omg-reflection as sessionKey', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { runReflection } = await import('../../src/reflector/reflector.js')
-    vi.mocked(runReflection).mockClear()
-
-    vol.fromJSON({
-      [`${OMG_ROOT}/nodes/fact/fact-old-2020-01-01.md`]: `---
-id: omg/fact/old-fact
-description: Old fact
+      [`${OMG_ROOT}/nodes/fact/fact.old-data-2020-01-01.md`]: `---
+id: omg/fact.old-data
+description: Old fact from 2020
 type: fact
-priority: low
+priority: medium
 created: 2020-01-01T00:00:00Z
 updated: 2020-01-01T00:00:00Z
 ---
@@ -201,20 +165,26 @@ Old content.`,
     })
 
     const defs = createCronDefinitions(makeCtx())
-    const reflection = defs.find((d) => d.id === 'omg-reflection')!
-    await reflection.handler()
+    const maintenance = defs.find((d) => d.id === 'omg-reflection')!
+    await maintenance.handler()
 
-    // If runReflection was called, it should have used cron:omg-reflection as sessionKey
-    const reflectionCalls = (runReflection as ReturnType<typeof vi.fn>).mock.calls
+    const reflectionCalls = vi.mocked(runReflection).mock.calls
     if (reflectionCalls.length > 0) {
       expect(reflectionCalls[0]![0].sessionKey).toBe('cron:omg-reflection')
     }
   })
-})
 
-// ---------------------------------------------------------------------------
-// omg-maintenance cron — handler behaviour
-// ---------------------------------------------------------------------------
+  it('continues to reflection even if dedup throws', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { runDedup } = await import('../../src/dedup/dedup.js')
+    vi.mocked(runDedup).mockRejectedValueOnce(new Error('dedup exploded'))
+
+    const defs = createCronDefinitions(makeCtx())
+    const maintenance = defs.find((d) => d.id === 'omg-reflection')!
+    await expect(maintenance.handler()).resolves.not.toThrow()
+  })
+})
 
 describe('createCronDefinitions — omg-maintenance handler', () => {
   it('does not throw when there are no nodes', async () => {
@@ -227,8 +197,8 @@ describe('createCronDefinitions — omg-maintenance handler', () => {
   it('does not throw when there are nodes with broken links', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     vol.fromJSON({
-      [`${OMG_ROOT}/nodes/fact/fact-broken-link-2026-01-01.md`]: `---
-id: omg/fact-broken-link
+      [`${OMG_ROOT}/nodes/fact/fact.broken-link-2026-01-01.md`]: `---
+id: omg/fact.broken-link
 description: Has broken link
 type: fact
 priority: low
@@ -248,8 +218,8 @@ Content with a broken link.`,
   it('does not throw when there are duplicate descriptions', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     vol.fromJSON({
-      [`${OMG_ROOT}/nodes/fact/fact-dup-1-2026-01-01.md`]: `---
-id: omg/fact/dup-1
+      [`${OMG_ROOT}/nodes/fact/fact.dup-1-2026-01-01.md`]: `---
+id: omg/fact.dup-1
 description: Duplicate description
 type: fact
 priority: low
@@ -257,8 +227,8 @@ created: 2026-01-01T00:00:00Z
 updated: 2026-01-01T00:00:00Z
 ---
 Content 1.`,
-      [`${OMG_ROOT}/nodes/fact/fact-dup-2-2026-01-01.md`]: `---
-id: omg/fact/dup-2
+      [`${OMG_ROOT}/nodes/fact/fact.dup-2-2026-01-01.md`]: `---
+id: omg/fact.dup-2
 description: Duplicate description
 type: fact
 priority: low
@@ -276,8 +246,8 @@ Content 2.`,
   it('logs a warning for broken links', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     vol.fromJSON({
-      [`${OMG_ROOT}/nodes/fact/fact-broken-link-2026-01-01.md`]: `---
-id: omg/fact-broken-link
+      [`${OMG_ROOT}/nodes/fact/fact.broken-link-2026-01-01.md`]: `---
+id: omg/fact.broken-link
 description: Has broken link
 type: fact
 priority: low

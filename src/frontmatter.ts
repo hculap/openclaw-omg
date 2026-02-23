@@ -88,6 +88,10 @@ export const nodeFrontmatterSchema = z
       .optional(),
     canonicalKey: z.string().min(1, 'canonicalKey must not be empty').optional(),
     aliases: z.array(z.string().min(1, 'alias must not be empty')).optional(),
+    mergedInto: z
+      .string()
+      .regex(NODE_ID_RE, 'mergedInto must be in "namespace/slug" format')
+      .optional(),
   })
   .strip()
   .refine((f) => f.updated >= f.created, {
