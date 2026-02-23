@@ -356,6 +356,12 @@ function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
     if (gatewayFailures < GATEWAY_FAILURE_THRESHOLD) {
       try {
         const result = await gatewayFn(params)
+        // The gateway returns rate limit errors as HTTP 200 with an error string
+        // in the content body. Detect and re-throw so callers fail fast rather
+        // than treating the error text as a real LLM response.
+        if (result.content.startsWith('⚠️') || result.content.startsWith('Connection error')) {
+          throw new Error(`Gateway error response: ${result.content.slice(0, 120)}`)
+        }
         gatewayFailures = 0 // reset on success
         return result
       } catch (err) {
