@@ -34,6 +34,7 @@ import {
   createDebouncedFlush,
   type BootstrapState,
 } from './state.js'
+import { acquireLock, releaseLock, refreshLock } from './lock.js'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
@@ -262,6 +263,24 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
   const omgRoot = resolveOmgRoot(workspaceDir, config)
   const scope = config.scope ?? workspaceDir
 
+  const lockAcquired = await acquireLock(omgRoot)
+  if (!lockAcquired) {
+    return { ran: false, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
+  }
+
+  try {
+    return await _runBootstrapLocked({ workspaceDir, omgRoot, scope, config, llmClient, force, source })
+  } finally {
+    await releaseLock(omgRoot)
+  }
+}
+
+async function _runBootstrapLocked(params: BootstrapParams & {
+  readonly omgRoot: string
+  readonly scope: string
+}): Promise<BootstrapResult> {
+  const { workspaceDir, omgRoot, scope, config, llmClient, force = false, source } = params
+
   // Check state (skip if force)
   const existingState = await readBootstrapState(omgRoot)
   const decision = shouldBootstrap(existingState, force)
@@ -346,6 +365,7 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
       const result = await processBatch(batch, omgRoot, scope, config, llmClient)
       state = advanceBatch(state, batch.batchIndex, result)
       debouncedFlush.flush(state)
+      void refreshLock(omgRoot)
       return result
     })
 
