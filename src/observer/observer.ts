@@ -22,7 +22,7 @@ import type { ExtractCandidate } from '../types.js'
 // ---------------------------------------------------------------------------
 
 /** Maximum tokens to request from the LLM for the extract response. */
-const EXTRACT_MAX_TOKENS = 4096
+export const EXTRACT_MAX_TOKENS = 4096
 
 /** Maximum tokens to request from the LLM for the merge decision response. */
 const MERGE_MAX_TOKENS = 1024
@@ -49,7 +49,7 @@ const OBSERVER_MAX_TOKENS = EXTRACT_MAX_TOKENS
  * Throws if the LLM call fails.
  */
 export async function runExtract(params: ExtractParams): Promise<ExtractOutput> {
-  const { unobservedMessages, nowNode, llmClient, sessionContext } = params
+  const { unobservedMessages, nowNode, llmClient, sessionContext, maxOutputTokens } = params
 
   if (unobservedMessages.length === 0) {
     return {
@@ -66,9 +66,11 @@ export async function runExtract(params: ExtractParams): Promise<ExtractOutput> 
     sessionContext,
   })
 
+  const effectiveMaxTokens = maxOutputTokens ?? EXTRACT_MAX_TOKENS
+
   let response: Awaited<ReturnType<typeof llmClient.generate>>
   try {
-    response = await llmClient.generate({ system, user, maxTokens: EXTRACT_MAX_TOKENS })
+    response = await llmClient.generate({ system, user, maxTokens: effectiveMaxTokens })
   } catch (err) {
     throw new Error(
       `[omg] Extract: LLM call failed (messageCount: ${unobservedMessages.length}): ${err instanceof Error ? err.message : String(err)}`,
@@ -151,7 +153,7 @@ export async function runMerge(
  *   for bootstrap and other callers that depend on `ObserverOutput`.
  */
 export async function runObservation(params: ObservationParams): Promise<ObserverOutput> {
-  const { unobservedMessages, nowNode, config, llmClient, sessionContext } = params
+  const { unobservedMessages, nowNode, config, llmClient, sessionContext, maxOutputTokens } = params
 
   if (unobservedMessages.length === 0) {
     return { ...EMPTY_OUTPUT }
@@ -164,6 +166,7 @@ export async function runObservation(params: ObservationParams): Promise<Observe
     config,
     llmClient,
     sessionContext,
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
   }
 
   let extractOutput: ExtractOutput

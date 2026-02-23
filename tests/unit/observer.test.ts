@@ -346,6 +346,22 @@ describe('runExtract', () => {
       expect(call.maxTokens).toBe(4096)
     })
 
+    it('uses maxOutputTokens override when provided', async () => {
+      const client = makeMockClient()
+      await runExtract(makeExtractParams({ llmClient: client, maxOutputTokens: 8192 }))
+
+      const call = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0]
+      expect(call.maxTokens).toBe(8192)
+    })
+
+    it('falls back to EXTRACT_MAX_TOKENS when maxOutputTokens is undefined', async () => {
+      const client = makeMockClient()
+      await runExtract(makeExtractParams({ llmClient: client, maxOutputTokens: undefined }))
+
+      const call = (client.generate as ReturnType<typeof vi.fn>).mock.calls[0]![0]
+      expect(call.maxTokens).toBe(4096)
+    })
+
     it('passes nowNode content into the LLM user prompt', async () => {
       const client = makeMockClient()
       await runExtract(makeExtractParams({

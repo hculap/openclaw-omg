@@ -463,6 +463,18 @@ const bootstrapSchema = z
   .object({
     /** Which data sources to ingest during the cold-start bootstrap pass. */
     sources: bootstrapSourcesSchema.default({}),
+    /**
+     * Character budget per LLM batch during bootstrap.
+     * Multiple source chunks are packed into a single LLM call until adding the
+     * next chunk would exceed this budget (~4 chars per token, so 24 000 chars ≈ 6 000 tokens).
+     * Set to 0 to disable batching (one chunk per call, legacy behavior).
+     * @default 24000
+     */
+    batchCharBudget: z
+      .number()
+      .int()
+      .min(0, 'batchCharBudget must be >= 0')
+      .default(24_000),
   })
   .strip()
 

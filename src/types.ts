@@ -539,6 +539,8 @@ export interface ExtractParams {
   readonly config: OmgConfig
   readonly llmClient: LlmClient
   readonly sessionContext?: Record<string, unknown>
+  /** Override the default max output tokens for the LLM response. Used by batched bootstrap to scale with chunk count. */
+  readonly maxOutputTokens?: number
 }
 
 /**
@@ -629,4 +631,6 @@ export interface ObservationParams {
   readonly llmClient: LlmClient
   /** Optional session-level metadata forwarded to the LLM user prompt. */
   readonly sessionContext?: Record<string, unknown>
+  /** Override the default max output tokens for the LLM response. Used by batched bootstrap to scale with chunk count. */
+  readonly maxOutputTokens?: number
 }
