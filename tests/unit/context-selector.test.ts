@@ -4,6 +4,7 @@ import { selectContext, selectContextV2 } from '../../src/context/selector.js'
 import type { OmgConfig } from '../../src/config.js'
 import type { GraphNode } from '../../src/types.js'
 import type { RegistryNodeEntry } from '../../src/graph/registry.js'
+import type { MemoryTools, MemorySearchResponse } from '../../src/context/memory-search.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -544,5 +545,203 @@ describe('selectContextV2 — two-pass registry-based selection', () => {
     })
 
     expect(slice.estimatedTokens).toBeLessThanOrEqual(600)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// selectContextV2 — hybrid semantic scoring
+// ---------------------------------------------------------------------------
+
+function makeMemoryTools(searchResponse: MemorySearchResponse | null): MemoryTools {
+  return {
+    search: vi.fn().mockResolvedValue(searchResponse),
+    get: vi.fn().mockResolvedValue(null),
+  }
+}
+
+describe('selectContextV2 — hybrid semantic scoring', () => {
+  it('boosts candidates matching memory_search results above non-matching ones', async () => {
+    // Two registry entries at equal priority — semantic should break the tie
+    const semanticEntry = makeRegistryEntry({ filePath: '/semantic.md', priority: 'medium', description: 'semantic node' })
+    const plainEntry = makeRegistryEntry({ filePath: '/plain.md', priority: 'medium', description: 'plain node' })
+    const semanticNode = makeHydratedNode('omg/fact/semantic', semanticEntry, 'semantic content')
+    const plainNode = makeHydratedNode('omg/fact/plain', plainEntry, 'plain content')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/semantic.md') return Promise.resolve(semanticNode)
+      if (fp === '/plain.md') return Promise.resolve(plainNode)
+      return Promise.resolve(null)
+    })
+
+    // memory_search returns only the semantic node with a high score
+    const memoryTools = makeMemoryTools({
+      results: [{ filePath: '/semantic.md', score: 0.9, snippet: 'snippet' }],
+    })
+
+    // tight budget — only 1 node fits
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 100, maxNodes: 1 } })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/plain', plainEntry],
+        ['omg/fact/semantic', semanticEntry],
+      ],
+      recentMessages: [],
+      config: tightConfig,
+      hydrateNode,
+      memoryTools,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/semantic')
+    expect(ids).not.toContain('omg/fact/plain')
+  })
+
+  it('with memoryTools: null → behaves identically to registry-only (no crash)', async () => {
+    const entry = makeRegistryEntry({ filePath: '/node.md' })
+    const node = makeHydratedNode('omg/fact/node', entry)
+    const hydrateNode = vi.fn().mockResolvedValue(node)
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/node', entry]],
+      recentMessages: [],
+      config,
+      hydrateNode,
+      memoryTools: null,
+    })
+
+    expect(slice.nodes.map((n) => n.frontmatter.id)).toContain('omg/fact/node')
+    expect(slice.nodes.length).toBe(1)
+  })
+
+  it('with semantic.enabled: false → memory_search not called', async () => {
+    const entry = makeRegistryEntry({ filePath: '/node.md' })
+    const node = makeHydratedNode('omg/fact/node', entry)
+    const hydrateNode = vi.fn().mockResolvedValue(node)
+
+    const disabledConfig = parseConfig({ injection: { semantic: { enabled: false } } })
+    const memoryTools = makeMemoryTools({ results: [] })
+
+    await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/node', entry]],
+      recentMessages: [],
+      config: disabledConfig,
+      hydrateNode,
+      memoryTools,
+    })
+
+    expect(memoryTools.search).not.toHaveBeenCalled()
+  })
+
+  it('with memoryTools.search returning null → graceful fallback, registry-only', async () => {
+    const entry = makeRegistryEntry({ filePath: '/node.md' })
+    const node = makeHydratedNode('omg/fact/node', entry)
+    const hydrateNode = vi.fn().mockResolvedValue(node)
+
+    const memoryTools: MemoryTools = {
+      search: vi.fn().mockResolvedValue(null),
+      get: vi.fn().mockResolvedValue(null),
+    }
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/node', entry]],
+      recentMessages: [],
+      config,
+      hydrateNode,
+      memoryTools,
+    })
+
+    expect(slice.nodes.length).toBe(1)
+    expect(slice.nodes[0]!.frontmatter.id).toBe('omg/fact/node')
+  })
+
+  it('with disabled:true response from memory_search → graceful fallback', async () => {
+    const entry = makeRegistryEntry({ filePath: '/node.md' })
+    const node = makeHydratedNode('omg/fact/node', entry)
+    const hydrateNode = vi.fn().mockResolvedValue(node)
+
+    const memoryTools = makeMemoryTools({ results: [], disabled: true })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/node', entry]],
+      recentMessages: [],
+      config,
+      hydrateNode,
+      memoryTools,
+    })
+
+    expect(slice.nodes.length).toBe(1)
+  })
+
+  it('memory_search results NOT in registry are ignored (no phantom nodes)', async () => {
+    const entry = makeRegistryEntry({ filePath: '/known.md' })
+    const knownNode = makeHydratedNode('omg/fact/known', entry)
+    const hydrateNode = vi.fn().mockResolvedValue(knownNode)
+
+    // memory_search returns a path not in the registry
+    const memoryTools = makeMemoryTools({
+      results: [{ filePath: '/outside-registry.md', score: 0.99, snippet: 'external' }],
+    })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [['omg/fact/known', entry]],
+      recentMessages: [],
+      config,
+      hydrateNode,
+      memoryTools,
+    })
+
+    const filePaths = slice.nodes.map((n) => n.filePath)
+    expect(filePaths).not.toContain('/outside-registry.md')
+    expect(filePaths).toContain('/known.md')
+  })
+
+  it('with semantic.weight = 0 → semantic has no effect (scores effectively registry-only)', async () => {
+    // Even if memory_search returns results, weight=0 means no boost
+    const entryA = makeRegistryEntry({ filePath: '/a.md', priority: 'high', description: 'high priority A' })
+    const entryB = makeRegistryEntry({ filePath: '/b.md', priority: 'low', description: 'low priority B' })
+    const nodeA = makeHydratedNode('omg/fact/a', entryA, 'a content')
+    const nodeB = makeHydratedNode('omg/fact/b', entryB, 'b content')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/a.md') return Promise.resolve(nodeA)
+      if (fp === '/b.md') return Promise.resolve(nodeB)
+      return Promise.resolve(null)
+    })
+
+    // memory_search boosts B only
+    const memoryTools = makeMemoryTools({
+      results: [{ filePath: '/b.md', score: 0.99, snippet: 'b' }],
+    })
+
+    const zeroWeightConfig = parseConfig({ injection: { maxNodes: 1, maxContextTokens: 200, semantic: { weight: 0 } } })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/a', entryA],
+        ['omg/fact/b', entryB],
+      ],
+      recentMessages: [],
+      config: zeroWeightConfig,
+      hydrateNode,
+      memoryTools,
+    })
+
+    // A has higher registry score (high priority) — with weight=0, B's semantic boost is nullified
+    expect(slice.nodes.map((n) => n.frontmatter.id)).toContain('omg/fact/a')
   })
 })

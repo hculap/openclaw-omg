@@ -179,6 +179,55 @@ const reflectionSchema = z
   .strip()
 
 /**
+ * Controls the semantic boosting layer within the context selector.
+ * When enabled, OpenClaw's memory_search tool is used as an acceleration signal
+ * that boosts registry scores. Degrades gracefully when the tool is unavailable.
+ */
+const semanticSchema = z
+  .object({
+    /**
+     * Whether semantic boosting is enabled.
+     * When false, memory_search is never called and scoring is registry-only.
+     * @default true
+     */
+    enabled: z.boolean().default(true),
+    /**
+     * Additive weight applied to the normalised semantic score.
+     * finalScore = registryScore + weight * semanticScore
+     * Range [0, 2]. 0 = semantic contributes nothing (registry-only effective).
+     * @default 0.4
+     */
+    weight: z
+      .number()
+      .min(0, 'injection.semantic.weight must be >= 0')
+      .max(2, 'injection.semantic.weight must be <= 2')
+      .default(0.4),
+    /**
+     * Maximum number of results to request from memory_search per turn.
+     * Range [1, 100].
+     * @default 20
+     */
+    maxResults: z
+      .number()
+      .int()
+      .min(1, 'injection.semantic.maxResults must be at least 1')
+      .max(100, 'injection.semantic.maxResults must be at most 100')
+      .default(20),
+    /**
+     * Minimum normalised score a memory_search result must have to participate
+     * in boosting. Results below this threshold are discarded after normalisation.
+     * Range [0, 1].
+     * @default 0.3
+     */
+    minScore: z
+      .number()
+      .min(0, 'injection.semantic.minScore must be >= 0')
+      .max(1, 'injection.semantic.minScore must be <= 1')
+      .default(0.3),
+  })
+  .strip()
+
+/**
  * Controls how graph context is assembled and injected into the agent's
  * system prompt at the start of each conversation turn.
  */
@@ -211,6 +260,8 @@ const injectionSchema = z
      * Example: ["omg/identity-core", "omg/project-main"]
      */
     pinnedNodes: z.array(nodeIdField).default([]),
+    /** Semantic boosting layer — integrates OpenClaw's memory_search tool. */
+    semantic: semanticSchema.default({}),
   })
   .strip()
 
@@ -439,7 +490,7 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   reflector: new Set(Object.keys(reflectorSchema.shape)),
   observation: new Set(Object.keys(observationSchema.shape)),
   reflection: new Set(Object.keys(reflectionSchema.shape)),
-  injection: new Set(Object.keys(injectionSchema.shape)),
+  injection: new Set(Object.keys(injectionSchema.shape)), // includes: semantic
   dedup: new Set(Object.keys(dedupSchema.shape)),
   graphMaintenance: new Set(Object.keys(graphMaintenanceSchema.shape)),
   bootstrap: new Set(Object.keys(bootstrapSchema.shape)), // includes: sources
@@ -447,8 +498,17 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
 }
 
 /**
- * Returns unknown key paths in `raw` at the top level and one level deep
- * inside recognised sub-objects (e.g. `"observer.typo"`).
+ * Known keys for two-levels-deep sub-schemas (e.g. injection.semantic.*)
+ * keyed as "parentKey.childKey".
+ */
+const SUB_SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
+  'injection.semantic': new Set(Object.keys(semanticSchema.shape)),
+}
+
+/**
+ * Returns unknown key paths in `raw` at the top level, one level deep inside
+ * recognised sub-objects (e.g. `"observer.typo"`), and two levels deep inside
+ * recognised sub-sub-objects (e.g. `"injection.semantic.typo"`).
  */
 function collectUnknownConfigKeys(raw: Record<string, unknown>): readonly string[] {
   const topLevelKnown = new Set(Object.keys(omgConfigSchema.shape))
@@ -465,6 +525,20 @@ function collectUnknownConfigKeys(raw: Record<string, unknown>): readonly string
         for (const subKey of Object.keys(nested as Record<string, unknown>)) {
           if (!subShape.has(subKey)) {
             result.push(`${key}.${subKey}`)
+            continue
+          }
+          // Check one more level deeper for recognised sub-sub-schemas
+          const subSubShapeKey = `${key}.${subKey}`
+          const subSubShape = SUB_SUB_SCHEMA_SHAPES[subSubShapeKey]
+          if (subSubShape !== undefined) {
+            const subNested = (nested as Record<string, unknown>)[subKey]
+            if (subNested !== null && typeof subNested === 'object' && !Array.isArray(subNested)) {
+              for (const subSubKey of Object.keys(subNested as Record<string, unknown>)) {
+                if (!subSubShape.has(subSubKey)) {
+                  result.push(`${subSubShapeKey}.${subSubKey}`)
+                }
+              }
+            }
           }
         }
       }

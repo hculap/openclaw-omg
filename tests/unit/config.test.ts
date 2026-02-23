@@ -792,6 +792,108 @@ describe('parseConfig — dedup', () => {
 })
 
 // ---------------------------------------------------------------------------
+// injection.semantic config
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — injection.semantic', () => {
+  it('semantic defaults applied when not specified', () => {
+    const result = parseConfig({})
+    expect(result.injection.semantic.enabled).toBe(true)
+    expect(result.injection.semantic.weight).toBe(0.4)
+    expect(result.injection.semantic.maxResults).toBe(20)
+    expect(result.injection.semantic.minScore).toBe(0.3)
+  })
+
+  it('semantic.enabled false → accepted', () => {
+    const result = parseConfig({ injection: { semantic: { enabled: false } } })
+    expect(result.injection.semantic.enabled).toBe(false)
+  })
+
+  it('custom semantic weight → applied', () => {
+    const result = parseConfig({ injection: { semantic: { weight: 1.5 } } })
+    expect(result.injection.semantic.weight).toBe(1.5)
+  })
+
+  it('semantic.weight > 2 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { weight: 2.1 } } }),
+      'injection.semantic.weight'
+    )
+  })
+
+  it('semantic.weight < 0 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { weight: -0.1 } } }),
+      'injection.semantic.weight'
+    )
+  })
+
+  it('semantic.maxResults = 1 → accepted (boundary)', () => {
+    const result = parseConfig({ injection: { semantic: { maxResults: 1 } } })
+    expect(result.injection.semantic.maxResults).toBe(1)
+  })
+
+  it('semantic.maxResults = 100 → accepted (boundary)', () => {
+    const result = parseConfig({ injection: { semantic: { maxResults: 100 } } })
+    expect(result.injection.semantic.maxResults).toBe(100)
+  })
+
+  it('semantic.maxResults = 0 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { maxResults: 0 } } }),
+      'injection.semantic.maxResults'
+    )
+  })
+
+  it('semantic.maxResults = 101 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { maxResults: 101 } } }),
+      'injection.semantic.maxResults'
+    )
+  })
+
+  it('semantic.maxResults float → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { maxResults: 10.5 } } }),
+      'injection.semantic.maxResults'
+    )
+  })
+
+  it('semantic.minScore = 0 → accepted (boundary)', () => {
+    const result = parseConfig({ injection: { semantic: { minScore: 0 } } })
+    expect(result.injection.semantic.minScore).toBe(0)
+  })
+
+  it('semantic.minScore = 1 → accepted (boundary)', () => {
+    const result = parseConfig({ injection: { semantic: { minScore: 1 } } })
+    expect(result.injection.semantic.minScore).toBe(1)
+  })
+
+  it('semantic.minScore < 0 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { minScore: -0.1 } } }),
+      'injection.semantic.minScore'
+    )
+  })
+
+  it('semantic.minScore > 1 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { semantic: { minScore: 1.1 } } }),
+      'injection.semantic.minScore'
+    )
+  })
+
+  it('unknown key in injection.semantic → detected by onUnknownKeys', () => {
+    let capturedKeys: readonly string[] = []
+    parseConfig(
+      { injection: { semantic: { typo: true } } },
+      { onUnknownKeys: (keys) => { capturedKeys = keys } }
+    )
+    expect(capturedKeys).toContain('injection.semantic.typo')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // graphMaintenance config
 // ---------------------------------------------------------------------------
 
