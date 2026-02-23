@@ -375,10 +375,16 @@ async function hydrateEntries(
   entries: readonly [string, RegistryNodeEntry][],
   hydrateNode: (filePath: string) => Promise<GraphNode | null>
 ): Promise<GraphNode[]> {
-  const results = await Promise.all(
+  const results = await Promise.allSettled(
     entries.map(([, entry]) => hydrateNode(entry.filePath))
   )
-  return results.filter((n): n is GraphNode => n !== null)
+  return results.flatMap((result) => {
+    if (result.status === 'rejected') {
+      console.error('[omg] hydrateEntries: failed to read node:', result.reason)
+      return []
+    }
+    return result.value !== null ? [result.value] : []
+  })
 }
 
 // ---------------------------------------------------------------------------
