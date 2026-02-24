@@ -24,6 +24,7 @@ vi.mock('../../src/scaffold.js', () => ({
 vi.mock('../../src/cron/workspace-registry.js', () => ({
   readWorkspaceRegistry: vi.fn().mockResolvedValue({ version: 1, workspaces: {} }),
   writeWorkspaceRegistry: vi.fn().mockResolvedValue(undefined),
+  addWorkspaceToRegistry: vi.fn().mockResolvedValue(undefined),
   addWorkspace: vi.fn().mockImplementation((reg: unknown) => reg),
   pruneStaleWorkspaces: vi.fn().mockImplementation((reg: unknown) => reg),
   listWorkspacePaths: vi.fn().mockReturnValue([]),

@@ -72,15 +72,39 @@ let _pendingWrite: Promise<void> = Promise.resolve()
 /**
  * Writes the workspace registry to disk atomically.
  * Concurrent calls are serialized (queued) to prevent interleaved writes.
+ * The internal chain is always reset to a resolved state on failure so a
+ * single I/O error does not permanently block future writes.
  */
 export async function writeWorkspaceRegistry(registry: WorkspaceRegistry): Promise<void> {
-  _pendingWrite = _pendingWrite.then(async () => {
+  const next = _pendingWrite.then(async () => {
     const registryPath = resolveRegistryPath()
     const dir = path.dirname(registryPath)
     await fsp.mkdir(dir, { recursive: true })
     await atomicWrite(registryPath, JSON.stringify(registry, null, 2))
   })
-  return _pendingWrite
+  // Reset to resolved on failure so subsequent writes are not permanently blocked.
+  _pendingWrite = next.catch(() => {})
+  return next
+}
+
+/**
+ * Atomically adds a workspace to the persistent registry.
+ * The entire read-modify-write runs inside the serialization queue so
+ * concurrent callers each see the previous caller's write (no lost-update).
+ * No-ops if the workspace is already present.
+ */
+export async function addWorkspaceToRegistry(workspacePath: string): Promise<void> {
+  const next = _pendingWrite.then(async () => {
+    const registry = await readWorkspaceRegistry()
+    const updated = addWorkspace(registry, workspacePath)
+    if (updated === registry) return // already present — skip write
+    const registryPath = resolveRegistryPath()
+    const dir = path.dirname(registryPath)
+    await fsp.mkdir(dir, { recursive: true })
+    await atomicWrite(registryPath, JSON.stringify(updated, null, 2))
+  })
+  _pendingWrite = next.catch(() => {})
+  return next
 }
 
 // ---------------------------------------------------------------------------

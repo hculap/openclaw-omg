@@ -26,7 +26,7 @@ import { graphMaintenanceCronHandler } from './cron/definitions.js'
 import {
   readWorkspaceRegistry,
   writeWorkspaceRegistry,
-  addWorkspace,
+  addWorkspaceToRegistry,
   pruneStaleWorkspaces,
   listWorkspacePaths,
 } from './cron/workspace-registry.js'
@@ -418,10 +418,10 @@ export function register(api: PluginApi): void {
     if (!registeredCronWorkspaces.has(effectiveWorkspaceDir)) {
       registeredCronWorkspaces.add(effectiveWorkspaceDir)
 
-      // Persist new workspace to registry — fire-and-forget
-      readWorkspaceRegistry()
-        .then(reg => addWorkspace(reg, effectiveWorkspaceDir))
-        .then(updated => writeWorkspaceRegistry(updated))
+      // Persist new workspace to registry — fire-and-forget.
+      // addWorkspaceToRegistry enqueues the full read-modify-write inside the
+      // serialization queue so concurrent calls never lose each other's writes.
+      addWorkspaceToRegistry(effectiveWorkspaceDir)
         .catch(err => console.error('[omg] before_prompt_build: registry write failed:', err))
 
       // Register crons immediately for current session
