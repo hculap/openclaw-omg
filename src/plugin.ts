@@ -384,6 +384,36 @@ export function register(api: PluginApi): void {
   // and are persisted to the registry for future gateway restarts.
   const registeredCronWorkspaces = new Set<string>()
 
+  // Background bootstrap service — runs continuously, independent of agent turns.
+  // Uses api.registerService (OpenClaw 2026.2.21+) when available, falls back to
+  // a per-turn tick inside before_prompt_build for older hosts.
+  const serviceAvailable = typeof (api as unknown as { registerService?: unknown }).registerService === 'function'
+  if (serviceAvailable) {
+    const registerService = (api as unknown as { registerService: (s: unknown) => void }).registerService
+    registerService({
+      id: 'omg-bootstrap',
+      start: async (ctx: { workspaceDir?: string }) => {
+        const wsDir = ctx.workspaceDir ?? workspaceDir
+        if (!wsDir) return
+        console.error(`[omg] service: bootstrap loop started for ${wsDir}`)
+        const tick = async () => {
+          try {
+            await scaffoldGraphIfNeeded(wsDir, config)
+            const result = await runBootstrapTick({ workspaceDir: wsDir, config, llmClient })
+            if (result.completed) {
+              await graphMaintenanceCronHandler({ workspaceDir: wsDir, config, llmClient })
+                .catch((err) => console.error('[omg] service: post-bootstrap maintenance failed:', err))
+            }
+          } catch (err) {
+            console.error('[omg] service: bootstrap tick failed:', err)
+          }
+        }
+        await tick()
+        setInterval(tick, 5 * 60 * 1000) // retry every 5 min until done
+      },
+    })
+  }
+
   api.on('before_prompt_build', (event, ctx) => {
     // ctx.workspaceDir is populated per-agent by OpenClaw (PluginHookAgentContext).
     // It takes priority over the globally-resolved workspaceDir so that agents with
@@ -392,16 +422,14 @@ export function register(api: PluginApi): void {
     const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
     if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
 
-    // Fire-and-forget scaffold once per workspace per gateway lifetime.
-    // Bootstrap is handled by the omg-bootstrap cron job (registered at gateway_start).
-    // Safety net: if cron is unavailable (old host), run one bounded tick inline.
+    // Scaffold once per workspace per gateway lifetime (cheap, idempotent).
     if (!bootstrappedWorkspaces.has(effectiveWorkspaceDir)) {
       bootstrappedWorkspaces.add(effectiveWorkspaceDir)
       scaffoldGraphIfNeeded(effectiveWorkspaceDir, config)
         .catch((err) => console.error('[omg] before_prompt_build: scaffold failed:', err))
         .then(() => {
-          // Safety net: cron unavailable (old host) → run one bounded tick
-          if (typeof api.scheduleCron !== 'function') {
+          // Fallback: service API unavailable (old host) → run one bounded tick per turn
+          if (!serviceAvailable) {
             return runBootstrapTick({ workspaceDir: effectiveWorkspaceDir, config, llmClient })
               .then((result) => {
                 if (result.completed) {
@@ -419,12 +447,10 @@ export function register(api: PluginApi): void {
       registeredCronWorkspaces.add(effectiveWorkspaceDir)
 
       // Persist new workspace to registry — fire-and-forget.
-      // addWorkspaceToRegistry enqueues the full read-modify-write inside the
-      // serialization queue so concurrent calls never lose each other's writes.
       addWorkspaceToRegistry(effectiveWorkspaceDir)
         .catch(err => console.error('[omg] before_prompt_build: registry write failed:', err))
 
-      // Register crons immediately for current session
+      // Register crons if host supports scheduleCron (legacy path)
       if (typeof api.scheduleCron === 'function') {
         const cronCtx = {
           workspaceDir: effectiveWorkspaceDir,
