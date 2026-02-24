@@ -104,8 +104,61 @@ describe('RateLimitBreaker — awaitGate', () => {
 })
 
 describe('RateLimitBreaker — MAX_RETRY_ATTEMPTS export', () => {
-  it('exports MAX_RETRY_ATTEMPTS as a positive number', () => {
-    expect(typeof MAX_RETRY_ATTEMPTS).toBe('number')
-    expect(MAX_RETRY_ATTEMPTS).toBeGreaterThan(0)
+  it('exports MAX_RETRY_ATTEMPTS as 5', () => {
+    expect(MAX_RETRY_ATTEMPTS).toBe(5)
+  })
+})
+
+describe('RateLimitBreaker — post-backoff reset', () => {
+  it('creates a fresh gate after the first backoff window resolves', async () => {
+    const { sleep } = await import('../../../src/bootstrap/backoff.js')
+    let firstResolve!: () => void
+    let secondResolve!: () => void
+    vi.mocked(sleep)
+      .mockReturnValueOnce(new Promise<void>((r) => { firstResolve = r }))
+      .mockReturnValueOnce(new Promise<void>((r) => { secondResolve = r }))
+
+    const breaker = new RateLimitBreaker()
+
+    // First backoff window
+    breaker.startBackoff()
+    await Promise.resolve()
+    // Gate is pending — awaitGate should block
+    let firstGateSettled = false
+    const g1 = breaker.awaitGate().then(() => { firstGateSettled = true })
+    await Promise.resolve()
+    expect(firstGateSettled).toBe(false)
+
+    // Resolve first window
+    firstResolve()
+    await g1
+    expect(firstGateSettled).toBe(true)
+
+    // Second rate-limit — should create a new gate
+    breaker.startBackoff()
+    let secondGateSettled = false
+    const g2 = breaker.awaitGate().then(() => { secondGateSettled = true })
+    await Promise.resolve()
+    expect(secondGateSettled).toBe(false)
+
+    secondResolve()
+    await g2
+    expect(secondGateSettled).toBe(true)
+    expect(sleep).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('RateLimitBreaker — abort()', () => {
+  it('sets aborted=true immediately', () => {
+    const breaker = new RateLimitBreaker()
+    expect(breaker.aborted).toBe(false)
+    breaker.abort()
+    expect(breaker.aborted).toBe(true)
+  })
+
+  it('awaitGate throws PipelineAbortedError after abort()', async () => {
+    const breaker = new RateLimitBreaker()
+    breaker.abort()
+    await expect(breaker.awaitGate()).rejects.toBeInstanceOf(PipelineAbortedError)
   })
 })

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { computeBackoffMs, BACKOFF_DELAYS_MS } from '../../../src/bootstrap/backoff.js'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { computeBackoffMs, BACKOFF_DELAYS_MS, sleep } from '../../../src/bootstrap/backoff.js'
 
 describe('computeBackoffMs', () => {
   it('returns 15_000ms for 1 consecutive failure', () => {
@@ -30,5 +30,25 @@ describe('computeBackoffMs', () => {
   it('max value equals last entry in BACKOFF_DELAYS_MS', () => {
     const last = BACKOFF_DELAYS_MS[BACKOFF_DELAYS_MS.length - 1]!
     expect(computeBackoffMs(BACKOFF_DELAYS_MS.length + 100)).toBe(last)
+  })
+
+  it('returns first delay for 0 consecutive failures (edge case)', () => {
+    expect(computeBackoffMs(0)).toBe(BACKOFF_DELAYS_MS[0])
+  })
+})
+
+describe('sleep', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('resolves after the given delay using setTimeout', async () => {
+    vi.useFakeTimers()
+    let settled = false
+    const p = sleep(500).then(() => { settled = true })
+    expect(settled).toBe(false)
+    vi.advanceTimersByTime(500)
+    await p
+    expect(settled).toBe(true)
   })
 })

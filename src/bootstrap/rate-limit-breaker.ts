@@ -66,4 +66,13 @@ export class RateLimitBreaker {
   onSuccess(): void {
     this._consecutiveFailures = 0
   }
+
+  /**
+   * Immediately marks the pipeline as aborted, unblocking `awaitGate()` callers
+   * who will receive a `PipelineAbortedError`. Used when a non-rate-limit failure
+   * (e.g. `GatewayUnreachableError`) makes further attempts futile for all workers.
+   */
+  abort(): void {
+    this._aborted = true
+  }
 }

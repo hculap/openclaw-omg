@@ -1,11 +1,17 @@
 /**
  * LLM client interface and factory for the OMG plugin.
  *
+ * Typed errors from the underlying generateFn (RateLimitError,
+ * GatewayUnreachableError) are re-thrown without wrapping so that callers
+ * (e.g. the bootstrap retry loop) can discriminate them with instanceof.
+ *
  * Uses an injected callback pattern so that the host application's model
  * resolution (auth profiles, provider selection) remains under its control.
  * The plugin entry point injects the host's generation function; for tests
  * a mock generateFn is passed directly — no SDK required.
  */
+
+import { RateLimitError, GatewayUnreachableError } from './errors.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,6 +87,9 @@ export function createLlmClient(model: string, generateFn: GenerateFn): LlmClien
 
         return { content: raw.content, usage: raw.usage }
       } catch (err) {
+        // Preserve typed errors so callers (e.g. the bootstrap retry loop)
+        // can discriminate them with instanceof.
+        if (err instanceof RateLimitError || err instanceof GatewayUnreachableError) throw err
         throw new Error(
           `LLM call failed (model: ${model}): ${err instanceof Error ? err.message : String(err)}`,
           { cause: err },

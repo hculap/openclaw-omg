@@ -107,8 +107,13 @@ export function createGatewayCompletionsGenerateFn(
 
     const rawText = await response.text()
 
-    // Gateway-level error responses embedded in 200 OK bodies
+    // Gateway-level error responses embedded in 200 OK bodies.
+    // Classify by body text so that connectivity errors (e.g. "Connection error:
+    // upstream refused") throw GatewayUnreachableError, not RateLimitError.
     if (rawText.startsWith('⚠️') || rawText.startsWith('Connection error')) {
+      if (classifyGatewayError(rawText) === 'unreachable') {
+        throw new GatewayUnreachableError(`Gateway error response: ${rawText.slice(0, 200)}`)
+      }
       throw new RateLimitError(`Gateway error response: ${rawText.slice(0, 200)}`)
     }
 

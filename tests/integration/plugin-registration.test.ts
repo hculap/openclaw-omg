@@ -17,6 +17,9 @@ vi.mock('../../src/bootstrap/bootstrap.js', () => ({
 vi.mock('../../src/graph/node-reader.js', () => ({
   listAllNodes: vi.fn().mockResolvedValue([]),
 }))
+vi.mock('../../src/graph/registry.js', () => ({
+  getNodeCount: vi.fn().mockResolvedValue(0),
+}))
 vi.mock('../../src/utils/paths.js', () => ({
   resolveOmgRoot: vi.fn().mockReturnValue('/workspace/memory/omg'),
   resolveMocPath: vi.fn().mockReturnValue('/workspace/memory/omg/mocs/moc-test.md'),
@@ -198,8 +201,8 @@ describe('plugin.register — registerCli', () => {
 describe('plugin.register — before_prompt_build bootstrap trigger', () => {
   it('triggers runBootstrap fire-and-forget on first before_prompt_build when graph is empty', async () => {
     const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
-    const { listAllNodes } = await import('../../src/graph/node-reader.js')
-    vi.mocked(listAllNodes).mockResolvedValueOnce([])
+    const { getNodeCount } = await import('../../src/graph/registry.js')
+    vi.mocked(getNodeCount).mockResolvedValueOnce(0)
 
     const api = makeMockApi()
     plugin.register(api)
@@ -220,8 +223,8 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
 
   it('does NOT trigger runBootstrap again on the second before_prompt_build call', async () => {
     const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
-    const { listAllNodes } = await import('../../src/graph/node-reader.js')
-    vi.mocked(listAllNodes).mockResolvedValue([])
+    const { getNodeCount } = await import('../../src/graph/registry.js')
+    vi.mocked(getNodeCount).mockResolvedValue(0)
     vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mockResolvedValue({
       ran: true, chunksProcessed: 1, chunksSucceeded: 1, nodesWritten: 2
     })
@@ -245,10 +248,8 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
 
   it('does NOT trigger runBootstrap when graph is non-empty', async () => {
     const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
-    const { listAllNodes } = await import('../../src/graph/node-reader.js')
-    vi.mocked(listAllNodes).mockResolvedValueOnce([
-      { id: 'omg/some-node' } as unknown as Awaited<ReturnType<typeof listAllNodes>>[number]
-    ] as Awaited<ReturnType<typeof listAllNodes>>)
+    const { getNodeCount } = await import('../../src/graph/registry.js')
+    vi.mocked(getNodeCount).mockResolvedValueOnce(1)
 
     const api = makeMockApi()
     plugin.register(api)

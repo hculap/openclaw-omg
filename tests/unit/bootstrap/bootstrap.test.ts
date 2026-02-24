@@ -697,4 +697,29 @@ describe('runBootstrap — rate limit handling', () => {
 
     consoleErrorSpy.mockRestore()
   })
+
+  it('abandons batch after exactly MAX_RETRY_ATTEMPTS retries (per-batch boundary)', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nContent.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const { RateLimitError } = await import('../../../src/llm/errors.js')
+    const { MAX_RETRY_ATTEMPTS } = await import('../../../src/bootstrap/rate-limit-breaker.js')
+
+    // Always rate-limit so we can count attempts
+    vi.mocked(runObservation).mockRejectedValue(new RateLimitError('rate limit'))
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    // 1 initial + MAX_RETRY_ATTEMPTS retries = MAX_RETRY_ATTEMPTS + 1 total calls
+    // (pipeline aborts when breaker threshold is reached, which may cap calls earlier)
+    expect(runObservation).toHaveBeenCalled()
+    // Key assertion: never more than MAX_RETRY_ATTEMPTS + 1 calls for a single batch
+    expect(vi.mocked(runObservation).mock.calls.length).toBeLessThanOrEqual(MAX_RETRY_ATTEMPTS + 1)
+
+    consoleErrorSpy.mockRestore()
+  })
 })

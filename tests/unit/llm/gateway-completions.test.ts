@@ -83,11 +83,11 @@ describe('createGatewayCompletionsGenerateFn — rate limit errors', () => {
     await expect(generate(DEFAULT_PARAMS)).rejects.toBeInstanceOf(RateLimitError)
   })
 
-  it('throws RateLimitError for body starting with "Connection error"', async () => {
+  it('throws GatewayUnreachableError for body starting with "Connection error"', async () => {
     vi.mocked(fetch).mockResolvedValue(makeOkResponse('Connection error: upstream timeout'))
 
     const generate = createGatewayCompletionsGenerateFn({ port: 18789 })
-    await expect(generate(DEFAULT_PARAMS)).rejects.toBeInstanceOf(RateLimitError)
+    await expect(generate(DEFAULT_PARAMS)).rejects.toBeInstanceOf(GatewayUnreachableError)
   })
 
   it('throws RateLimitError when response is 200 but body is non-JSON (overloaded gateway)', async () => {

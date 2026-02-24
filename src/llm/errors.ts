@@ -28,7 +28,7 @@ export class PipelineAbortedError extends Error {
 }
 
 const RATE_LIMIT_PATTERNS = ['rate limit', 'rate_limit', 'too many requests', '429'] as const
-const UNREACHABLE_PATTERNS = ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'fetch failed'] as const
+const UNREACHABLE_PATTERNS = ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'fetch failed', 'Connection error'] as const
 
 export function classifyGatewayError(message: string): 'rate-limit' | 'unreachable' | 'other' {
   const lower = message.toLowerCase()

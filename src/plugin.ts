@@ -471,7 +471,13 @@ export function register(api: PluginApi): void {
     // if already completed, but checking here avoids the async overhead.
     const omgRoot = resolveOmgRoot(workspaceDir, config)
     const { readBootstrapState, shouldBootstrap } = await import('./bootstrap/state.js')
-    const existing = await readBootstrapState(omgRoot).catch(() => null)
+    const existing = await readBootstrapState(omgRoot).catch((err: unknown) => {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT') {
+        console.error('[omg] gateway_start: failed to read bootstrap state:', err)
+      }
+      return null
+    })
     const decision = shouldBootstrap(existing, false)
     console.error(`[omg] gateway_start: state=${existing?.status ?? 'none'}, bootstrap=${decision.needed}`)
     if (decision.needed) {

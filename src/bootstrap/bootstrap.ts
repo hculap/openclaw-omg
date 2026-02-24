@@ -36,7 +36,7 @@ import {
 } from './state.js'
 import { acquireLock, releaseLock, refreshLock } from './lock.js'
 import { RateLimitBreaker, MAX_RETRY_ATTEMPTS } from './rate-limit-breaker.js'
-import { RateLimitError, PipelineAbortedError } from '../llm/errors.js'
+import { RateLimitError, PipelineAbortedError, GatewayUnreachableError } from '../llm/errors.js'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
@@ -187,6 +187,11 @@ async function processBatch(
         }
         attempt++
         continue
+      }
+      if (err instanceof GatewayUnreachableError) {
+        breaker.abort()
+        console.error(`[omg] bootstrap: gateway unreachable for "${batchLabel}" — aborting pipeline:`, err)
+        throw err
       }
       console.error(`[omg] bootstrap: observation failed for "${batchLabel}":`, err)
       return { nodesWritten: 0, chunkCount: batch.chunks.length, observationSucceeded: false }
