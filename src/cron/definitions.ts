@@ -6,6 +6,7 @@
  *   - `omg-maintenance`       — weekly link repair and text-exact deduplication audit.
  */
 
+import fs from 'node:fs'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import { runReflection } from '../reflector/reflector.js'
@@ -27,6 +28,8 @@ export interface CronContext {
   readonly workspaceDir: string
   readonly config: OmgConfig
   readonly llmClient: LlmClient
+  /** When set, job IDs are namespaced as `<base>::<jobIdNamespace>` to prevent collisions across workspaces. */
+  readonly jobIdNamespace?: string
 }
 
 /** Age threshold in milliseconds (7 days) for the reflection step. */
@@ -49,6 +52,11 @@ export async function graphMaintenanceCronHandler(
   ageCutoffMs?: number,
 ): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
+
+  if (!fs.existsSync(omgRoot)) {
+    console.warn(`[omg] cron: omgRoot does not exist — skipping (${omgRoot})`)
+    return
+  }
 
   // Step 1: Semantic dedup
   try {
@@ -125,6 +133,11 @@ export async function graphMaintenanceCronHandler(
 export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
 
+  if (!fs.existsSync(omgRoot)) {
+    console.warn(`[omg] cron: omgRoot does not exist — skipping (${omgRoot})`)
+    return
+  }
+
   let allEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
     allEntries = await getRegistryEntries(omgRoot)
@@ -179,6 +192,12 @@ export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
  * Never throws — errors are logged.
  */
 async function bootstrapCronHandler(ctx: CronContext): Promise<void> {
+  const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
+  if (!fs.existsSync(omgRoot)) {
+    console.warn(`[omg] cron: omgRoot does not exist — skipping (${omgRoot})`)
+    return
+  }
+
   try {
     const result = await runBootstrapTick({
       workspaceDir: ctx.workspaceDir,
@@ -202,19 +221,22 @@ export function createCronDefinitions(ctx: CronContext): readonly CronDefinition
   const graphMaintenanceSchedule =
     ctx.config.graphMaintenance.cronSchedule ?? ctx.config.reflection.cronSchedule
 
+  const id = (base: string): string =>
+    ctx.jobIdNamespace !== undefined ? `${base}::${ctx.jobIdNamespace}` : base
+
   return [
     {
-      id: 'omg-bootstrap',
+      id: id('omg-bootstrap'),
       schedule: ctx.config.bootstrap.cronSchedule,
       handler: () => bootstrapCronHandler(ctx),
     },
     {
-      id: 'omg-reflection',
+      id: id('omg-reflection'),
       schedule: graphMaintenanceSchedule,
       handler: () => graphMaintenanceCronHandler(ctx),
     },
     {
-      id: 'omg-maintenance',
+      id: id('omg-maintenance'),
       schedule: MAINTENANCE_SCHEDULE,
       handler: () => maintenanceCronHandler(ctx),
     },

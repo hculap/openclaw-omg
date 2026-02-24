@@ -21,6 +21,15 @@ vi.mock('../../src/scaffold.js', () => ({
   scaffoldGraphIfNeeded: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('../../src/cron/workspace-registry.js', () => ({
+  readWorkspaceRegistry: vi.fn().mockResolvedValue({ version: 1, workspaces: {} }),
+  writeWorkspaceRegistry: vi.fn().mockResolvedValue(undefined),
+  addWorkspaceToRegistry: vi.fn().mockResolvedValue(undefined),
+  addWorkspace: vi.fn().mockImplementation((reg: unknown) => reg),
+  pruneStaleWorkspaces: vi.fn().mockImplementation((reg: unknown) => reg),
+  listWorkspacePaths: vi.fn().mockReturnValue([]),
+}))
+
 const { register } = await import('../../src/plugin.js')
 
 function makeMockApi(config: Record<string, unknown> = {}): PluginApi & { on: ReturnType<typeof vi.fn> } {
