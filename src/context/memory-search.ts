@@ -54,9 +54,14 @@ interface MemoryToolInstance {
   execute(input: unknown): Promise<unknown>
 }
 
+interface MemoryToolOptions {
+  config?: unknown
+  agentSessionKey?: string
+}
+
 interface RuntimeTools {
-  createMemorySearchTool?: () => MemoryToolInstance | null
-  createMemoryGetTool?: () => MemoryToolInstance | null
+  createMemorySearchTool?: (options?: MemoryToolOptions) => MemoryToolInstance | null
+  createMemoryGetTool?: (options?: MemoryToolOptions) => MemoryToolInstance | null
 }
 
 // ---------------------------------------------------------------------------
@@ -72,17 +77,18 @@ interface RuntimeTools {
  *   - `createMemorySearchTool` is not a function
  *   - `createMemorySearchTool()` returns null (plugin not active)
  */
-export function createMemoryTools(api: { runtime?: { tools?: RuntimeTools } }): MemoryTools | null {
+export function createMemoryTools(api: { config?: unknown; runtime?: { tools?: RuntimeTools } }): MemoryTools | null {
   const tools = api.runtime?.tools
   if (!tools) return null
 
   if (typeof tools.createMemorySearchTool !== 'function') return null
 
-  const searchTool = tools.createMemorySearchTool()
+  const toolOptions: MemoryToolOptions = { config: api.config }
+  const searchTool = tools.createMemorySearchTool(toolOptions)
   if (!searchTool) return null
 
   const getTool = typeof tools.createMemoryGetTool === 'function'
-    ? tools.createMemoryGetTool()
+    ? tools.createMemoryGetTool(toolOptions)
     : null
 
   return {
