@@ -33,6 +33,17 @@ vi.mock('../../src/dedup/dedup.js', () => ({
   }),
 }))
 
+vi.mock('../../src/bootstrap/bootstrap.js', () => ({
+  runBootstrapTick: vi.fn().mockResolvedValue({
+    ran: true,
+    batchesProcessed: 0,
+    chunksSucceeded: 0,
+    nodesWritten: 0,
+    moreWorkRemains: false,
+    completed: false,
+  }),
+}))
+
 const { createCronDefinitions } = await import('../../src/cron/definitions.js')
 
 const WORKSPACE = '/workspace'
@@ -73,14 +84,15 @@ afterEach(() => {
 })
 
 describe('createCronDefinitions', () => {
-  it('returns exactly two cron definitions', () => {
+  it('returns exactly three cron definitions', () => {
     const defs = createCronDefinitions(makeCtx())
-    expect(defs).toHaveLength(2)
+    expect(defs).toHaveLength(3)
   })
 
   it('has correct job IDs', () => {
     const defs = createCronDefinitions(makeCtx())
     const ids = defs.map((d) => d.id)
+    expect(ids).toContain('omg-bootstrap')
     expect(ids).toContain('omg-reflection')
     expect(ids).toContain('omg-maintenance')
     expect(ids).not.toContain('omg-graph-maintenance')
@@ -264,5 +276,105 @@ Content.`,
     await maintenance.handler()
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('broken wikilink'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// omg-bootstrap cron definition
+// ---------------------------------------------------------------------------
+
+describe('createCronDefinitions — omg-bootstrap', () => {
+  it('omg-bootstrap appears before omg-reflection in the array', () => {
+    const defs = createCronDefinitions(makeCtx())
+    const ids = defs.map((d) => d.id)
+    expect(ids.indexOf('omg-bootstrap')).toBeLessThan(ids.indexOf('omg-reflection'))
+  })
+
+  it('uses config.bootstrap.cronSchedule for omg-bootstrap schedule', () => {
+    const ctx = {
+      workspaceDir: WORKSPACE,
+      config: parseConfig({ bootstrap: { cronSchedule: '*/10 * * * *' } }),
+      llmClient: makeMockLlm(),
+    }
+    const defs = createCronDefinitions(ctx)
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    expect(bootstrap.schedule).toBe('*/10 * * * *')
+  })
+
+  it('uses default */5 * * * * schedule when not configured', () => {
+    const defs = createCronDefinitions(makeCtx())
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    expect(bootstrap.schedule).toBe('*/5 * * * *')
+  })
+
+  it('has a handler function', () => {
+    const defs = createCronDefinitions(makeCtx())
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    expect(typeof bootstrap.handler).toBe('function')
+  })
+
+  it('handler calls runBootstrapTick', async () => {
+    const { runBootstrapTick } = await import('../../src/bootstrap/bootstrap.js')
+    vi.mocked(runBootstrapTick).mockClear()
+
+    const defs = createCronDefinitions(makeCtx())
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    await bootstrap.handler()
+
+    expect(runBootstrapTick).toHaveBeenCalledOnce()
+  })
+
+  it('handler triggers graphMaintenanceCronHandler when bootstrap completes', async () => {
+    const { runBootstrapTick } = await import('../../src/bootstrap/bootstrap.js')
+    const { runDedup } = await import('../../src/dedup/dedup.js')
+
+    vi.mocked(runBootstrapTick).mockResolvedValueOnce({
+      ran: true,
+      batchesProcessed: 5,
+      chunksSucceeded: 5,
+      nodesWritten: 10,
+      moreWorkRemains: false,
+      completed: true,
+    })
+    vi.mocked(runDedup).mockClear()
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const defs = createCronDefinitions(makeCtx())
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    await bootstrap.handler()
+
+    // graphMaintenanceCronHandler runs dedup as its first step
+    expect(runDedup).toHaveBeenCalledOnce()
+  })
+
+  it('handler does NOT trigger graphMaintenanceCronHandler when not completed', async () => {
+    const { runBootstrapTick } = await import('../../src/bootstrap/bootstrap.js')
+    const { runDedup } = await import('../../src/dedup/dedup.js')
+
+    vi.mocked(runBootstrapTick).mockResolvedValueOnce({
+      ran: true,
+      batchesProcessed: 2,
+      chunksSucceeded: 2,
+      nodesWritten: 3,
+      moreWorkRemains: true,
+      completed: false,
+    })
+    vi.mocked(runDedup).mockClear()
+
+    const defs = createCronDefinitions(makeCtx())
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    await bootstrap.handler()
+
+    expect(runDedup).not.toHaveBeenCalled()
+  })
+
+  it('handler does not throw when runBootstrapTick throws', async () => {
+    const { runBootstrapTick } = await import('../../src/bootstrap/bootstrap.js')
+    vi.mocked(runBootstrapTick).mockRejectedValueOnce(new Error('boom'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const defs = createCronDefinitions(makeCtx())
+    const bootstrap = defs.find((d) => d.id === 'omg-bootstrap')!
+    await expect(bootstrap.handler()).resolves.not.toThrow()
   })
 })

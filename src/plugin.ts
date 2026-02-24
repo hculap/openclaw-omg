@@ -24,8 +24,7 @@ import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
 import { graphMaintenanceCronHandler } from './cron/definitions.js'
 import { scaffoldGraphIfNeeded } from './scaffold.js'
-import { runBootstrap } from './bootstrap/bootstrap.js'
-import { getNodeCount } from './graph/registry.js'
+import { runBootstrap, runBootstrapTick } from './bootstrap/bootstrap.js'
 import { resolveOmgRoot } from './utils/paths.js'
 import type { Message } from './types.js'
 import type { GenerateFn } from './llm/client.js'
@@ -381,26 +380,27 @@ export function register(api: PluginApi): void {
     const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
     if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
 
-    // Fire-and-forget scaffold + bootstrap once per workspace per gateway lifetime.
-    // Scaffold runs first so the directory structure exists before bootstrap tries to write.
+    // Fire-and-forget scaffold once per workspace per gateway lifetime.
+    // Bootstrap is handled by the omg-bootstrap cron job (registered at gateway_start).
+    // Safety net: if cron is unavailable (old host), run one bounded tick inline.
     if (!bootstrappedWorkspaces.has(effectiveWorkspaceDir)) {
       bootstrappedWorkspaces.add(effectiveWorkspaceDir)
       scaffoldGraphIfNeeded(effectiveWorkspaceDir, config)
         .catch((err) => console.error('[omg] before_prompt_build: scaffold failed:', err))
-        .then(() => getNodeCount(resolveOmgRoot(effectiveWorkspaceDir, config)))
-        .then((count) => {
-          if (count === 0) {
-            return runBootstrap({ workspaceDir: effectiveWorkspaceDir, config, llmClient, force: false })
+        .then(() => {
+          // Safety net: cron unavailable (old host) → run one bounded tick
+          if (typeof api.scheduleCron !== 'function') {
+            return runBootstrapTick({ workspaceDir: effectiveWorkspaceDir, config, llmClient })
               .then((result) => {
-                if (result?.ran) {
+                if (result.completed) {
                   graphMaintenanceCronHandler({ workspaceDir: effectiveWorkspaceDir, config, llmClient })
-                    .catch((err) => console.error('[omg] before_prompt_build: post-bootstrap graph maintenance failed:', err))
+                    .catch((err) => console.error('[omg] before_prompt_build: post-bootstrap maintenance failed:', err))
                 }
               })
-              .catch((err) => console.error('[omg] before_prompt_build: bootstrap failed:', err))
+              .catch((err) => console.error('[omg] before_prompt_build: bootstrap tick failed:', err))
           }
         })
-        .catch((err) => console.error('[omg] before_prompt_build: node count failed, skipping bootstrap:', err))
+        .catch((err) => console.error('[omg] before_prompt_build: scaffold failed:', err))
     }
 
     const sessionKey = ctx.sessionKey ?? 'default'
@@ -458,31 +458,13 @@ export function register(api: PluginApi): void {
       console.error('[omg] scaffold failed:', err)
     )
 
+    // Register cron jobs — includes omg-bootstrap which handles bounded,
+    // resumable bootstrap via runBootstrapTick on a configurable schedule.
     const cronCtx = { workspaceDir, config, llmClient }
     try {
       registerCronJobs(api, config, cronCtx)
     } catch (err) {
-      console.error('[omg] gateway_start: failed to register cron jobs — background reflection will not run:', err)
-    }
-
-    // Fire-and-forget bootstrap on first start if state says it's needed.
-    // Use state (not node count) — scaffold writes index.md/now.md so
-    // nodes.length is never 0 after scaffold. runBootstrap skips internally
-    // if already completed, but checking here avoids the async overhead.
-    const omgRoot = resolveOmgRoot(workspaceDir, config)
-    const { readBootstrapState, shouldBootstrap } = await import('./bootstrap/state.js')
-    const existing = await readBootstrapState(omgRoot).catch((err: unknown) => {
-      const code = (err as NodeJS.ErrnoException).code
-      if (code !== 'ENOENT') {
-        console.error('[omg] gateway_start: failed to read bootstrap state:', err)
-      }
-      return null
-    })
-    const decision = shouldBootstrap(existing, false)
-    console.error(`[omg] gateway_start: state=${existing?.status ?? 'none'}, bootstrap=${decision.needed}`)
-    if (decision.needed) {
-      runBootstrap({ workspaceDir, config, llmClient, force: false })
-        .catch((err) => console.error('[omg] gateway_start: bootstrap failed:', err))
+      console.error('[omg] gateway_start: failed to register cron jobs — background bootstrap/reflection will not run:', err)
     }
   })
 

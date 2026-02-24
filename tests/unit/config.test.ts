@@ -921,3 +921,59 @@ describe('parseConfig — graphMaintenance', () => {
     expect(result.graphMaintenance.cronSchedule).toBe(result.reflection.cronSchedule)
   })
 })
+
+// ---------------------------------------------------------------------------
+// bootstrap.batchBudgetPerRun & bootstrap.cronSchedule
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — bootstrap.batchBudgetPerRun', () => {
+  it('defaults to 20', () => {
+    const result = parseConfig({})
+    expect(result.bootstrap.batchBudgetPerRun).toBe(20)
+  })
+
+  it('accepts a positive integer', () => {
+    const result = parseConfig({ bootstrap: { batchBudgetPerRun: 5 } })
+    expect(result.bootstrap.batchBudgetPerRun).toBe(5)
+  })
+
+  it('rejects zero', () => {
+    expectFieldError(
+      () => parseConfig({ bootstrap: { batchBudgetPerRun: 0 } }),
+      'bootstrap.batchBudgetPerRun'
+    )
+  })
+
+  it('rejects negative values', () => {
+    expectFieldError(
+      () => parseConfig({ bootstrap: { batchBudgetPerRun: -1 } }),
+      'bootstrap.batchBudgetPerRun'
+    )
+  })
+
+  it('rejects non-integer values', () => {
+    expectFieldError(
+      () => parseConfig({ bootstrap: { batchBudgetPerRun: 2.5 } }),
+      'bootstrap.batchBudgetPerRun'
+    )
+  })
+})
+
+describe('parseConfig — bootstrap.cronSchedule', () => {
+  it('defaults to */5 * * * *', () => {
+    const result = parseConfig({})
+    expect(result.bootstrap.cronSchedule).toBe('*/5 * * * *')
+  })
+
+  it('accepts a valid 5-field cron expression', () => {
+    const result = parseConfig({ bootstrap: { cronSchedule: '0 * * * *' } })
+    expect(result.bootstrap.cronSchedule).toBe('0 * * * *')
+  })
+
+  it('rejects an invalid cron expression', () => {
+    expectFieldError(
+      () => parseConfig({ bootstrap: { cronSchedule: 'not-a-cron' } }),
+      'bootstrap.cronSchedule'
+    )
+  })
+})

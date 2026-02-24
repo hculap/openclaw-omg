@@ -30,7 +30,7 @@ const STALE_THRESHOLD_MS = 5 * 60 * 1000 // 5 min
 
 const bootstrapStateSchema = z.object({
   version: z.literal(STATE_VERSION),
-  status: z.enum(['running', 'completed', 'failed']),
+  status: z.enum(['running', 'paused', 'completed', 'failed']),
   startedAt: z.string(),
   updatedAt: z.string(),
   /** First batch index NOT yet completed (contiguous prefix optimisation). */
@@ -110,6 +110,19 @@ export function advanceBatch(
 }
 
 /**
+ * Marks the bootstrap as paused (immutable).
+ * Used when a cron tick exhausts its batch budget but more batches remain.
+ * The lock is released so the next tick can resume.
+ */
+export function pauseState(state: BootstrapState): BootstrapState {
+  return {
+    ...state,
+    status: 'paused',
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+/**
  * Marks the bootstrap as completed or failed (immutable).
  * Clears the `done` array to keep the file small post-run.
  */
@@ -168,6 +181,8 @@ export function shouldBootstrap(
     case 'completed':
       return { needed: false }
     case 'failed':
+      return { needed: true, resumeFromDone: state.done }
+    case 'paused':
       return { needed: true, resumeFromDone: state.done }
     case 'running':
       if (isStaleRunning(state)) {
