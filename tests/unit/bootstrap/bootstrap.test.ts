@@ -14,6 +14,13 @@ vi.mock('node:os', () => ({
   homedir: () => '/home/user',
 }))
 
+// Make backoff delays instant so rate-limit tests don't slow the suite
+vi.mock('../../../src/bootstrap/backoff.js', () => ({
+  computeBackoffMs: vi.fn().mockReturnValue(0),
+  sleep: vi.fn().mockResolvedValue(undefined),
+  BACKOFF_DELAYS_MS: [0, 0, 0, 0, 0],
+}))
+
 // Mock observer and graph modules
 vi.mock('../../../src/observer/observer.js', () => ({
   runObservation: vi.fn(),
@@ -588,5 +595,106 @@ describe('runBootstrap — locking', () => {
     expect(result.ran).toBe(false)
     expect(result.chunksProcessed).toBe(0)
     expect(runObservation).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Rate limit handling
+// ---------------------------------------------------------------------------
+
+describe('runBootstrap — rate limit handling', () => {
+  it('retries on RateLimitError and succeeds on next attempt', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nSome content to process.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const { RateLimitError } = await import('../../../src/llm/errors.js')
+    vi.mocked(runObservation)
+      .mockRejectedValueOnce(new RateLimitError('rate limit'))
+      .mockResolvedValueOnce(EMPTY_OBSERVER_OUTPUT)
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    expect(result.ran).toBe(true)
+    // Initial attempt + 1 retry
+    expect(runObservation).toHaveBeenCalledTimes(2)
+
+    consoleErrorSpy.mockRestore()
+  })
+
+  it('awaits backoff sleep between rate-limit retries', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nSome content.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const { RateLimitError } = await import('../../../src/llm/errors.js')
+    const { sleep } = await import('../../../src/bootstrap/backoff.js')
+
+    vi.mocked(runObservation)
+      .mockRejectedValueOnce(new RateLimitError('rate limit'))
+      .mockResolvedValueOnce(EMPTY_OBSERVER_OUTPUT)
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    // Sleep should have been called once for the one rate-limit backoff
+    expect(sleep).toHaveBeenCalledTimes(1)
+
+    consoleErrorSpy.mockRestore()
+  })
+
+  it('aborts pipeline after MAX_CONSECUTIVE rate limits and persists failed state', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nSome content.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const { RateLimitError } = await import('../../../src/llm/errors.js')
+    // Always fail with rate limit
+    vi.mocked(runObservation).mockRejectedValue(new RateLimitError('rate limit'))
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await runBootstrap(makeBootstrapParams({ source: 'memory' }))
+
+    expect(result.ran).toBe(true)
+
+    // State file should be 'failed'
+    const raw = vol.readFileSync(STATE_PATH, 'utf-8') as string
+    const state = JSON.parse(raw) as BootstrapState
+    expect(state.status).toBe('failed')
+    expect(state.lastError).toContain('Rate limit')
+
+    consoleErrorSpy.mockRestore()
+  })
+
+  it('non-rate-limit errors still skip batch without retry (existing behavior)', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+
+    vi.mocked(runObservation)
+      .mockRejectedValueOnce(new Error('LLM connection timeout'))
+      .mockResolvedValueOnce(EMPTY_OBSERVER_OUTPUT)
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await runBootstrap(makeBootstrapParams({ config: noBatchConfig, source: 'memory' }))
+
+    // No retry for non-rate-limit errors — exactly 2 calls (one per batch)
+    expect(runObservation).toHaveBeenCalledTimes(2)
+    expect(result.chunksSucceeded).toBe(1)
+    expect(result.chunksProcessed).toBe(2)
+
+    consoleErrorSpy.mockRestore()
   })
 })

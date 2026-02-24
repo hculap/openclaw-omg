@@ -13,13 +13,9 @@
  * for OpenClaw's auto-discovery, and a default export for backward compatibility.
  */
 
-import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
 import { parseConfig, omgConfigSchema } from './config.js'
 import { createLlmClient } from './llm/client.js'
 import { createGatewayCompletionsGenerateFn } from './llm/gateway-completions.js'
-import { createDirectAnthropicGenerateFn } from './llm/direct-anthropic.js'
-import { createDirectOpenAiGenerateFn } from './llm/direct-openai.js'
 import { agentEnd } from './hooks/agent-end.js'
 import { beforeAgentStart } from './hooks/before-agent-start.js'
 import { createMemoryTools } from './context/memory-search.js'
@@ -223,44 +219,6 @@ function normalizeContent(content: unknown): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolves the Anthropic API key from gateway auth profiles on disk.
- * Reads `~/.clawdbot/agents/{agentId}/agent/auth-profiles.json` and returns
- * the token from the first `anthropic:*` profile found.
- */
-function resolveAnthropicKeyFromAuthProfiles(): string | undefined {
-  const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? ''
-  const agentsDir = join(home, '.clawdbot', 'agents')
-
-  try {
-    const agentDirs = readdirSync(agentsDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-
-    for (const agentDir of agentDirs) {
-      const profilesPath = join(agentsDir, agentDir, 'agent', 'auth-profiles.json')
-      try {
-        const data = JSON.parse(readFileSync(profilesPath, 'utf-8'))
-        const profiles = data?.profiles as Record<string, { token?: string; type?: string; provider?: string }> | undefined
-        if (!profiles) continue
-        for (const [key, profile] of Object.entries(profiles)) {
-          if (key.startsWith('anthropic:') && profile.token) {
-            // Skip OAuth tokens — they are not supported by the direct Anthropic API
-            if (profile.token.startsWith('sk-ant-oat')) continue
-            return profile.token
-          }
-        }
-      } catch {
-        // Skip unreadable profile files
-      }
-    }
-  } catch {
-    // agentsDir doesn't exist
-  }
-
-  return undefined
-}
-
-/**
  * Resolves the gateway port from config or environment, defaulting to 18789.
  */
 function resolveGatewayPort(rawConfig: Record<string, unknown>): number {
@@ -331,152 +289,27 @@ async function ensureChatCompletionsEnabled(api: PluginApi): Promise<void> {
  *
  * Resolution order:
  *   1. `api.generate` if the host provides it (future-proofing)
- *   2. Gateway's `/v1/chat/completions` endpoint (preferred — uses OpenClaw's
- *      own model providers and auth; no external API key needed)
- *   3. `ANTHROPIC_API_KEY` environment variable (direct fallback)
- *   4. `OPENAI_API_KEY` environment variable (direct fallback)
- *   5. OpenAI API key from gateway config (`env.vars.OPENAI_API_KEY`)
- *   6. Anthropic regular API key from gateway auth-profiles
- *
- * Falls back to a function that throws if no usable path is found.
+ *   2. Gateway's `/v1/chat/completions` endpoint — the only supported LLM path.
+ *      If the gateway is unreachable, a `GatewayUnreachableError` is thrown loudly;
+ *      rate limit responses throw `RateLimitError` so callers can retry with backoff.
  */
 function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
   const rawGlobal = api.config as Record<string, unknown>
 
-  // 1. Check if host provides generate (future-proofing)
+  // 1. Host's api.generate (future-proofing)
   const hostGenerate = (api as unknown as { generate?: unknown }).generate
   if (typeof hostGenerate === 'function') {
     console.error('[omg] Using api.generate from host for LLM calls')
     return (params) => (hostGenerate as GenerateFn)(params)
   }
 
-  // 2. Gateway's own /v1/chat/completions endpoint (preferred path)
-  //    This routes through OpenClaw's model providers — no separate API key.
-  const gatewayPort = resolveGatewayPort(rawGlobal)
-  const gatewayAuthToken = resolveGatewayAuthToken(rawGlobal)
-  const gatewayFn = createGatewayCompletionsGenerateFn({
-    port: gatewayPort,
-    authToken: gatewayAuthToken,
+  // 2. Gateway /v1/chat/completions — the only supported path.
+  //    Gateway unreachable → GatewayUnreachableError propagates loudly.
+  return createGatewayCompletionsGenerateFn({
+    port: resolveGatewayPort(rawGlobal),
+    authToken: resolveGatewayAuthToken(rawGlobal),
     model,
   })
-
-  // 3–6. Direct API fallbacks (only used when gateway endpoint is unreachable)
-  const directFallback = resolveDirectFallbackFn(api, model)
-
-  // Return a wrapper that tries gateway first, falls back to direct on network/
-  // connectivity failures only. Rate limits and model errors are re-thrown so
-  // callers can handle them — they do NOT indicate the gateway is unavailable.
-  let gatewayFailures = 0
-  const GATEWAY_FAILURE_THRESHOLD = 3
-
-  return async (params) => {
-    if (gatewayFailures < GATEWAY_FAILURE_THRESHOLD) {
-      try {
-        const result = await gatewayFn(params)
-        // The gateway returns rate limit errors as HTTP 200 with an error string
-        // in the content body. Detect and re-throw so callers fail fast rather
-        // than treating the error text as a real LLM response.
-        if (result.content.startsWith('⚠️') || result.content.startsWith('Connection error')) {
-          throw new Error(`Gateway error response: ${result.content.slice(0, 120)}`)
-        }
-        gatewayFailures = 0 // reset on success
-        return result
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        // Connection/network errors = gateway unreachable; switch to fallback
-        if (
-          msg.includes('ECONNREFUSED') ||
-          msg.includes('ECONNRESET') ||
-          msg.includes('ETIMEDOUT') ||
-          msg.includes('ENOTFOUND') ||
-          msg.includes('(404)') ||
-          msg.includes('fetch failed')
-        ) {
-          gatewayFailures = GATEWAY_FAILURE_THRESHOLD // permanent switch
-          console.error(`[omg] Gateway /v1/chat/completions not available — switching to direct API fallback`)
-        } else {
-          // Other errors (auth, 500, etc.) — re-throw, don't fall back
-          throw err
-        }
-      }
-    }
-    return directFallback(params)
-  }
-}
-
-/**
- * Extracts and parses the omg plugin config from the OpenClaw plugin API.
- * Returns null if parsing fails or config is not present.
- */
-function resolvePluginConfig(api: PluginApi): ReturnType<typeof parseConfig> | null {
-  try {
-    const rawGlobal = api.config as Record<string, unknown>
-    const apiPluginConfig = (api as unknown as { pluginConfig?: Record<string, unknown> }).pluginConfig
-    const rawPluginConfig =
-      apiPluginConfig ??
-      (
-        (
-          (rawGlobal?.['plugins'] as Record<string, unknown>)
-            ?.['entries'] as Record<string, unknown>
-        )?.['omg'] as Record<string, unknown>
-      )?.['config'] ?? api.config
-    return parseConfig(rawPluginConfig)
-  } catch (err) {
-    console.error('[omg] resolvePluginConfig: failed to parse plugin config:', err)
-    return null
-  }
-}
-
-/**
- * Resolves a direct-API fallback generate function (steps 3–6 of the chain).
- * Used only when the gateway endpoint is unreachable.
- */
-function resolveDirectFallbackFn(api: PluginApi, model: string): GenerateFn {
-  // Try Anthropic key from plugin observer config (highest priority — user explicitly set it)
-  const pluginConfig = resolvePluginConfig(api)
-  const configApiKey = pluginConfig?.observer?.apiKey
-  if (configApiKey && !configApiKey.startsWith('sk-ant-oat')) {
-    console.error('[omg] Direct fallback: Anthropic API key from plugin observer.apiKey config')
-    return createDirectAnthropicGenerateFn({ apiKey: configApiKey, model })
-  }
-
-  // Try ANTHROPIC_API_KEY from environment
-  const envAnthropicKey = process.env['ANTHROPIC_API_KEY']
-  if (envAnthropicKey) {
-    console.error('[omg] Direct fallback: ANTHROPIC_API_KEY from environment')
-    return createDirectAnthropicGenerateFn({ apiKey: envAnthropicKey, model })
-  }
-
-  // Try Anthropic key from gateway auth-profiles (skip OAuth tokens — not supported by direct API)
-  const authKey = resolveAnthropicKeyFromAuthProfiles()
-  if (authKey) {
-    console.error('[omg] Direct fallback: Anthropic API key from gateway auth-profiles')
-    return createDirectAnthropicGenerateFn({ apiKey: authKey, model })
-  }
-
-  // Try OPENAI_API_KEY from environment
-  const envOpenAiKey = process.env['OPENAI_API_KEY']
-  if (envOpenAiKey) {
-    console.error('[omg] Direct fallback: OPENAI_API_KEY from environment (model: gpt-4o)')
-    return createDirectOpenAiGenerateFn({ apiKey: envOpenAiKey, model: 'gpt-4o' })
-  }
-
-  // Try OpenAI key from gateway config (env.vars.OPENAI_API_KEY)
-  const rawGlobal = api.config as Record<string, unknown>
-  const configEnvVars = (rawGlobal?.['env'] as Record<string, unknown>)?.['vars'] as Record<string, string> | undefined
-  const configOpenAiKey = configEnvVars?.['OPENAI_API_KEY']
-  if (configOpenAiKey) {
-    console.error('[omg] Direct fallback: OPENAI_API_KEY from gateway config (model: gpt-4o)')
-    return createDirectOpenAiGenerateFn({ apiKey: configOpenAiKey, model: 'gpt-4o' })
-  }
-
-  // No usable API key found
-  return () => {
-    throw new Error(
-      '[omg] No LLM path available. Enable gateway.http.endpoints.chatCompletions in your gateway config, ' +
-      'or set ANTHROPIC_API_KEY / OPENAI_API_KEY environment variable.'
-    )
-  }
 }
 
 // ---------------------------------------------------------------------------
