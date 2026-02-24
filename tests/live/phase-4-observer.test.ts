@@ -19,6 +19,9 @@ import {
   requireLiveEnv,
   readOpenClawConfig,
   inspectOmgWorkspace,
+  wrapGenerateFnWithTracker,
+  llmTracker,
+  hashDirectory,
   SECRETARY_WORKSPACE,
 } from './helpers.js'
 
@@ -49,12 +52,13 @@ beforeAll(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildLlmClient() {
+function buildLlmClient(phase = 'phase-4-observer') {
   const openclawConfig = readOpenClawConfig()
-  const generateFn = createGatewayCompletionsGenerateFn({
+  const rawGenerateFn = createGatewayCompletionsGenerateFn({
     port: 18789,
     authToken: openclawConfig.gatewayAuthToken,
   })
+  const generateFn = wrapGenerateFnWithTracker(rawGenerateFn, phase)
   return {
     llmClient: createLlmClient(
       openclawConfig.defaultModel ?? 'anthropic/claude-sonnet-4-6',
@@ -133,9 +137,9 @@ describe('Phase 4 — Extract (preference node)', () => {
 // Idempotency
 // ---------------------------------------------------------------------------
 
-describe('Phase 4 — Deterministic IDs', () => {
+describe('Phase 4 — Deterministic IDs + no-op write', () => {
   it('same preference extracted twice produces same canonicalKey', async () => {
-    const { llmClient, config } = buildLlmClient()
+    const { llmClient, config } = buildLlmClient('phase-4-idem')
 
     const messages = [
       {
@@ -174,6 +178,51 @@ describe('Phase 4 — Deterministic IDs', () => {
     // for the same clear preference should be stable
     expect(overlap.length).toBeGreaterThanOrEqual(0) // informational
   }, 120_000)
+
+  it('second extract with identical input does not change file hashes (no churn)', async () => {
+    // Hash all files before second extract
+    const nodesDir = path.join(omgRoot, 'nodes')
+    const hashesBefore = hashDirectory(nodesDir)
+    const nodeCountBefore = inspectOmgWorkspace(SECRETARY_WORKSPACE).nodeCount
+
+    const { llmClient, config } = buildLlmClient('phase-4-no-churn')
+
+    // Run extract with same content as the first test
+    await runExtract({
+      unobservedMessages: [
+        {
+          role: 'user' as const,
+          content: 'I prefer dark editor themes, always use TypeScript with strict mode, and like Vim keybindings.',
+        },
+      ],
+      nowNode: null,
+      config,
+      llmClient,
+      sessionContext: { sessionKey: 'live-test-nochurn', source: 'live-test' },
+    })
+
+    // Hash all files after
+    const hashesAfter = hashDirectory(nodesDir)
+    const nodeCountAfter = inspectOmgWorkspace(SECRETARY_WORKSPACE).nodeCount
+
+    // Node count should not increase (extract alone doesn't write files)
+    // Extract returns candidates; writing happens in the agent_end hook pipeline
+    console.log(`[observer] Node count: ${nodeCountBefore} → ${nodeCountAfter}`)
+
+    // File hashes should be unchanged (no touch churn from extract alone)
+    let changedFiles = 0
+    for (const [file, hash] of hashesAfter) {
+      const prevHash = hashesBefore.get(file)
+      if (prevHash && prevHash !== hash) {
+        changedFiles++
+        console.log(`[observer] File changed: ${file}`)
+      }
+    }
+
+    console.log(`[observer] Changed files after re-extract: ${changedFiles}`)
+    // Extract alone should not modify files on disk
+    expect(changedFiles).toBe(0)
+  }, 60_000)
 })
 
 // ---------------------------------------------------------------------------
@@ -189,5 +238,7 @@ describe('Phase 4 — Post-observer state', () => {
 
     // No explosion
     expect(state.nodeCount).toBeLessThan(500)
+
+    console.log(`[observer] ${llmTracker.summary()}`)
   })
 })

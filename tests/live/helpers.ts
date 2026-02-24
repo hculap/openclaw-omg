@@ -8,6 +8,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -18,6 +19,12 @@ export const GATEWAY_URL = `http://127.0.0.1:${GATEWAY_PORT}`
 
 /** Max batches for capped bootstrap runs. Override via LIVE_TEST_BATCH_CAP. */
 export const BATCH_CAP = Number(process.env['LIVE_TEST_BATCH_CAP'] ?? 10)
+
+/** Hard cap on total LLM calls across the entire test run. */
+export const MAX_LLM_CALLS = Number(process.env['LIVE_TEST_MAX_LLM_CALLS'] ?? 50)
+
+/** Hard cap on estimated input tokens across the entire run. */
+export const MAX_INPUT_TOKENS = Number(process.env['LIVE_TEST_MAX_INPUT_TOKENS'] ?? 500_000)
 
 /** Secretary workspace (default agent workspace). */
 export const SECRETARY_WORKSPACE = '/Users/szymonpaluch/Projects/Personal/Secretary'
@@ -31,6 +38,13 @@ export const OPENCLAW_CONFIG_PATH = path.join(os.homedir(), '.openclaw', 'opencl
 /** OpenClaw memory dir (SQLite databases). */
 export const OPENCLAW_MEMORY_DIR = path.join(os.homedir(), '.openclaw', 'memory')
 
+/** Artifacts directory for this run. */
+export const ARTIFACTS_DIR = path.join(
+  process.cwd(),
+  'tests/live/artifacts',
+  new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19),
+)
+
 // ---------------------------------------------------------------------------
 // Gate
 // ---------------------------------------------------------------------------
@@ -42,6 +56,218 @@ export function requireLiveEnv(): void {
       'Live tests require OPENCLAW_LIVE=1. Run: pnpm test:live'
     )
   }
+}
+
+// ---------------------------------------------------------------------------
+// LLM call tracker (Fix #2 — hard spend cap)
+// ---------------------------------------------------------------------------
+
+export class LlmSpendCapExceededError extends Error {
+  constructor(metric: string, current: number, limit: number) {
+    super(`LLM spend cap exceeded: ${metric}=${current} >= limit=${limit}. Aborting to prevent token drain.`)
+    this.name = 'LlmSpendCapExceededError'
+  }
+}
+
+/** Global singleton tracking LLM calls across all phases. */
+class LlmCallTracker {
+  private _calls = 0
+  private _inputTokens = 0
+  private _outputTokens = 0
+  private readonly _log: Array<{
+    readonly timestamp: number
+    readonly inputTokens: number
+    readonly outputTokens: number
+    readonly phase: string
+  }> = []
+
+  get calls(): number { return this._calls }
+  get inputTokens(): number { return this._inputTokens }
+  get outputTokens(): number { return this._outputTokens }
+  get log(): ReadonlyArray<typeof this._log[number]> { return this._log }
+
+  record(inputTokens: number, outputTokens: number, phase: string): void {
+    this._calls++
+    this._inputTokens += inputTokens
+    this._outputTokens += outputTokens
+    this._log.push({ timestamp: Date.now(), inputTokens, outputTokens, phase })
+
+    if (this._calls >= MAX_LLM_CALLS) {
+      throw new LlmSpendCapExceededError('calls', this._calls, MAX_LLM_CALLS)
+    }
+    if (this._inputTokens >= MAX_INPUT_TOKENS) {
+      throw new LlmSpendCapExceededError('inputTokens', this._inputTokens, MAX_INPUT_TOKENS)
+    }
+  }
+
+  summary(): string {
+    return `LLM calls: ${this._calls}/${MAX_LLM_CALLS}, input tokens: ${this._inputTokens.toLocaleString()}/${MAX_INPUT_TOKENS.toLocaleString()}, output tokens: ${this._outputTokens.toLocaleString()}`
+  }
+}
+
+export const llmTracker = new LlmCallTracker()
+
+/**
+ * Wraps a gateway generate function with call tracking and spend caps.
+ * Throws LlmSpendCapExceededError if limits are breached.
+ */
+export function wrapGenerateFnWithTracker(
+  generateFn: (params: { system: string; user: string; maxTokens: number }) => Promise<{ content: string; usage: { inputTokens: number; outputTokens: number } }>,
+  phase: string,
+): typeof generateFn {
+  return async (params) => {
+    const result = await generateFn(params)
+    llmTracker.record(result.usage.inputTokens, result.usage.outputTokens, phase)
+    return result
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts (Fix #7 — debug artifacts)
+// ---------------------------------------------------------------------------
+
+/** Ensure artifacts directory exists. */
+export function ensureArtifactsDir(): void {
+  fs.mkdirSync(ARTIFACTS_DIR, { recursive: true })
+}
+
+/** Write a JSON artifact for debugging. */
+export function writeArtifact(name: string, data: unknown): string {
+  ensureArtifactsDir()
+  const filePath = path.join(ARTIFACTS_DIR, name)
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2))
+  return filePath
+}
+
+/** Write the LLM tracker summary as an artifact. */
+export function writeTrackerArtifact(): string {
+  return writeArtifact('llm-tracker.json', {
+    summary: llmTracker.summary(),
+    calls: llmTracker.calls,
+    inputTokens: llmTracker.inputTokens,
+    outputTokens: llmTracker.outputTokens,
+    log: llmTracker.log,
+  })
+}
+
+/** Write a registry summary artifact (counts by type/kind). */
+export function writeRegistrySummaryArtifact(omgRoot: string): string | null {
+  const registryPath = path.join(omgRoot, 'registry.json')
+  if (!fs.existsSync(registryPath)) return null
+
+  const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8')) as Record<string, Record<string, unknown>>
+  const byType: Record<string, number> = {}
+  let total = 0
+  let archived = 0
+
+  for (const entry of Object.values(registry)) {
+    const type = String(entry['type'] ?? 'unknown')
+    byType[type] = (byType[type] ?? 0) + 1
+    total++
+    if (entry['archived']) archived++
+  }
+
+  return writeArtifact('registry-summary.json', { total, archived, byType })
+}
+
+/** List files created/modified under omgRoot. */
+export function writeFileListArtifact(omgRoot: string): string {
+  const files: Array<{ path: string; size: number; mtime: string }> = []
+
+  function walk(dir: string): void {
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          walk(full)
+        } else {
+          const stat = fs.statSync(full)
+          files.push({
+            path: path.relative(omgRoot, full),
+            size: stat.size,
+            mtime: stat.mtime.toISOString(),
+          })
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  if (fs.existsSync(omgRoot)) walk(omgRoot)
+  return writeArtifact('file-list.json', files)
+}
+
+// ---------------------------------------------------------------------------
+// File hashing (Fix #6 — idempotency detection)
+// ---------------------------------------------------------------------------
+
+/** Compute SHA-256 hash of a file's contents. Returns null if file missing. */
+export function hashFile(filePath: string): string | null {
+  try {
+    const content = fs.readFileSync(filePath)
+    return crypto.createHash('sha256').update(content).digest('hex')
+  } catch {
+    return null
+  }
+}
+
+/** Hash all .md files under a directory. Returns Map<relativePath, hash>. */
+export function hashDirectory(dir: string): Map<string, string> {
+  const hashes = new Map<string, string>()
+  function walk(current: string): void {
+    try {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          walk(full)
+        } else if (entry.name.endsWith('.md') || entry.name.endsWith('.json')) {
+          const hash = hashFile(full)
+          if (hash) hashes.set(path.relative(dir, full), hash)
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  if (fs.existsSync(dir)) walk(dir)
+  return hashes
+}
+
+// ---------------------------------------------------------------------------
+// Injected file size checks (Fix #4 — token bloat prevention)
+// ---------------------------------------------------------------------------
+
+/** Max allowed size for known injected files (bytes). */
+const INJECTED_FILE_LIMITS: Record<string, number> = {
+  'MEMORY.md': 8 * 1024,     // 8KB hard limit
+  'SYSTEM.md': 16 * 1024,    // 16KB
+  'NOW.md': 8 * 1024,        // 8KB
+  'LEARNINGS.md': 16 * 1024, // 16KB
+}
+
+export interface InjectedFileSizeCheck {
+  readonly file: string
+  readonly path: string
+  readonly size: number
+  readonly limit: number
+  readonly ok: boolean
+}
+
+/** Check known injected files for size bloat. */
+export function checkInjectedFileSizes(workspaceDir: string): readonly InjectedFileSizeCheck[] {
+  const results: InjectedFileSizeCheck[] = []
+
+  for (const [file, limit] of Object.entries(INJECTED_FILE_LIMITS)) {
+    // Check both workspace root and memory/ subdirectory
+    for (const candidate of [
+      path.join(workspaceDir, file),
+      path.join(workspaceDir, 'memory', file),
+    ]) {
+      if (fs.existsSync(candidate)) {
+        const size = fs.statSync(candidate).size
+        results.push({ file, path: candidate, size, limit, ok: size <= limit })
+      }
+    }
+  }
+
+  return results
 }
 
 // ---------------------------------------------------------------------------

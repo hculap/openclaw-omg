@@ -16,7 +16,14 @@ import {
   requireLiveEnv,
   readOpenClawConfig,
   inspectOmgWorkspace,
+  readBootstrapState,
+  llmTracker,
+  writeTrackerArtifact,
+  writeRegistrySummaryArtifact,
+  writeFileListArtifact,
+  writeArtifact,
   SECRETARY_WORKSPACE,
+  ARTIFACTS_DIR,
 } from './helpers.js'
 
 let createLlmClient: typeof import('../../src/llm/client.js')['createLlmClient']
@@ -214,9 +221,10 @@ describe('Phase 5 — Reflector', () => {
 // Final state report
 // ---------------------------------------------------------------------------
 
-describe('Phase 5 — Final state report', () => {
-  it('produces comprehensive state summary', () => {
+describe('Phase 5 — Final state report + artifacts', () => {
+  it('produces comprehensive state summary and writes artifacts', () => {
     const state = inspectOmgWorkspace(SECRETARY_WORKSPACE)
+    const bootstrapState = readBootstrapState(state.omgRoot)
 
     console.log('\n=== LIVE TEST FINAL STATE ===')
     console.log(`OMG root: ${state.omgRoot}`)
@@ -224,12 +232,29 @@ describe('Phase 5 — Final state report', () => {
     console.log(`Has index: ${state.hasIndex}`)
     console.log(`Has now: ${state.hasNow}`)
     console.log(`Has registry: ${state.hasRegistry}`)
-    console.log(`Has bootstrap state: ${state.hasBootstrapState}`)
-    console.log(`Has bootstrap lock: ${state.hasBootstrapLock}`)
+    console.log(`Bootstrap status: ${bootstrapState?.status ?? 'n/a'}`)
+    console.log(`Bootstrap cursor: ${bootstrapState?.cursor ?? 0}/${bootstrapState?.total ?? 0}`)
     console.log(`Node count: ${state.nodeCount}`)
     console.log(`Node types: ${state.nodeTypes.join(', ')}`)
     console.log(`MOC count: ${state.mocCount}`)
+    console.log(`${llmTracker.summary()}`)
     console.log('=============================\n')
+
+    // Write artifacts for debugging (Fix #7)
+    writeArtifact('final-state.json', {
+      workspace: state,
+      bootstrap: bootstrapState,
+      llm: {
+        calls: llmTracker.calls,
+        inputTokens: llmTracker.inputTokens,
+        outputTokens: llmTracker.outputTokens,
+      },
+    })
+    writeTrackerArtifact()
+    writeRegistrySummaryArtifact(state.omgRoot)
+    writeFileListArtifact(state.omgRoot)
+
+    console.log(`[artifacts] Written to ${ARTIFACTS_DIR}`)
 
     expect(state.exists).toBe(true)
   })

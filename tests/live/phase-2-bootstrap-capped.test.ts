@@ -17,12 +17,25 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
+
+afterAll(() => {
+  console.log(`[bootstrap] ${llmTracker.summary()}`)
+  writeTrackerArtifact()
+  writeRegistrySummaryArtifact(path.join(SECRETARY_WORKSPACE, 'memory/omg'))
+  writeFileListArtifact(path.join(SECRETARY_WORKSPACE, 'memory/omg'))
+})
 import {
   requireLiveEnv,
   readOpenClawConfig,
   inspectOmgWorkspace,
   readBootstrapState,
   readBootstrapLock,
+  wrapGenerateFnWithTracker,
+  llmTracker,
+  writeTrackerArtifact,
+  writeRegistrySummaryArtifact,
+  writeFileListArtifact,
+  writeArtifact,
   SECRETARY_WORKSPACE,
   BATCH_CAP,
 } from './helpers.js'
@@ -85,10 +98,11 @@ describe('Phase 2 — Capped bootstrap', () => {
     const openclawConfig = readOpenClawConfig()
     const pluginConfig = parseConfig(openclawConfig.pluginConfig)
 
-    const generateFn = createGatewayCompletionsGenerateFn({
+    const rawGenerateFn = createGatewayCompletionsGenerateFn({
       port: 18789,
       authToken: openclawConfig.gatewayAuthToken,
     })
+    const generateFn = wrapGenerateFnWithTracker(rawGenerateFn, 'phase-2-bootstrap')
     const llmClient = createLlmClient(
       openclawConfig.defaultModel ?? 'anthropic/claude-sonnet-4-6',
       generateFn,

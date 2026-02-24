@@ -22,12 +22,17 @@ import {
   listSqliteDatabases,
   countWorkspaceMemoryFiles,
   takeSnapshot,
+  checkInjectedFileSizes,
+  ensureArtifactsDir,
+  writeArtifact,
   SECRETARY_WORKSPACE,
   TECHLEAD_WORKSPACE,
   GATEWAY_PORT,
   BATCH_CAP,
+  MAX_LLM_CALLS,
+  MAX_INPUT_TOKENS,
+  ARTIFACTS_DIR,
   type OpenClawConfig,
-  type WorkspaceSnapshot,
 } from './helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -57,6 +62,19 @@ describe('Phase 0 — Environment', () => {
     expect(BATCH_CAP).toBeGreaterThan(0)
     expect(BATCH_CAP).toBeLessThanOrEqual(60)
     console.log(`[preflight] batch cap: ${BATCH_CAP}`)
+  })
+
+  it('LLM spend caps are configured', () => {
+    expect(MAX_LLM_CALLS).toBeGreaterThan(0)
+    expect(MAX_INPUT_TOKENS).toBeGreaterThan(0)
+    console.log(`[preflight] LLM call cap: ${MAX_LLM_CALLS}`)
+    console.log(`[preflight] Input token cap: ${MAX_INPUT_TOKENS.toLocaleString()}`)
+  })
+
+  it('artifacts directory is writable', () => {
+    ensureArtifactsDir()
+    expect(fs.existsSync(ARTIFACTS_DIR)).toBe(true)
+    console.log(`[preflight] artifacts dir: ${ARTIFACTS_DIR}`)
   })
 })
 
@@ -165,6 +183,81 @@ describe('Phase 0 — Clean state', () => {
         `  rm -rf "${TECHLEAD_WORKSPACE}/memory/omg"`
       )
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cron safety (Fix #1 — no background burn)
+// ---------------------------------------------------------------------------
+
+describe('Phase 0 — Cron safety', () => {
+  it('warns that tests call runBootstrapTick() directly (not via cron)', () => {
+    // Tests call bootstrap functions directly, bypassing the cron scheduler.
+    // However, if the plugin is enabled AND the gateway is running, the
+    // omg-bootstrap cron job may ALSO be running in the background.
+    const config = readOpenClawConfig()
+
+    if (config.pluginEnabled) {
+      const allowCron = process.env['LIVE_ALLOW_CRON'] === '1'
+      if (!allowCron) {
+        console.warn(
+          '[preflight] WARNING: OMG plugin is enabled. The omg-bootstrap cron job\n' +
+          '  may be running in the background, burning tokens independently of tests.\n' +
+          '  Options:\n' +
+          '    1. Disable plugin before tests: ./scripts/live-test-enable-plugin.sh --disable\n' +
+          '    2. Set LIVE_ALLOW_CRON=1 to acknowledge background cron is acceptable\n' +
+          '    3. Tests call runBootstrapTick() directly — cron runs are independent'
+        )
+      } else {
+        console.log('[preflight] LIVE_ALLOW_CRON=1 — background cron acknowledged')
+      }
+    } else {
+      console.log('[preflight] Plugin disabled — no background cron risk')
+    }
+
+    // Always passes — this is a warning, not a blocker
+    expect(true).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Injected file bloat (Fix #4 — token safety)
+// ---------------------------------------------------------------------------
+
+describe('Phase 0 — Injected file sizes', () => {
+  it('MEMORY.md and other injected files are within size limits', () => {
+    const checks = checkInjectedFileSizes(SECRETARY_WORKSPACE)
+
+    for (const check of checks) {
+      const sizeKB = (check.size / 1024).toFixed(1)
+      const limitKB = (check.limit / 1024).toFixed(0)
+      const status = check.ok ? 'OK' : 'OVER LIMIT'
+      console.log(`[preflight] ${check.file}: ${sizeKB}KB / ${limitKB}KB [${status}]`)
+    }
+
+    const overLimit = checks.filter(c => !c.ok)
+    if (overLimit.length > 0) {
+      console.error(
+        `[preflight] FAIL: ${overLimit.length} injected file(s) exceed size limits.\n` +
+        `These files are injected EVERY TURN and will cause token bloat.\n` +
+        overLimit.map(c => `  ${c.path}: ${(c.size / 1024).toFixed(1)}KB > ${(c.limit / 1024).toFixed(0)}KB`).join('\n')
+      )
+    }
+
+    expect(overLimit).toHaveLength(0)
+  })
+
+  it('memory/omg/index.md (if exists) is not excessively large', () => {
+    const indexPath = `${SECRETARY_WORKSPACE}/memory/omg/index.md`
+    if (!fs.existsSync(indexPath)) {
+      console.log('[preflight] No index.md yet — skip size check')
+      return
+    }
+
+    const size = fs.statSync(indexPath).size
+    const limitKB = 4
+    console.log(`[preflight] index.md: ${(size / 1024).toFixed(1)}KB (limit: ${limitKB}KB)`)
+    expect(size).toBeLessThanOrEqual(limitKB * 1024)
   })
 })
 

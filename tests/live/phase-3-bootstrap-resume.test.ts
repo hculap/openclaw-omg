@@ -14,12 +14,17 @@
  */
 
 import { describe, it, expect, beforeAll } from 'vitest'
+import fs from 'node:fs'
 import path from 'node:path'
 import {
   requireLiveEnv,
   readOpenClawConfig,
   readBootstrapState,
+  readBootstrapLock,
   inspectOmgWorkspace,
+  wrapGenerateFnWithTracker,
+  llmTracker,
+  writeArtifact,
   SECRETARY_WORKSPACE,
   BATCH_CAP,
 } from './helpers.js'
@@ -88,10 +93,11 @@ describe('Phase 3 — Resume bootstrap tick', () => {
     const openclawConfig = readOpenClawConfig()
     const pluginConfig = parseConfig(openclawConfig.pluginConfig)
 
-    const generateFn = createGatewayCompletionsGenerateFn({
+    const rawGenerateFn = createGatewayCompletionsGenerateFn({
       port: 18789,
       authToken: openclawConfig.gatewayAuthToken,
     })
+    const generateFn = wrapGenerateFnWithTracker(rawGenerateFn, 'phase-3-resume')
     const llmClient = createLlmClient(
       openclawConfig.defaultModel ?? 'anthropic/claude-sonnet-4-6',
       generateFn,
@@ -181,6 +187,60 @@ describe('Phase 3 — Resume bootstrap tick', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Stale lock theft (Fix #5)
+// ---------------------------------------------------------------------------
+
+describe('Phase 3 — Stale lock theft', () => {
+  it('steals a lock with a dead PID immediately', async () => {
+    const stateBefore = readBootstrapState(omgRoot)
+    const cursorBefore = stateBefore?.cursor ?? 0
+
+    // Write a fake lock with a bogus PID and old timestamp
+    const fakeLock = {
+      pid: 999999,
+      token: 'fake-token-dead-pid',
+      startedAt: new Date(Date.now() - 600_000).toISOString(), // 10 minutes ago
+      updatedAt: new Date(Date.now() - 600_000).toISOString(),
+    }
+    fs.writeFileSync(path.join(omgRoot, '.bootstrap-lock'), JSON.stringify(fakeLock))
+    console.log('[resume] Wrote fake lock with PID 999999')
+
+    const openclawConfig = readOpenClawConfig()
+    const pluginConfig = parseConfig(openclawConfig.pluginConfig)
+    const rawGenerateFn = createGatewayCompletionsGenerateFn({
+      port: 18789,
+      authToken: openclawConfig.gatewayAuthToken,
+    })
+    const generateFn = wrapGenerateFnWithTracker(rawGenerateFn, 'phase-3-stale-lock')
+    const llmClient = createLlmClient(
+      openclawConfig.defaultModel ?? 'anthropic/claude-sonnet-4-6',
+      generateFn,
+    )
+
+    // Bootstrap should steal the lock (PID 999999 is dead) and resume
+    const result = await runBootstrapTick({
+      workspaceDir: SECRETARY_WORKSPACE,
+      config: { ...pluginConfig, bootstrap: { ...pluginConfig.bootstrap, batchBudgetPerRun: 1 } },
+      llmClient,
+      force: false,
+    })
+
+    // Verify lock was stolen (bootstrap ran or skipped if already completed)
+    const lockAfter = readBootstrapLock(omgRoot)
+    expect(lockAfter).toBeNull() // Released after tick
+
+    // Verify cursor did NOT rewind
+    const stateAfter = readBootstrapState(omgRoot)
+    if (stateAfter && stateBefore) {
+      expect(stateAfter.cursor).toBeGreaterThanOrEqual(cursorBefore)
+      console.log(`[resume] After stale lock theft: cursor ${cursorBefore} → ${stateAfter.cursor} (no rewind)`)
+    }
+
+    console.log(`[resume] Stale lock theft result: ran=${result.ran}`)
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------
 // Idempotency
 // ---------------------------------------------------------------------------
 
@@ -196,10 +256,11 @@ describe('Phase 3 — Idempotency', () => {
 
     const openclawConfig = readOpenClawConfig()
     const pluginConfig = parseConfig(openclawConfig.pluginConfig)
-    const generateFn = createGatewayCompletionsGenerateFn({
+    const rawGenerateFn = createGatewayCompletionsGenerateFn({
       port: 18789,
       authToken: openclawConfig.gatewayAuthToken,
     })
+    const generateFn = wrapGenerateFnWithTracker(rawGenerateFn, 'phase-3-idempotency')
     const llmClient = createLlmClient(
       openclawConfig.defaultModel ?? 'anthropic/claude-sonnet-4-6',
       generateFn,
@@ -217,6 +278,7 @@ describe('Phase 3 — Idempotency', () => {
     const nodeCountAfter = inspectOmgWorkspace(SECRETARY_WORKSPACE).nodeCount
     expect(nodeCountAfter).toBe(nodeCountBefore)
 
-    console.log('[resume] Idempotency confirmed: no new nodes written on re-run')
+    console.log(`[resume] Idempotency confirmed: no new nodes written on re-run`)
+    console.log(`[resume] ${llmTracker.summary()}`)
   }, 60_000)
 })
