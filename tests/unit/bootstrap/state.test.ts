@@ -15,6 +15,7 @@ import {
   createInitialState,
   advanceBatch,
   finalizeState,
+  pauseState,
   isStaleRunning,
   shouldBootstrap,
   readBootstrapState,
@@ -422,5 +423,97 @@ describe('createDebouncedFlush', () => {
     const raw = vol.readFileSync(STATE_PATH, 'utf-8') as string
     const parsed = JSON.parse(raw)
     expect(parsed.ok).toBe(99)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pauseState
+// ---------------------------------------------------------------------------
+
+describe('pauseState', () => {
+  it('sets status to paused', () => {
+    const state = makeState({ status: 'running' })
+    const paused = pauseState(state)
+    expect(paused.status).toBe('paused')
+  })
+
+  it('updates the updatedAt timestamp', () => {
+    const oldTime = '2025-01-01T00:00:00Z'
+    const state = makeState({ status: 'running', updatedAt: oldTime })
+    const paused = pauseState(state)
+    expect(paused.updatedAt).not.toBe(oldTime)
+    expect(new Date(paused.updatedAt).getTime()).toBeGreaterThan(new Date(oldTime).getTime())
+  })
+
+  it('does not mutate the input state', () => {
+    const state = makeState({ status: 'running' })
+    pauseState(state)
+    expect(state.status).toBe('running')
+  })
+
+  it('preserves all other fields', () => {
+    const state = makeState({
+      status: 'running',
+      cursor: 5,
+      total: 10,
+      ok: 3,
+      fail: 1,
+      done: [0, 1, 2, 3, 4],
+      lastError: 'some error',
+    })
+    const paused = pauseState(state)
+    expect(paused.cursor).toBe(5)
+    expect(paused.total).toBe(10)
+    expect(paused.ok).toBe(3)
+    expect(paused.fail).toBe(1)
+    expect(paused.done).toEqual([0, 1, 2, 3, 4])
+    expect(paused.lastError).toBe('some error')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// shouldBootstrap — paused status
+// ---------------------------------------------------------------------------
+
+describe('shouldBootstrap — paused status', () => {
+  it('returns needed with resumeFromDone when status is paused', () => {
+    const state = makeState({ status: 'paused', done: [0, 1, 3] })
+    const decision = shouldBootstrap(state, false)
+    expect(decision.needed).toBe(true)
+    expect(decision.resumeFromDone).toEqual([0, 1, 3])
+  })
+
+  it('returns needed without resumeFromDone when force is true and status is paused', () => {
+    const state = makeState({ status: 'paused', done: [0, 1] })
+    const decision = shouldBootstrap(state, true)
+    expect(decision.needed).toBe(true)
+    expect(decision.resumeFromDone).toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isStaleRunning — paused status
+// ---------------------------------------------------------------------------
+
+describe('isStaleRunning — paused status', () => {
+  it('returns false for paused state (not running)', () => {
+    const staleTime = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+    const state = makeState({ status: 'paused', updatedAt: staleTime })
+    expect(isStaleRunning(state)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// readBootstrapState — paused status
+// ---------------------------------------------------------------------------
+
+describe('readBootstrapState — paused status', () => {
+  it('parses a valid paused state file', async () => {
+    const state = makeState({ status: 'paused', done: [0, 1], cursor: 2, total: 5 })
+    vol.fromJSON({ [STATE_PATH]: JSON.stringify(state) })
+    const result = await readBootstrapState(OMG_ROOT)
+    expect(result).not.toBeNull()
+    expect(result!.status).toBe('paused')
+    expect(result!.done).toEqual([0, 1])
   })
 })

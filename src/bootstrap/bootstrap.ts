@@ -29,6 +29,7 @@ import {
   createInitialState,
   advanceBatch,
   finalizeState,
+  pauseState,
   shouldBootstrap,
   computeCursor,
   createDebouncedFlush,
@@ -84,6 +85,22 @@ export interface BootstrapResult {
   readonly nodesWritten: number
   /** Number of batches (LLM calls). Undefined for pre-batch runs. */
   readonly batchCount?: number
+}
+
+/** Result summary returned by {@link runBootstrapTick}. */
+export interface BootstrapTickResult {
+  /** Whether the tick actually ran (false if state was already completed or lock unavailable). */
+  readonly ran: boolean
+  /** Number of batches processed in this tick. */
+  readonly batchesProcessed: number
+  /** Chunks in batches that completed without error. */
+  readonly chunksSucceeded: number
+  /** Total nodes written in this tick. */
+  readonly nodesWritten: number
+  /** Whether more pending batches remain after this tick. */
+  readonly moreWorkRemains: boolean
+  /** Whether all batches are now complete (final tick). */
+  readonly completed: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -294,23 +311,46 @@ export async function runBootstrap(params: BootstrapParams): Promise<BootstrapRe
   }
 
   try {
-    return await _runBootstrapLocked({ workspaceDir, omgRoot, scope, config, llmClient, force, source })
+    // No maxBatches → processes all batches to completion
+    const result = await _runBootstrapLocked({ workspaceDir, omgRoot, scope, config, llmClient, force, source })
+    return {
+      ran: result.ran,
+      chunksProcessed: result.totalChunks,
+      chunksSucceeded: result.chunksSucceeded,
+      nodesWritten: result.nodesWritten,
+      batchCount: result.batchCount,
+    }
   } finally {
     await releaseLock(omgRoot)
   }
 }
 
+/** Internal result from the locked pipeline, shared by runBootstrap and runBootstrapTick. */
+interface LockedResult {
+  readonly ran: boolean
+  readonly totalChunks: number
+  readonly batchCount: number
+  /** Batches actually processed in this invocation. */
+  readonly batchesProcessed: number
+  readonly nodesWritten: number
+  readonly chunksSucceeded: number
+  readonly moreWorkRemains: boolean
+  readonly completed: boolean
+}
+
 async function _runBootstrapLocked(params: BootstrapParams & {
   readonly omgRoot: string
   readonly scope: string
-}): Promise<BootstrapResult> {
-  const { workspaceDir, omgRoot, scope, config, llmClient, force = false, source } = params
+  /** When set, process at most this many pending batches. Unset = all. */
+  readonly maxBatches?: number
+}): Promise<LockedResult> {
+  const { workspaceDir, omgRoot, scope, config, llmClient, force = false, source, maxBatches } = params
 
   // Check state (skip if force)
   const existingState = await readBootstrapState(omgRoot)
   const decision = shouldBootstrap(existingState, force)
   if (!decision.needed) {
-    return { ran: false, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }
+    return { ran: false, totalChunks: 0, batchCount: 0, batchesProcessed: 0, nodesWritten: 0, chunksSucceeded: 0, moreWorkRemains: false, completed: false }
   }
   const previousDone = force ? undefined : decision.resumeFromDone
 
@@ -377,16 +417,20 @@ async function _runBootstrapLocked(params: BootstrapParams & {
     state = finalizeState(state)
     await writeBootstrapState(omgRoot, state)
     console.log('[omg] bootstrap: no content found — state written, skipping future runs')
-    return { ran: true, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0, batchCount: 0 }
+    return { ran: true, totalChunks: 0, batchCount: 0, batchesProcessed: 0, nodesWritten: 0, chunksSucceeded: 0, moreWorkRemains: false, completed: true }
   }
 
   // Build per-batch tasks, skipping already-completed batches
   const doneSet = new Set(previousDone ?? [])
+  const pendingBatches = batches.filter((batch) => !doneSet.has(batch.batchIndex))
+  const batchesToProcess = maxBatches !== undefined
+    ? pendingBatches.slice(0, maxBatches)
+    : pendingBatches
+
   const debouncedFlush = createDebouncedFlush(omgRoot)
   const breaker = new RateLimitBreaker()
 
-  const tasks = batches
-    .filter((batch) => !doneSet.has(batch.batchIndex))
+  const tasks = batchesToProcess
     .map((batch) => async () => {
       if (breaker.aborted) throw new PipelineAbortedError()
       const result = await processBatch(batch, omgRoot, scope, config, llmClient, breaker)
@@ -418,25 +462,75 @@ async function _runBootstrapLocked(params: BootstrapParams & {
     console.error('[omg] bootstrap: pipeline aborted — state persisted for resume on next start')
     return {
       ran: true,
-      chunksProcessed: totalChunks,
+      totalChunks,
+      batchCount: batches.length,
+      batchesProcessed: batchesToProcess.length,
       chunksSucceeded: state.ok,
       nodesWritten,
-      batchCount: batches.length,
+      moreWorkRemains: false,
+      completed: false,
     }
   }
 
-  state = finalizeState(state)
-  await writeBootstrapState(omgRoot, state)
+  // Determine whether more work remains (bounded tick with pending batches)
+  const remainingAfterTick = pendingBatches.length - batchesToProcess.length
+  const moreWorkRemains = remainingAfterTick > 0
 
-  console.log(
-    `[omg] bootstrap: complete — ${state.ok}/${totalChunks} chunks succeeded (${batches.length} batches), ${nodesWritten} nodes written`
-  )
+  if (moreWorkRemains) {
+    state = pauseState(state)
+    await writeBootstrapState(omgRoot, state)
+    console.log(
+      `[omg] bootstrap: paused — ${batchesToProcess.length} batch(es) processed, ${remainingAfterTick} remaining`
+    )
+  } else {
+    state = finalizeState(state)
+    await writeBootstrapState(omgRoot, state)
+    console.log(
+      `[omg] bootstrap: complete — ${state.ok}/${totalChunks} chunks succeeded (${batches.length} batches), ${nodesWritten} nodes written`
+    )
+  }
 
   return {
     ran: true,
-    chunksProcessed: totalChunks,
+    totalChunks,
+    batchCount: batches.length,
+    batchesProcessed: batchesToProcess.length,
     chunksSucceeded: state.ok,
     nodesWritten,
-    batchCount: batches.length,
+    moreWorkRemains,
+    completed: !moreWorkRemains,
+  }
+}
+
+/**
+ * Runs a single bounded bootstrap tick, processing at most
+ * `config.bootstrap.batchBudgetPerRun` batches. If more batches remain,
+ * state is set to `paused` and the next cron tick resumes.
+ *
+ * Fire-and-forget safe: never throws (all errors are caught and logged).
+ */
+export async function runBootstrapTick(params: BootstrapParams): Promise<BootstrapTickResult> {
+  const { workspaceDir, config, llmClient, force = false, source } = params
+  const omgRoot = resolveOmgRoot(workspaceDir, config)
+  const scope = config.scope ?? workspaceDir
+  const maxBatches = config.bootstrap.batchBudgetPerRun
+
+  const lockAcquired = await acquireLock(omgRoot)
+  if (!lockAcquired) {
+    return { ran: false, batchesProcessed: 0, chunksSucceeded: 0, nodesWritten: 0, moreWorkRemains: false, completed: false }
+  }
+
+  try {
+    const result = await _runBootstrapLocked({ workspaceDir, omgRoot, scope, config, llmClient, force, source, maxBatches })
+    return {
+      ran: result.ran,
+      batchesProcessed: result.batchesProcessed,
+      chunksSucceeded: result.chunksSucceeded,
+      nodesWritten: result.nodesWritten,
+      moreWorkRemains: result.moreWorkRemains,
+      completed: result.completed,
+    }
+  } finally {
+    await releaseLock(omgRoot)
   }
 }

@@ -475,6 +475,24 @@ const bootstrapSchema = z
       .int()
       .min(0, 'batchCharBudget must be >= 0')
       .default(24_000),
+    /**
+     * Maximum number of batches processed per cron tick.
+     * Controls the token budget per bootstrap tick — the cron handler processes
+     * at most this many batches, then pauses until the next tick.
+     * Only used by `runBootstrapTick`; `runBootstrap` (CLI `--force`) ignores this.
+     * @default 20
+     */
+    batchBudgetPerRun: z
+      .number()
+      .int()
+      .positive('batchBudgetPerRun must be a positive integer')
+      .default(20),
+    /**
+     * 5-field cron schedule for the bootstrap cron job.
+     * Example: `*​/5 * * * *` runs every 5 minutes.
+     * @default '*​/5 * * * *'
+     */
+    cronSchedule: cronField.default('*/5 * * * *'),
   })
   .strip()
 

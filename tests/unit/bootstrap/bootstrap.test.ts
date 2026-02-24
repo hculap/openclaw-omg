@@ -40,7 +40,7 @@ vi.mock('../../../src/graph/registry.js', () => ({
   getNodeFilePaths: vi.fn().mockResolvedValue(new Map()),
 }))
 
-import { runBootstrap } from '../../../src/bootstrap/bootstrap.js'
+import { runBootstrap, runBootstrapTick } from '../../../src/bootstrap/bootstrap.js'
 import { _clearActiveClaims } from '../../../src/bootstrap/lock.js'
 import { runObservation } from '../../../src/observer/observer.js'
 import { writeObservationNode } from '../../../src/graph/node-writer.js'
@@ -721,5 +721,185 @@ describe('runBootstrap — rate limit handling', () => {
     expect(vi.mocked(runObservation).mock.calls.length).toBeLessThanOrEqual(MAX_RETRY_ATTEMPTS + 1)
 
     consoleErrorSpy.mockRestore()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runBootstrapTick — bounded, resumable
+// ---------------------------------------------------------------------------
+
+describe('runBootstrapTick', () => {
+  it('returns correct shape with ran and completed fields', async () => {
+    vol.fromJSON({ '/workspace/memory/omg/nodes/.keep': '' })
+
+    const result = await runBootstrapTick(makeBootstrapParams())
+    expect(result).toMatchObject({
+      ran: expect.any(Boolean),
+      batchesProcessed: expect.any(Number),
+      chunksSucceeded: expect.any(Number),
+      nodesWritten: expect.any(Number),
+      moreWorkRemains: expect.any(Boolean),
+      completed: expect.any(Boolean),
+    })
+  })
+
+  it('returns ran:false when state is completed', async () => {
+    vol.fromJSON({
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+    })
+
+    const result = await runBootstrapTick(makeBootstrapParams())
+    expect(result.ran).toBe(false)
+    expect(result.completed).toBe(false)
+    expect(result.moreWorkRemains).toBe(false)
+  })
+
+  it('processes only batchBudgetPerRun batches when more exist', async () => {
+    // Create enough files to produce multiple batches (one per chunk with budget=0)
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/file4.md': '# File 4\n\nContent for file 4.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    // batchCharBudget=0 → each chunk is its own batch → 4 batches
+    // batchBudgetPerRun=2 → only process 2 batches per tick
+    const tickConfig = parseConfig({
+      bootstrap: { batchCharBudget: 0, batchBudgetPerRun: 2 },
+    })
+
+    const result = await runBootstrapTick(makeBootstrapParams({ config: tickConfig, source: 'memory' }))
+
+    expect(result.ran).toBe(true)
+    expect(result.batchesProcessed).toBe(2)
+    expect(result.moreWorkRemains).toBe(true)
+    expect(result.completed).toBe(false)
+    expect(runObservation).toHaveBeenCalledTimes(2)
+  })
+
+  it('sets state to paused when budget is exhausted with remaining work', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const tickConfig = parseConfig({
+      bootstrap: { batchCharBudget: 0, batchBudgetPerRun: 1 },
+    })
+
+    await runBootstrapTick(makeBootstrapParams({ config: tickConfig, source: 'memory' }))
+
+    const raw = vol.readFileSync(STATE_PATH, 'utf-8') as string
+    const state = JSON.parse(raw) as BootstrapState
+    expect(state.status).toBe('paused')
+  })
+
+  it('sets state to completed when all batches are processed within budget', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const tickConfig = parseConfig({
+      bootstrap: { batchCharBudget: 0, batchBudgetPerRun: 20 },
+    })
+
+    const result = await runBootstrapTick(makeBootstrapParams({ config: tickConfig, source: 'memory' }))
+
+    expect(result.ran).toBe(true)
+    expect(result.completed).toBe(true)
+    expect(result.moreWorkRemains).toBe(false)
+
+    const raw = vol.readFileSync(STATE_PATH, 'utf-8') as string
+    const state = JSON.parse(raw) as BootstrapState
+    expect(state.status).toBe('completed')
+  })
+
+  it('resumes from paused state on subsequent tick', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    const tickConfig = parseConfig({
+      bootstrap: { batchCharBudget: 0, batchBudgetPerRun: 1 },
+    })
+
+    // Tick 1: process 1 batch → paused
+    await runBootstrapTick(makeBootstrapParams({ config: tickConfig, source: 'memory' }))
+    _clearActiveClaims()
+    vi.clearAllMocks()
+    vi.mocked(runObservation).mockResolvedValue(EMPTY_OBSERVER_OUTPUT)
+
+    // Tick 2: process 1 more batch → still paused (3 total, 2 done)
+    const result2 = await runBootstrapTick(makeBootstrapParams({ config: tickConfig, source: 'memory' }))
+    expect(result2.ran).toBe(true)
+    expect(result2.batchesProcessed).toBe(1)
+    expect(runObservation).toHaveBeenCalledTimes(1)
+    _clearActiveClaims()
+    vi.clearAllMocks()
+    vi.mocked(runObservation).mockResolvedValue(EMPTY_OBSERVER_OUTPUT)
+
+    // Tick 3: process last batch → completed
+    const result3 = await runBootstrapTick(makeBootstrapParams({ config: tickConfig, source: 'memory' }))
+    expect(result3.ran).toBe(true)
+    expect(result3.completed).toBe(true)
+    expect(result3.moreWorkRemains).toBe(false)
+  })
+
+  it('returns completed when no sources have content', async () => {
+    vol.fromJSON({ '/workspace/memory/omg/nodes/.keep': '' })
+
+    const result = await runBootstrapTick(makeBootstrapParams())
+    expect(result.ran).toBe(true)
+    expect(result.completed).toBe(true)
+    expect(result.batchesProcessed).toBe(0)
+  })
+
+  it('uses default batchBudgetPerRun=20 when not configured', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file.md': '# File\n\nContent.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    // Default config has batchBudgetPerRun=20, which is more than 1 batch
+    const result = await runBootstrapTick(makeBootstrapParams({ source: 'memory' }))
+    expect(result.ran).toBe(true)
+    expect(result.completed).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runBootstrap — unchanged behavior (full run, no maxBatches)
+// ---------------------------------------------------------------------------
+
+describe('runBootstrap — still processes all batches (no budget limit)', () => {
+  it('processes all batches regardless of batchBudgetPerRun config', async () => {
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/file4.md': '# File 4\n\nContent for file 4.',
+      '/workspace/memory/omg/nodes/.keep': '',
+    })
+
+    // batchBudgetPerRun=1 should NOT limit runBootstrap (only runBootstrapTick)
+    const fullConfig = parseConfig({
+      bootstrap: { batchCharBudget: 0, batchBudgetPerRun: 1 },
+    })
+
+    const result = await runBootstrap(makeBootstrapParams({ config: fullConfig, source: 'memory' }))
+    expect(result.ran).toBe(true)
+    expect(runObservation).toHaveBeenCalledTimes(4)
+
+    const raw = vol.readFileSync(STATE_PATH, 'utf-8') as string
+    const state = JSON.parse(raw) as BootstrapState
+    expect(state.status).toBe('completed')
   })
 })

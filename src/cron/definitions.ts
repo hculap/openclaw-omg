@@ -10,6 +10,7 @@ import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import { runReflection } from '../reflector/reflector.js'
 import { runDedup } from '../dedup/dedup.js'
+import { runBootstrapTick } from '../bootstrap/bootstrap.js'
 import { readGraphNode } from '../graph/node-reader.js'
 import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
@@ -165,14 +166,41 @@ async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
 }
 
 /**
+ * Runs a single bounded bootstrap tick via the cron scheduler.
+ * If the tick completes all remaining batches, triggers a post-bootstrap
+ * graph maintenance pass (dedup + reflection).
+ * Never throws — errors are logged.
+ */
+async function bootstrapCronHandler(ctx: CronContext): Promise<void> {
+  try {
+    const result = await runBootstrapTick({
+      workspaceDir: ctx.workspaceDir,
+      config: ctx.config,
+      llmClient: ctx.llmClient,
+    })
+    if (result.completed) {
+      await graphMaintenanceCronHandler(ctx)
+        .catch((err) => console.error('[omg] cron omg-bootstrap: post-bootstrap maintenance failed:', err))
+    }
+  } catch (err) {
+    console.error('[omg] cron omg-bootstrap: tick failed:', err)
+  }
+}
+
+/**
  * Creates all cron job definitions with their handlers bound to `ctx`.
- * Returns two definitions: `omg-reflection` and `omg-maintenance`.
+ * Returns three definitions: `omg-bootstrap`, `omg-reflection`, and `omg-maintenance`.
  */
 export function createCronDefinitions(ctx: CronContext): readonly CronDefinition[] {
   const graphMaintenanceSchedule =
     ctx.config.graphMaintenance.cronSchedule ?? ctx.config.reflection.cronSchedule
 
   return [
+    {
+      id: 'omg-bootstrap',
+      schedule: ctx.config.bootstrap.cronSchedule,
+      handler: () => bootstrapCronHandler(ctx),
+    },
     {
       id: 'omg-reflection',
       schedule: graphMaintenanceSchedule,

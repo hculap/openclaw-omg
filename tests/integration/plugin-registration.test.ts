@@ -13,12 +13,7 @@ vi.mock('../../src/scaffold.js', () => ({
 
 vi.mock('../../src/bootstrap/bootstrap.js', () => ({
   runBootstrap: vi.fn().mockResolvedValue({ ran: false, chunksProcessed: 0, chunksSucceeded: 0, nodesWritten: 0 }),
-}))
-vi.mock('../../src/graph/node-reader.js', () => ({
-  listAllNodes: vi.fn().mockResolvedValue([]),
-}))
-vi.mock('../../src/graph/registry.js', () => ({
-  getNodeCount: vi.fn().mockResolvedValue(0),
+  runBootstrapTick: vi.fn().mockResolvedValue({ ran: false, batchesProcessed: 0, chunksSucceeded: 0, nodesWritten: 0, moreWorkRemains: false, completed: false }),
 }))
 vi.mock('../../src/utils/paths.js', () => ({
   resolveOmgRoot: vi.fn().mockReturnValue('/workspace/memory/omg'),
@@ -195,15 +190,11 @@ describe('plugin.register — registerCli', () => {
 })
 
 // ---------------------------------------------------------------------------
-// before_prompt_build bootstrap trigger
+// before_prompt_build — scaffold + safety net
 // ---------------------------------------------------------------------------
 
-describe('plugin.register — before_prompt_build bootstrap trigger', () => {
-  it('triggers runBootstrap fire-and-forget on first before_prompt_build when graph is empty', async () => {
-    const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
-    const { getNodeCount } = await import('../../src/graph/registry.js')
-    vi.mocked(getNodeCount).mockResolvedValueOnce(0)
-
+describe('plugin.register — before_prompt_build scaffold + safety net', () => {
+  it('calls scaffoldGraphIfNeeded on first before_prompt_build per workspace', async () => {
     const api = makeMockApi()
     plugin.register(api)
 
@@ -213,43 +204,13 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
     expect(handler).toBeDefined()
 
     await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
-    // Give fire-and-forget microtasks to run: scaffold → listAllNodes → bootstrap
     for (let i = 0; i < 6; i++) await Promise.resolve()
 
-    expect(runBootstrap).toHaveBeenCalledWith(
-      expect.objectContaining({ force: false })
-    )
+    expect(scaffoldMock).toHaveBeenCalledTimes(1)
   })
 
-  it('does NOT trigger runBootstrap again on the second before_prompt_build call', async () => {
+  it('does NOT call runBootstrap inline from before_prompt_build (cron handles it)', async () => {
     const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
-    const { getNodeCount } = await import('../../src/graph/registry.js')
-    vi.mocked(getNodeCount).mockResolvedValue(0)
-    vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ran: true, chunksProcessed: 1, chunksSucceeded: 1, nodesWritten: 2
-    })
-
-    const api = makeMockApi()
-    plugin.register(api)
-
-    const handler = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
-      (args: unknown[]) => args[0] === 'before_prompt_build'
-    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
-
-    await handler!({ prompt: 'turn 1' }, { sessionKey: 'sess-1' })
-    for (let i = 0; i < 6; i++) await Promise.resolve()
-    const callsAfterFirst = vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mock.calls.length
-
-    await handler!({ prompt: 'turn 2' }, { sessionKey: 'sess-1' })
-    for (let i = 0; i < 6; i++) await Promise.resolve()
-
-    expect(vi.mocked(runBootstrap as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst)
-  })
-
-  it('does NOT trigger runBootstrap when graph is non-empty', async () => {
-    const { runBootstrap } = await import('../../src/bootstrap/bootstrap.js')
-    const { getNodeCount } = await import('../../src/graph/registry.js')
-    vi.mocked(getNodeCount).mockResolvedValueOnce(1)
 
     const api = makeMockApi()
     plugin.register(api)
@@ -262,6 +223,63 @@ describe('plugin.register — before_prompt_build bootstrap trigger', () => {
     for (let i = 0; i < 6; i++) await Promise.resolve()
 
     expect(runBootstrap).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call runBootstrapTick when cron is available', async () => {
+    const { runBootstrapTick } = await import('../../src/bootstrap/bootstrap.js')
+
+    const api = makeMockApi()
+    plugin.register(api)
+
+    const handler = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args: unknown[]) => args[0] === 'before_prompt_build'
+    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
+
+    await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
+    for (let i = 0; i < 6; i++) await Promise.resolve()
+
+    // api.scheduleCron is a function → cron available → no safety net
+    expect(runBootstrapTick).not.toHaveBeenCalled()
+  })
+
+  it('calls runBootstrapTick as safety net when scheduleCron is unavailable', async () => {
+    const { runBootstrapTick } = await import('../../src/bootstrap/bootstrap.js')
+    vi.mocked(runBootstrapTick as ReturnType<typeof vi.fn>).mockClear()
+
+    const api = makeMockApi()
+    // Remove scheduleCron to simulate old host
+    const apiWithoutCron = { ...api } as Record<string, unknown>
+    delete apiWithoutCron['scheduleCron']
+
+    plugin.register(apiWithoutCron as unknown as PluginApi)
+
+    const handler = (apiWithoutCron as { on: ReturnType<typeof vi.fn> }).on.mock.calls.find(
+      (args: unknown[]) => args[0] === 'before_prompt_build'
+    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
+
+    await handler!({ prompt: 'hello' }, { sessionKey: 'sess-1' })
+    // Give fire-and-forget microtasks to run
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+
+    expect(runBootstrapTick).toHaveBeenCalledOnce()
+  })
+
+  it('does NOT scaffold again on the second before_prompt_build for the same workspace', async () => {
+    const api = makeMockApi()
+    plugin.register(api)
+
+    const handler = (api.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (args: unknown[]) => args[0] === 'before_prompt_build'
+    )?.[1] as ((event: { prompt: string }, ctx: { sessionKey: string }) => Promise<unknown>) | undefined
+
+    await handler!({ prompt: 'turn 1' }, { sessionKey: 'sess-1' })
+    for (let i = 0; i < 6; i++) await Promise.resolve()
+
+    await handler!({ prompt: 'turn 2' }, { sessionKey: 'sess-1' })
+    for (let i = 0; i < 6; i++) await Promise.resolve()
+
+    // Scaffold called only once (first prompt), not again on second
+    expect(scaffoldMock).toHaveBeenCalledTimes(1)
   })
 })
 
