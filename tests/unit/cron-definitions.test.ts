@@ -378,3 +378,33 @@ describe('createCronDefinitions — omg-bootstrap', () => {
     await expect(bootstrap.handler()).resolves.not.toThrow()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Namespaced job IDs
+// ---------------------------------------------------------------------------
+
+describe('createCronDefinitions — namespaced job IDs', () => {
+  it('prefixes IDs with jobIdNamespace when set', () => {
+    const ctx = { ...makeCtx(), jobIdNamespace: '/ws/foo' }
+    const ids = createCronDefinitions(ctx).map((d) => d.id)
+    expect(ids).toContain('omg-bootstrap::/ws/foo')
+    expect(ids).toContain('omg-reflection::/ws/foo')
+    expect(ids).toContain('omg-maintenance::/ws/foo')
+  })
+
+  it('uses plain IDs when jobIdNamespace is undefined', () => {
+    const ids = createCronDefinitions(makeCtx()).map((d) => d.id)
+    expect(ids).toContain('omg-bootstrap')
+    expect(ids).toContain('omg-reflection')
+    expect(ids).toContain('omg-maintenance')
+    expect(ids.some((id) => id.includes('::'))).toBe(false)
+  })
+
+  it('different namespaces produce different IDs', () => {
+    const ids1 = createCronDefinitions({ ...makeCtx(), jobIdNamespace: '/ws/a' }).map((d) => d.id)
+    const ids2 = createCronDefinitions({ ...makeCtx(), jobIdNamespace: '/ws/b' }).map((d) => d.id)
+    for (const id1 of ids1) {
+      expect(ids2).not.toContain(id1)
+    }
+  })
+})

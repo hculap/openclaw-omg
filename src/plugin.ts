@@ -23,6 +23,13 @@ import { beforeCompaction } from './hooks/before-compaction.js'
 import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
 import { graphMaintenanceCronHandler } from './cron/definitions.js'
+import {
+  readWorkspaceRegistry,
+  writeWorkspaceRegistry,
+  addWorkspace,
+  pruneStaleWorkspaces,
+  listWorkspacePaths,
+} from './cron/workspace-registry.js'
 import { scaffoldGraphIfNeeded } from './scaffold.js'
 import { runBootstrap, runBootstrapTick } from './bootstrap/bootstrap.js'
 import { resolveOmgRoot } from './utils/paths.js'
@@ -372,6 +379,11 @@ export function register(api: PluginApi): void {
   // workspace, and correctly bootstraps each distinct workspace independently.
   const bootstrappedWorkspaces = new Set<string>()
 
+  // Tracks workspaces for which cron jobs have been registered this gateway lifetime.
+  // New workspaces encountered in before_prompt_build get cron jobs registered immediately
+  // and are persisted to the registry for future gateway restarts.
+  const registeredCronWorkspaces = new Set<string>()
+
   api.on('before_prompt_build', (event, ctx) => {
     // ctx.workspaceDir is populated per-agent by OpenClaw (PluginHookAgentContext).
     // It takes priority over the globally-resolved workspaceDir so that agents with
@@ -401,6 +413,31 @@ export function register(api: PluginApi): void {
           }
         })
         .catch((err) => console.error('[omg] before_prompt_build: scaffold failed:', err))
+    }
+
+    if (!registeredCronWorkspaces.has(effectiveWorkspaceDir)) {
+      registeredCronWorkspaces.add(effectiveWorkspaceDir)
+
+      // Persist new workspace to registry — fire-and-forget
+      readWorkspaceRegistry()
+        .then(reg => addWorkspace(reg, effectiveWorkspaceDir))
+        .then(updated => writeWorkspaceRegistry(updated))
+        .catch(err => console.error('[omg] before_prompt_build: registry write failed:', err))
+
+      // Register crons immediately for current session
+      if (typeof api.scheduleCron === 'function') {
+        const cronCtx = {
+          workspaceDir: effectiveWorkspaceDir,
+          config,
+          llmClient,
+          jobIdNamespace: effectiveWorkspaceDir,
+        }
+        try {
+          registerCronJobs(api, config, cronCtx)
+        } catch (err) {
+          console.error(`[omg] before_prompt_build: cron registration failed for ${effectiveWorkspaceDir}:`, err)
+        }
+      }
     }
 
     const sessionKey = ctx.sessionKey ?? 'default'
@@ -446,26 +483,41 @@ export function register(api: PluginApi): void {
   api.on('tool_result_persist', (event) => toolResultPersist(event))
 
   api.on('gateway_start', async () => {
-    if (!workspaceDir) return
-
     // Auto-enable the gateway's /v1/chat/completions endpoint if not already on.
     // The OMG plugin needs this to route LLM calls through OpenClaw's model providers.
     await ensureChatCompletionsEnabled(api).catch((err) =>
       console.error('[omg] gateway_start: failed to auto-enable chatCompletions endpoint:', err)
     )
 
-    await scaffoldGraphIfNeeded(workspaceDir, config).catch((err) =>
-      console.error('[omg] scaffold failed:', err)
-    )
+    // Load the persistent workspace registry; prune entries whose omgRoot no longer exists.
+    const registry = await readWorkspaceRegistry()
+      .catch(() => ({ version: 1 as const, workspaces: {} }))
+    const pruned = pruneStaleWorkspaces(registry, config)
 
-    // Register cron jobs — includes omg-bootstrap which handles bounded,
-    // resumable bootstrap via runBootstrapTick on a configurable schedule.
-    const cronCtx = { workspaceDir, config, llmClient }
-    try {
-      registerCronJobs(api, config, cronCtx)
-    } catch (err) {
-      console.error('[omg] gateway_start: failed to register cron jobs — background bootstrap/reflection will not run:', err)
+    // Merge registry workspaces with the globally-resolved workspace (if any).
+    const known = listWorkspacePaths(pruned)
+    const all = workspaceDir ? [...new Set([...known, workspaceDir])] : known
+
+    if (all.length > 20) {
+      console.warn(`[omg] gateway_start: ${all.length} workspaces — check ~/.openclaw/omg-workspaces.json`)
     }
+
+    for (const wsDir of all) {
+      await scaffoldGraphIfNeeded(wsDir, config).catch((err) =>
+        console.error(`[omg] gateway_start: scaffold failed for ${wsDir}:`, err)
+      )
+      const cronCtx = { workspaceDir: wsDir, config, llmClient, jobIdNamespace: wsDir }
+      try {
+        registerCronJobs(api, config, cronCtx)
+        registeredCronWorkspaces.add(wsDir)
+      } catch (err) {
+        console.error(`[omg] gateway_start: cron registration failed for ${wsDir}:`, err)
+      }
+    }
+
+    await writeWorkspaceRegistry(pruned).catch((err) =>
+      console.error('[omg] gateway_start: registry write failed:', err)
+    )
   })
 
   // Register CLI command if the host supports it
