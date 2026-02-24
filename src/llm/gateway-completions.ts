@@ -30,6 +30,7 @@ interface OpenAiUsage {
 interface OpenAiResponse {
   readonly choices: ReadonlyArray<{
     readonly message: { readonly content: string }
+    readonly finish_reason?: string
   }>
   readonly usage: OpenAiUsage
 }
@@ -136,6 +137,14 @@ export function createGatewayCompletionsGenerateFn(
     const firstChoice = data.choices[0]
     if (!firstChoice) {
       throw new Error(`Gateway /v1/chat/completions returned empty choices array`)
+    }
+
+    if (firstChoice.finish_reason === 'length') {
+      console.warn(
+        `[omg] gateway: response truncated by token limit (finish_reason=length). ` +
+          `Content length: ${firstChoice.message.content.length} chars. ` +
+          `Consider increasing maxTokens or reducing prompt size.`
+      )
     }
 
     return {

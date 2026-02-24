@@ -27,8 +27,11 @@ export interface DedupParams {
   readonly llmClient: LlmClient
 }
 
-/** Maximum tokens for the dedup LLM call. */
-const DEDUP_MAX_TOKENS = 4096
+/** Maximum tokens for the dedup LLM call. 8192 gives headroom for verbose merge plans. */
+const DEDUP_MAX_TOKENS = 8192
+
+/** Maximum LLM attempts before giving up on a dedup run (handles truncated responses). */
+const DEDUP_MAX_ATTEMPTS = 2
 
 /**
  * Runs one full dedup cycle against the graph at `omgRoot`.
@@ -85,30 +88,56 @@ export async function runDedup(params: DedupParams): Promise<DedupRunResult> {
   clustersProcessed = clusters.length
 
   // -------------------------------------------------------------------------
-  // Pass 2 — LLM confirmation
+  // Pass 2 — LLM confirmation (with retry on parse failure)
   // -------------------------------------------------------------------------
 
-  let mergePlans: import('./types.js').MergePlan[]
-  try {
-    const response = await llmClient.generate({
-      system: buildDedupSystemPrompt(),
-      user: buildDedupUserPrompt(clusters),
-      maxTokens: DEDUP_MAX_TOKENS,
-    })
+  let mergePlans: import('./types.js').MergePlan[] | undefined
 
-    tokensUsed = response.usage.inputTokens + response.usage.outputTokens
+  for (let attempt = 1; attempt <= DEDUP_MAX_ATTEMPTS; attempt++) {
+    let response: { content: string; usage: { inputTokens: number; outputTokens: number } }
+    try {
+      response = await llmClient.generate({
+        system: buildDedupSystemPrompt(),
+        user: buildDedupUserPrompt(clusters),
+        maxTokens: DEDUP_MAX_TOKENS,
+      })
+    } catch (err) {
+      const msg = `LLM call failed: ${err instanceof Error ? err.message : String(err)}`
+      console.error('[omg] dedup:', msg)
+      errors.push(msg)
+      return { clustersProcessed, mergesExecuted, nodesArchived, conflictsDetected, tokensUsed, errors }
+    }
 
-    // Strip markdown code fences if the LLM wrapped JSON in ```json ... ```
+    tokensUsed += response.usage.inputTokens + response.usage.outputTokens
+
+    // Extract JSON from the response, stripping any markdown code fence and any
+    // prose the LLM may have appended after the closing fence.
     let jsonContent = response.content.trim()
     if (jsonContent.startsWith('```')) {
-      jsonContent = jsonContent.replace(/^```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim()
+      // Strip opening fence line (```json, ```JSON, ```, etc.)
+      const afterOpenFence = jsonContent.replace(/^```[^\n]*\n?/, '')
+      // Extract up to the FIRST closing fence — ignore any rationale prose that follows
+      const closingFenceIdx = afterOpenFence.indexOf('\n```')
+      jsonContent = (closingFenceIdx !== -1
+        ? afterOpenFence.slice(0, closingFenceIdx)
+        : afterOpenFence
+      ).trim()
+    }
+    // Fallback: if the content doesn't start with { or [, scan for the first JSON object
+    if (!jsonContent.startsWith('{') && !jsonContent.startsWith('[')) {
+      const jsonStart = jsonContent.indexOf('{')
+      if (jsonStart !== -1) jsonContent = jsonContent.slice(jsonStart).trim()
     }
 
     let parsed: unknown
     try {
       parsed = JSON.parse(jsonContent)
     } catch {
-      const msg = `LLM returned non-JSON response: ${response.content.slice(0, 200)}`
+      const msg = `LLM returned non-JSON response (attempt ${attempt}/${DEDUP_MAX_ATTEMPTS}): ${response.content.slice(0, 200)}`
+      if (attempt < DEDUP_MAX_ATTEMPTS) {
+        console.warn('[omg] dedup:', msg, '— retrying')
+        continue
+      }
       console.error('[omg] dedup:', msg)
       errors.push(msg)
       return { clustersProcessed, mergesExecuted, nodesArchived, conflictsDetected, tokensUsed, errors }
@@ -123,8 +152,12 @@ export async function runDedup(params: DedupParams): Promise<DedupRunResult> {
     }
 
     mergePlans = validation.data.mergePlans as import('./types.js').MergePlan[]
-  } catch (err) {
-    const msg = `LLM call failed: ${err instanceof Error ? err.message : String(err)}`
+    break
+  }
+
+  if (mergePlans === undefined) {
+    // Unreachable: loop always returns or assigns mergePlans, but satisfies TypeScript.
+    const msg = 'dedup: exhausted all LLM attempts without a valid response'
     console.error('[omg] dedup:', msg)
     errors.push(msg)
     return { clustersProcessed, mergesExecuted, nodesArchived, conflictsDetected, tokensUsed, errors }

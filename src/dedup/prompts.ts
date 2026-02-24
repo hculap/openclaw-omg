@@ -29,25 +29,25 @@ export function buildDedupSystemPrompt(): string {
 RULES:
 1. Only merge nodes that represent the SAME real-world concept or fact.
 2. Prefer the most complete node as the keeper (keepNodeId).
-3. Preserve all unique information from losers as aliases, merged tags, or bodyAppend.
+3. Preserve unique canonical keys from losers as aliases.
 4. If nodes have contradictory values, list them in "conflicts" — do NOT merge them.
-5. Return ONLY valid JSON matching the schema below. No prose.
+5. Return ONLY valid JSON matching the schema below. No prose, no rationale, no explanations — not before, not after the JSON. The JSON must be your entire response.
+
+IMPORTANT: Keep all string values short (under 100 characters). Leave optional fields as empty arrays or omit them when not needed. Do NOT generate bodyAppend — it is reserved for future use.
 
 OUTPUT SCHEMA:
 {
   "mergePlans": [
     {
       "keepNodeId": "string — ID of the node to keep",
-      "keepUid": "string — UID of the keeper (leave empty if unknown)",
-      "mergeNodeIds": ["string — IDs of nodes to archive (losers)"],
-      "mergeUids": ["string — UIDs of losers (leave empty if unknown)"],
+      "keepUid": "",
+      "mergeNodeIds": ["string — IDs of nodes to archive"],
+      "mergeUids": [],
       "aliasKeys": ["string — canonical keys from losers to add as aliases on keeper"],
-      "conflicts": ["string — describe any conflicting values found"],
+      "conflicts": [],
       "patch": {
-        "description": "optional — improved description for keeper",
-        "tags": ["optional — union of tags from all nodes"],
-        "links": ["optional — union of links from all nodes"],
-        "bodyAppend": "optional — content from losers to append to keeper body"
+        "description": "optional — concise improved description under 100 chars",
+        "tags": []
       }
     }
   ]
