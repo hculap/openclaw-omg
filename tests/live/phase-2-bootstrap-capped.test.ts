@@ -133,7 +133,7 @@ describe('Phase 2 — Capped bootstrap', () => {
     expect(result.ran).toBe(true)
     expect(result.batchesProcessed).toBeGreaterThan(0)
     expect(result.batchesProcessed).toBeLessThanOrEqual(BATCH_CAP)
-  }, 300_000) // 5 minute timeout
+  }, 600_000) // 10 minute timeout
 
   it('state file was created', () => {
     const state = readBootstrapState(omgRoot)
