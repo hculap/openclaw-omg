@@ -41,6 +41,11 @@ export interface GatewayCompletionsOptions {
   readonly authToken?: string
   /** Model override — if omitted, the gateway uses its default model. */
   readonly model?: string
+  /**
+   * Per-request timeout in milliseconds (default 120 000 = 2 minutes).
+   * Throws GatewayUnreachableError on timeout so callers can retry or fail fast.
+   */
+  readonly timeoutMs?: number
 }
 
 /**
@@ -55,7 +60,7 @@ export function createGatewayCompletionsGenerateFn(
 ): (params: LlmGenerateParams) => Promise<LlmResponse> {
   const port = options.port ?? 18789
   const url = `http://127.0.0.1:${port}/v1/chat/completions`
-  const { authToken, model } = options
+  const { authToken, model, timeoutMs = 120_000 } = options
 
   return async (params: LlmGenerateParams): Promise<LlmResponse> => {
     const messages: OpenAiMessage[] = [
@@ -84,6 +89,7 @@ export function createGatewayCompletionsGenerateFn(
         method: 'POST',
         headers,
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

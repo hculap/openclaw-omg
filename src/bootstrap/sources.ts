@@ -254,18 +254,44 @@ export async function readSqliteChunks(
 
   if (dbPaths.length === 0) return []
 
-  // Use Node's built-in node:sqlite (available Node 22.5+, stable Node 25+).
-  // No native addon — no ABI issues regardless of gateway Node version.
-  let DatabaseSync: (typeof import('node:sqlite'))['DatabaseSync']
+  // Prefer node:sqlite (Node 22.5+ built-in, no ABI issues). Fall back to
+  // better-sqlite3 (optional npm dependency) when node:sqlite is unavailable
+  // (e.g. when running inside a Vite/Vitest context that doesn't expose it).
+  type RowReader = (dbPath: string) => { text: string }[]
+  let readRows: RowReader | null = null
+
   try {
     const nodeSqlite = await import('node:sqlite')
-    DatabaseSync = nodeSqlite.DatabaseSync
+    const { DatabaseSync } = nodeSqlite
+    readRows = (dbPath: string) => {
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        return db.prepare('SELECT text FROM chunks').all() as { text: string }[]
+      } finally {
+        db.close()
+      }
+    }
   } catch {
-    console.warn(
-      '[omg] bootstrap: node:sqlite is not available — SQLite memory chunks will not be ingested. ' +
-      'Requires Node 22.5+ (experimental) or Node 25+.'
-    )
-    return []
+    // node:sqlite unavailable — try better-sqlite3 as fallback
+    try {
+      const mod = await import('better-sqlite3')
+      const Database = mod.default as typeof import('better-sqlite3')
+      readRows = (dbPath: string) => {
+        const db = new Database(dbPath, { readonly: true })
+        try {
+          return db.prepare('SELECT text FROM chunks').all() as { text: string }[]
+        } finally {
+          db.close()
+        }
+      }
+    } catch {
+      console.warn(
+        '[omg] bootstrap: neither node:sqlite nor better-sqlite3 is available — ' +
+        'SQLite memory chunks will not be ingested. ' +
+        'Requires Node 22.5+ or better-sqlite3 installed with native bindings.'
+      )
+      return []
+    }
   }
 
   const allEntries: SourceEntry[] = []
@@ -273,25 +299,12 @@ export async function readSqliteChunks(
   for (const dbPath of dbPaths) {
     const agentId = path.basename(dbPath, '.sqlite')
     try {
-      const db = new DatabaseSync(dbPath, { readOnly: true })
-      let rows: unknown[]
-      try {
-        rows = db.prepare('SELECT text FROM chunks').all()
-      } finally {
-        db.close()
-      }
-
+      const rows = readRows(dbPath)
       let idx = 0
       for (const row of rows) {
-        if (
-          typeof row === 'object' &&
-          row !== null &&
-          typeof (row as Record<string, unknown>)['text'] === 'string'
-        ) {
-          const text = (row as Record<string, unknown>)['text'] as string
-          if (text.trim().length > 0) {
-            allEntries.push({ label: `sqlite:${agentId}[${idx}]`, text })
-          }
+        const text = row.text
+        if (typeof text === 'string' && text.trim().length > 0) {
+          allEntries.push({ label: `sqlite:${agentId}[${idx}]`, text })
         }
         idx++
       }

@@ -98,9 +98,15 @@ export async function runDedup(params: DedupParams): Promise<DedupRunResult> {
 
     tokensUsed = response.usage.inputTokens + response.usage.outputTokens
 
+    // Strip markdown code fences if the LLM wrapped JSON in ```json ... ```
+    let jsonContent = response.content.trim()
+    if (jsonContent.startsWith('```')) {
+      jsonContent = jsonContent.replace(/^```(?:json)?\s*/, '').replace(/\s*```\s*$/, '').trim()
+    }
+
     let parsed: unknown
     try {
-      parsed = JSON.parse(response.content)
+      parsed = JSON.parse(jsonContent)
     } catch {
       const msg = `LLM returned non-JSON response: ${response.content.slice(0, 200)}`
       console.error('[omg] dedup:', msg)

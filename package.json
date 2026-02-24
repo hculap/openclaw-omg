@@ -6,6 +6,8 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:live": "OPENCLAW_LIVE=1 vitest run --project live",
+    "test:live:phase": "OPENCLAW_LIVE=1 vitest run --project live -t",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit"
   },

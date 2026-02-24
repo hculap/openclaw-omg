@@ -19,4 +19,14 @@ export default defineWorkspace([
       include: ['tests/edge-cases/**/*.test.ts'],
     },
   },
+  {
+    test: {
+      name: 'live',
+      include: ['tests/live/**/*.test.ts'],
+      testTimeout: 120_000,
+      hookTimeout: 30_000,
+      fileParallelism: false,
+      sequence: { concurrent: false },
+    },
+  },
 ])
