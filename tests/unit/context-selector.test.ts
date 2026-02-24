@@ -521,6 +521,49 @@ describe('selectContextV2 — two-pass registry-based selection', () => {
     expect(slice.nodes).toHaveLength(0)
   })
 
+  it('drops entries where hydrateNode rejects and logs an error, but still injects remaining nodes', async () => {
+    const entryA = makeRegistryEntry({ filePath: '/a.md' })
+    const entryB = makeRegistryEntry({ filePath: '/b.md' })
+    const entryC = makeRegistryEntry({ filePath: '/c.md' })
+    const nodeA = makeHydratedNode('omg/fact/a', entryA)
+    const nodeC = makeHydratedNode('omg/fact/c', entryC)
+    const eaccesError = new Error('EACCES')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/a.md') return Promise.resolve(nodeA)
+      if (fp === '/b.md') return Promise.reject(eaccesError)
+      if (fp === '/c.md') return Promise.resolve(nodeC)
+      return Promise.resolve(null)
+    })
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/a', entryA],
+        ['omg/fact/b', entryB],
+        ['omg/fact/c', entryC],
+      ],
+      recentMessages: [],
+      config,
+      hydrateNode,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/a')
+    expect(ids).not.toContain('omg/fact/b')
+    expect(ids).toContain('omg/fact/c')
+    expect(consoleSpy).toHaveBeenCalledOnce()
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '[omg] hydrateEntries: failed to read node:',
+      eaccesError
+    )
+
+    consoleSpy.mockRestore()
+  })
+
   it('respects maxContextTokens even with many candidates', async () => {
     const entries: [string, RegistryNodeEntry][] = Array.from({ length: 20 }, (_, i) => [
       `omg/fact/node-${i}`,
