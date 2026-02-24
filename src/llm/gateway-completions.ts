@@ -7,9 +7,15 @@
  *
  * Requires `gateway.http.endpoints.chatCompletions.enabled: true` in the
  * gateway config.
+ *
+ * Error types thrown:
+ *   - `RateLimitError`         — HTTP 429, rate-limit body, or non-JSON 200 (overloaded)
+ *   - `GatewayUnreachableError` — network-level failures (ECONNREFUSED, etc.)
+ *   - `Error`                  — other HTTP errors (4xx/5xx not rate-limit related)
  */
 
 import type { LlmGenerateParams, LlmResponse } from './client.js'
+import { RateLimitError, GatewayUnreachableError, classifyGatewayError } from './errors.js'
 
 interface OpenAiMessage {
   readonly role: 'system' | 'user' | 'assistant'
@@ -41,8 +47,8 @@ export interface GatewayCompletionsOptions {
  * Creates a generate function that calls the local OpenClaw gateway's
  * `/v1/chat/completions` endpoint.
  *
- * This is the preferred LLM path: requests go through the gateway's model
- * routing and auth, using the same providers configured for agent sessions.
+ * This is the only supported LLM path: requests go through the gateway's
+ * model routing and auth, using the same providers configured for agent sessions.
  */
 export function createGatewayCompletionsGenerateFn(
   options: GatewayCompletionsOptions = {}
@@ -72,25 +78,53 @@ export function createGatewayCompletionsGenerateFn(
       headers['Authorization'] = `Bearer ${authToken}`
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    })
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new GatewayUnreachableError(`Gateway /v1/chat/completions unreachable: ${msg}`)
+    }
+
+    if (response.status === 429) {
+      const errorText = await response.text().catch(() => 'rate limit exceeded')
+      throw new RateLimitError(`Gateway rate limit (429): ${errorText.slice(0, 200)}`)
+    }
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => 'unknown error')
-      throw new Error(
-        `Gateway /v1/chat/completions error (${response.status}): ${errorText}`
-      )
+      if (classifyGatewayError(errorText) === 'rate-limit') {
+        throw new RateLimitError(
+          `Gateway /v1/chat/completions rate limited (${response.status}): ${errorText.slice(0, 200)}`
+        )
+      }
+      throw new Error(`Gateway /v1/chat/completions error (${response.status}): ${errorText}`)
     }
 
     const rawText = await response.text()
+
+    // Gateway-level error responses embedded in 200 OK bodies.
+    // Classify by body text so that connectivity errors (e.g. "Connection error:
+    // upstream refused") throw GatewayUnreachableError, not RateLimitError.
+    if (rawText.startsWith('⚠️') || rawText.startsWith('Connection error')) {
+      if (classifyGatewayError(rawText) === 'unreachable') {
+        throw new GatewayUnreachableError(`Gateway error response: ${rawText.slice(0, 200)}`)
+      }
+      throw new RateLimitError(`Gateway error response: ${rawText.slice(0, 200)}`)
+    }
+
     let data: OpenAiResponse
     try {
       data = JSON.parse(rawText) as OpenAiResponse
     } catch {
-      throw new Error(`Gateway /v1/chat/completions returned non-JSON body: ${rawText.slice(0, 200)}`)
+      // Non-JSON in a 200 response usually means the gateway is overloaded
+      throw new RateLimitError(
+        `Gateway /v1/chat/completions returned non-JSON body: ${rawText.slice(0, 200)}`
+      )
     }
 
     const firstChoice = data.choices[0]

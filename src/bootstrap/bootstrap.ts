@@ -35,6 +35,8 @@ import {
   type BootstrapState,
 } from './state.js'
 import { acquireLock, releaseLock, refreshLock } from './lock.js'
+import { RateLimitBreaker, MAX_RETRY_ATTEMPTS } from './rate-limit-breaker.js'
+import { RateLimitError, PipelineAbortedError, GatewayUnreachableError } from '../llm/errors.js'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
@@ -147,30 +149,53 @@ async function processBatch(
   omgRoot: string,
   scope: string,
   config: OmgConfig,
-  llmClient: LlmClient
+  llmClient: LlmClient,
+  breaker: RateLimitBreaker
 ): Promise<BatchResult> {
   const batchLabel = batch.chunks.length === 1
     ? batch.chunks[0]!.source
     : `batch ${batch.batchIndex} (${batch.chunks.length} chunks)`
 
-  // Phase 1: gather inputs and run LLM observation
-  let observerOutput: ObserverOutput
-  try {
-    const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
-    const messages = batchToMessages(batch)
-    const maxOutputTokens = computeBatchMaxTokens(batch.chunks.length)
+  // Phase 1: gather inputs and run LLM observation (with rate-limit retry)
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  let observerOutput!: ObserverOutput
+  let attempt = 0
+  while (true) {
+    await breaker.awaitGate()
+    try {
+      const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
+      const messages = batchToMessages(batch)
+      const maxOutputTokens = computeBatchMaxTokens(batch.chunks.length)
 
-    observerOutput = await runObservation({
-      unobservedMessages: messages,
-      nowNode: nowContent,
-      config,
-      llmClient,
-      sessionContext: { source: 'bootstrap', label: batchLabel },
-      maxOutputTokens,
-    })
-  } catch (err) {
-    console.error(`[omg] bootstrap: observation failed for "${batchLabel}":`, err)
-    return { nodesWritten: 0, chunkCount: batch.chunks.length, observationSucceeded: false }
+      observerOutput = await runObservation({
+        unobservedMessages: messages,
+        nowNode: nowContent,
+        config,
+        llmClient,
+        sessionContext: { source: 'bootstrap', label: batchLabel },
+        maxOutputTokens,
+      })
+      breaker.onSuccess()
+      break
+    } catch (err) {
+      if (err instanceof PipelineAbortedError) throw err
+      if (err instanceof RateLimitError) {
+        const shouldRetry = breaker.startBackoff()
+        if (!shouldRetry || attempt >= MAX_RETRY_ATTEMPTS) {
+          console.error(`[omg] bootstrap: rate limit: "${batchLabel}" exhausted retries — aborting batch`)
+          throw err
+        }
+        attempt++
+        continue
+      }
+      if (err instanceof GatewayUnreachableError) {
+        breaker.abort()
+        console.error(`[omg] bootstrap: gateway unreachable for "${batchLabel}" — aborting pipeline:`, err)
+        throw err
+      }
+      console.error(`[omg] bootstrap: observation failed for "${batchLabel}":`, err)
+      return { nodesWritten: 0, chunkCount: batch.chunks.length, observationSucceeded: false }
+    }
   }
 
   // Phase 2: write nodes
@@ -358,11 +383,13 @@ async function _runBootstrapLocked(params: BootstrapParams & {
   // Build per-batch tasks, skipping already-completed batches
   const doneSet = new Set(previousDone ?? [])
   const debouncedFlush = createDebouncedFlush(omgRoot)
+  const breaker = new RateLimitBreaker()
 
   const tasks = batches
     .filter((batch) => !doneSet.has(batch.batchIndex))
     .map((batch) => async () => {
-      const result = await processBatch(batch, omgRoot, scope, config, llmClient)
+      if (breaker.aborted) throw new PipelineAbortedError()
+      const result = await processBatch(batch, omgRoot, scope, config, llmClient, breaker)
       state = advanceBatch(state, batch.batchIndex, result)
       debouncedFlush.flush(state)
       void refreshLock(omgRoot)
@@ -377,6 +404,24 @@ async function _runBootstrapLocked(params: BootstrapParams & {
   for (const result of results) {
     if (result.status === 'fulfilled' && result.value.observationSucceeded) {
       nodesWritten += result.value.nodesWritten
+    }
+  }
+
+  if (breaker.aborted) {
+    const failedState = {
+      ...state,
+      status: 'failed' as const,
+      lastError: 'Rate limit threshold reached',
+      updatedAt: new Date().toISOString(),
+    }
+    await writeBootstrapState(omgRoot, failedState)
+    console.error('[omg] bootstrap: pipeline aborted — state persisted for resume on next start')
+    return {
+      ran: true,
+      chunksProcessed: totalChunks,
+      chunksSucceeded: state.ok,
+      nodesWritten,
+      batchCount: batches.length,
     }
   }
 
