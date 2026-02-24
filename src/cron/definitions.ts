@@ -39,8 +39,15 @@ const MAINTENANCE_SCHEDULE = '0 4 * * 0'
  * Runs the combined graph maintenance pass: semantic dedup then reflection.
  * Dedup failure is non-fatal — reflection still runs.
  * Never throws — errors are logged.
+ *
+ * @param ageCutoffMs  Optional override for the node age cut-off (epoch ms).
+ *   Nodes updated after this timestamp are excluded from reflection.
+ *   undefined → default 7-day cap. 0 → all nodes eligible (used post-bootstrap).
  */
-export async function graphMaintenanceCronHandler(ctx: CronContext): Promise<void> {
+export async function graphMaintenanceCronHandler(
+  ctx: CronContext,
+  ageCutoffMs?: number,
+): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
 
   // Step 1: Semantic dedup
@@ -55,7 +62,7 @@ export async function graphMaintenanceCronHandler(ctx: CronContext): Promise<voi
   }
 
   // Step 2: Reflection pass over aged non-archived nodes
-  const cutoffMs = Date.now() - SEVEN_DAYS_MS
+  const cutoffMs = ageCutoffMs !== undefined ? ageCutoffMs : Date.now() - SEVEN_DAYS_MS
 
   let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
@@ -115,7 +122,7 @@ export async function graphMaintenanceCronHandler(ctx: CronContext): Promise<voi
  * Runs weekly maintenance: link repair and deduplication audit.
  * Never throws — errors are logged.
  */
-async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
+export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
   const omgRoot = resolveOmgRoot(ctx.workspaceDir, ctx.config)
 
   let allEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
@@ -179,7 +186,7 @@ async function bootstrapCronHandler(ctx: CronContext): Promise<void> {
       llmClient: ctx.llmClient,
     })
     if (result.completed) {
-      await graphMaintenanceCronHandler(ctx)
+      await graphMaintenanceCronHandler(ctx, 0)  // no age cap — nodes just bootstrapped
         .catch((err) => console.error('[omg] cron omg-bootstrap: post-bootstrap maintenance failed:', err))
     }
   } catch (err) {
