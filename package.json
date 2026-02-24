@@ -1,8 +1,23 @@
 {
   "name": "@openclaw/omg",
   "version": "0.1.0",
+  "description": "OpenClaw plugin: Observational Memory Graph (OMG) — wiki-linked knowledge graph for agent memory",
   "type": "module",
   "main": "./src/index.ts",
+  "files": [
+    "src/",
+    "openclaw.plugin.json",
+    "clawdbot.plugin.json",
+    "skills/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hculap/openclaw-omg"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
