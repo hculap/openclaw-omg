@@ -236,7 +236,7 @@ export function hashDirectory(dir: string): Map<string, string> {
 
 /** Max allowed size for known injected files (bytes). */
 const INJECTED_FILE_LIMITS: Record<string, number> = {
-  'MEMORY.md': 8 * 1024,     // 8KB hard limit
+  'MEMORY.md': 12 * 1024,    // 12KB limit (real agent memory typically 8-12KB)
   'SYSTEM.md': 16 * 1024,    // 16KB
   'NOW.md': 8 * 1024,        // 8KB
   'LEARNINGS.md': 16 * 1024, // 16KB

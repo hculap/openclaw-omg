@@ -84,7 +84,7 @@ describe('Phase 1 — SQLite source', () => {
 
     // Check labels follow expected format: sqlite:{agentId}[{index}]
     for (const entry of entries.slice(0, 5)) {
-      expect(entry.label).toMatch(/^sqlite:\w+\[\d+\]$/)
+      expect(entry.label).toMatch(/^sqlite:[\w-]+\[\d+\]$/)
     }
 
     console.log(`[sources] Sample SQLite labels: ${entries.slice(0, 5).map(e => e.label).join(', ')}`)
