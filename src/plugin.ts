@@ -392,24 +392,40 @@ export function register(api: PluginApi): void {
     const registerService = (api as unknown as { registerService: (s: unknown) => void }).registerService
     registerService({
       id: 'omg-bootstrap',
-      start: async (ctx: { workspaceDir?: string }) => {
-        const wsDir = ctx.workspaceDir ?? workspaceDir
-        if (!wsDir) return
-        console.error(`[omg] service: bootstrap loop started for ${wsDir}`)
+      start: async () => {
+        // Collect all known workspaces: registry + globally-resolved default.
+        const registry = await readWorkspaceRegistry().catch(() => ({ version: 1 as const, workspaces: {} }))
+        const pruned = pruneStaleWorkspaces(registry, config)
+        const known = listWorkspacePaths(pruned)
+        const all = workspaceDir ? [...new Set([...known, workspaceDir])] : known
+        if (all.length === 0) return
+
+        console.error(`[omg] service: bootstrap loop started for ${all.length} workspace(s): ${all.join(', ')}`)
+
         const tick = async () => {
-          try {
-            await scaffoldGraphIfNeeded(wsDir, config)
-            const result = await runBootstrapTick({ workspaceDir: wsDir, config, llmClient })
-            if (result.completed) {
-              await graphMaintenanceCronHandler({ workspaceDir: wsDir, config, llmClient })
-                .catch((err) => console.error('[omg] service: post-bootstrap maintenance failed:', err))
+          // Re-read registry each tick to pick up newly registered workspaces
+          const current = await readWorkspaceRegistry().catch(() => ({ version: 1 as const, workspaces: {} }))
+          const currentPruned = pruneStaleWorkspaces(current, config)
+          const currentAll = workspaceDir
+            ? [...new Set([...listWorkspacePaths(currentPruned), workspaceDir])]
+            : listWorkspacePaths(currentPruned)
+
+          for (const wsDir of currentAll) {
+            try {
+              await scaffoldGraphIfNeeded(wsDir, config)
+              const result = await runBootstrapTick({ workspaceDir: wsDir, config, llmClient })
+              if (result.completed) {
+                await graphMaintenanceCronHandler({ workspaceDir: wsDir, config, llmClient })
+                  .catch((err) => console.error(`[omg] service: post-bootstrap maintenance failed for ${wsDir}:`, err))
+              }
+            } catch (err) {
+              console.error(`[omg] service: bootstrap tick failed for ${wsDir}:`, err)
             }
-          } catch (err) {
-            console.error('[omg] service: bootstrap tick failed:', err)
           }
         }
+
         await tick()
-        setInterval(tick, 5 * 60 * 1000) // retry every 5 min until done
+        setInterval(tick, 5 * 60 * 1000) // retry every 5 min
       },
     })
   }
