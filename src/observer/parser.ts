@@ -46,6 +46,11 @@ const VALID_PRIORITIES = new Set<string>(['high', 'medium', 'low'])
  */
 const ALTERNATIVE_ROOTS = ['output', 'response', 'operations'] as const
 
+/** Pre-compiled regexes for alternative root extraction (avoids creating RegExp per iteration). */
+const ALTERNATIVE_ROOT_REGEXES: ReadonlyMap<string, RegExp> = new Map(
+  ALTERNATIVE_ROOTS.map((name) => [name, new RegExp(`<${name}[\\s\\S]*?<\\/${name}>`, 'g')]),
+)
+
 // ---------------------------------------------------------------------------
 // Diagnostics types
 // ---------------------------------------------------------------------------
@@ -347,19 +352,31 @@ function extractXmlRoot(
   if (primaryMatch) {
     const xmlSource = primaryMatch[0]
     const parseResult = safeParse(xmlSource, logPrefix)
-    if (parseResult === null) return null
-    const root = parseResult['observations'] as Record<string, unknown> | undefined
-    if (root !== undefined && root !== null) {
-      return { xmlSource, parsed: parseResult, root, recovered: null }
+    if (parseResult !== null) {
+      const root = parseResult['observations'] as Record<string, unknown> | undefined
+      if (root !== undefined && root !== null) {
+        return { xmlSource, parsed: parseResult, root, recovered: null }
+      }
+      console.warn(`${logPrefix} <observations> tag found but parsed result has no "observations" key — trying alternatives`)
+    } else {
+      console.warn(`${logPrefix} <observations> regex matched but XML parsing failed — trying alternatives`)
     }
   }
 
   // Try alternative roots
   for (const altName of ALTERNATIVE_ROOTS) {
-    const altMatch = raw.match(new RegExp(`<${altName}[\\s\\S]*?<\\/${altName}>`))
-    if (!altMatch) continue
+    const regex = ALTERNATIVE_ROOT_REGEXES.get(altName)!
+    regex.lastIndex = 0 // reset stateful global regex
+    const allMatches = [...raw.matchAll(regex)]
+    if (allMatches.length === 0) continue
 
-    const xmlSource = altMatch[0]
+    if (allMatches.length > 1) {
+      console.warn(
+        `${logPrefix} found ${allMatches.length} <${altName}> blocks — using first match, ${allMatches.length - 1} ignored`,
+      )
+    }
+
+    const xmlSource = allMatches[0]![0]
     const parseResult = safeParse(xmlSource, logPrefix)
     if (parseResult === null) continue
 
@@ -402,10 +419,14 @@ function safeParse(xmlSource: string, logPrefix: string): Record<string, unknown
   try {
     const result = xmlParser.parse(xmlSource) as Record<string, unknown>
     if (typeof result !== 'object' || result === null) {
+      console.warn(`${logPrefix} XMLParser returned non-object result (input: ${xmlSource.length} chars)`)
       return null
     }
     return result
-  } catch {
+  } catch (err) {
+    console.warn(
+      `${logPrefix} XMLParser.parse() threw: ${err instanceof Error ? err.message : String(err)} (input: ${xmlSource.length} chars)`,
+    )
     return null
   }
 }
@@ -540,58 +561,10 @@ function parseNowPatch(raw: unknown): NowPatch | null {
  * Parses the raw LLM output from the Extract phase into an {@link ExtractOutput}.
  *
  * Never throws. Returns an empty ExtractOutput on any parse failure.
- * Parses `<operations>` the same way as `parseObserverOutput`, but maps
- * them to `ExtractCandidate[]` instead of `ObserverOperation[]`.
- * Parses `<now-patch>` into a structured `NowPatch` (not free-form markdown).
+ * Delegates to {@link parseExtractOutputWithDiagnostics} and discards diagnostics.
  */
 export function parseExtractOutput(raw: string): ExtractOutput {
-  if (typeof raw !== 'string') {
-    console.error('[omg] Extract parser: received non-string input — this is a bug in the LLM client layer')
-    return { ...EMPTY_EXTRACT_OUTPUT }
-  }
-  if (raw.trim() === '') {
-    console.warn('[omg] Extract parser: LLM returned an empty response — no candidates will be extracted')
-    return { ...EMPTY_EXTRACT_OUTPUT }
-  }
-
-  const extracted = extractXmlRoot(raw, '[omg] Extract parser:')
-  if (extracted === null) {
-    console.error('[omg] Extract parser: no recognizable root element found — returning empty output')
-    return { ...EMPTY_EXTRACT_OUTPUT }
-  }
-
-  const { root } = extracted
-
-  const candidates: ExtractCandidate[] = []
-  const rejections: ParserRejection[] = []
-  const opsNode = root['operations'] as Record<string, unknown> | undefined
-  let totalCandidates = 0
-
-  if (opsNode !== undefined && opsNode !== null && typeof opsNode === 'object') {
-    const rawOps = opsNode['operation']
-    const opArray = Array.isArray(rawOps) ? rawOps : []
-
-    for (const op of opArray) {
-      if (op === null || typeof op !== 'object') continue
-      totalCandidates++
-      const candidate = parseCandidate(op as Record<string, unknown>, rejections)
-      if (candidate !== null) {
-        candidates.push(candidate)
-      }
-    }
-  }
-
-  const diagnostics: ParserDiagnostics = {
-    totalCandidates,
-    accepted: candidates.length,
-    rejected: rejections,
-  }
-  logDiagnostics('[omg] Extract parser:', diagnostics)
-
-  const nowPatch = parseNowPatch(root['now-patch'])
-  const mocUpdates = deriveMocUpdatesFromCandidates(candidates)
-
-  return { candidates, nowPatch, mocUpdates }
+  return parseExtractOutputWithDiagnostics(raw).output
 }
 
 /**
