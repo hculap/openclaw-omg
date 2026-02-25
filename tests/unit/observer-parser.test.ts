@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { parseObserverOutput, parseExtractOutput } from '../../src/observer/parser.js'
+import {
+  parseObserverOutput,
+  parseExtractOutput,
+  parseExtractOutputWithDiagnostics,
+} from '../../src/observer/parser.js'
+import {
+  coerceNodeType,
+  inferNodeTypeFromKey,
+  INFERABLE_NODE_TYPES,
+} from '../../src/types.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -259,7 +268,7 @@ describe('parseObserverOutput — invalid upsert operations skipped', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalidType'))
   })
 
-  it('skips an operation with missing canonical-key and logs a warning', () => {
+  it('recovers an operation with missing canonical-key by generating from type + title', () => {
     const xml = makeXml(`<operations>${makeOperation(
       'type="fact" priority="medium"',
       `<title>Some Fact</title>
@@ -268,8 +277,12 @@ describe('parseObserverOutput — invalid upsert operations skipped', () => {
     )}</operations>`)
 
     const output = parseObserverOutput(xml)
-    expect(output.operations).toHaveLength(0)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing canonical-key'))
+    // Now recovered: key generated as "fact.some_fact"
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.canonicalKey).toBe('fact.some_fact')
+    }
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('generated canonical-key'))
   })
 
   it('skips an operation with missing description and logs a warning', () => {
@@ -300,7 +313,7 @@ describe('parseObserverOutput — invalid upsert operations skipped', () => {
     expect(output.operations[0]!.kind).toBe('upsert')
   })
 
-  it('logs a warning with the count of skipped operations', () => {
+  it('logs diagnostics with accepted/total count for rejected operations', () => {
     const badOp = makeOperation(
       'type="not-a-type" priority="high"',
       `<canonical-key>some.key</canonical-key>
@@ -311,7 +324,7 @@ describe('parseObserverOutput — invalid upsert operations skipped', () => {
     const xml = makeXml(`<operations>${badOp}${badOp}${VALID_UPSERT_PREFERENCE}</operations>`)
 
     parseObserverOutput(xml)
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('skipped 2'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('1/3 candidates accepted, 2 rejected'))
   })
 
   it('logs warning with unknown priority value when coercing to medium', () => {
@@ -365,10 +378,10 @@ describe('parseObserverOutput — malformed input', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('empty response'))
   })
 
-  it('returns empty output when <observations> root is missing and logs an error', () => {
+  it('returns empty output when no recognizable root element is found and logs an error', () => {
     const output = parseObserverOutput('<result><nothing/></result>')
     expect(output.operations).toHaveLength(0)
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('<observations>'))
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no recognizable root element'))
   })
 
   it('returns a valid ObserverOutput shape on any failure', () => {
@@ -527,7 +540,7 @@ describe('parseExtractOutput — failure modes', () => {
     expect(result.candidates).toHaveLength(0)
   })
 
-  it('drops candidates with missing canonical-key', () => {
+  it('drops candidates with missing canonical-key and no title to generate from', () => {
     const xml = `<observations>
 <operations>
 <operation type="fact" priority="medium">
@@ -560,5 +573,634 @@ describe('parseExtractOutput — failure modes', () => {
     for (const input of inputs) {
       expect(() => parseExtractOutput(input)).not.toThrow()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 1: coerceNodeType and inferNodeTypeFromKey (types.ts)
+// ---------------------------------------------------------------------------
+
+describe('coerceNodeType', () => {
+  it('returns the type for exact lowercase match', () => {
+    expect(coerceNodeType('identity')).toBe('identity')
+    expect(coerceNodeType('preference')).toBe('preference')
+    expect(coerceNodeType('moc')).toBe('moc')
+  })
+
+  it('handles uppercase type strings', () => {
+    expect(coerceNodeType('Identity')).toBe('identity')
+    expect(coerceNodeType('PREFERENCE')).toBe('preference')
+    expect(coerceNodeType('Fact')).toBe('fact')
+  })
+
+  it('handles mixed case', () => {
+    expect(coerceNodeType('ePiSoDe')).toBe('episode')
+    expect(coerceNodeType('PROJECT')).toBe('project')
+  })
+
+  it('handles leading/trailing whitespace', () => {
+    expect(coerceNodeType('  identity  ')).toBe('identity')
+    expect(coerceNodeType('\tpreference\n')).toBe('preference')
+  })
+
+  it('handles plural forms', () => {
+    expect(coerceNodeType('identities')).toBe('identity')
+    expect(coerceNodeType('preferences')).toBe('preference')
+    expect(coerceNodeType('projects')).toBe('project')
+    expect(coerceNodeType('decisions')).toBe('decision')
+    expect(coerceNodeType('facts')).toBe('fact')
+    expect(coerceNodeType('episodes')).toBe('episode')
+    expect(coerceNodeType('reflections')).toBe('reflection')
+    expect(coerceNodeType('mocs')).toBe('moc')
+  })
+
+  it('returns null for non-string input', () => {
+    expect(coerceNodeType(123)).toBeNull()
+    expect(coerceNodeType(null)).toBeNull()
+    expect(coerceNodeType(undefined)).toBeNull()
+  })
+
+  it('returns null for unrecognizable strings', () => {
+    expect(coerceNodeType('not-a-type')).toBeNull()
+    expect(coerceNodeType('')).toBeNull()
+    expect(coerceNodeType('foobar')).toBeNull()
+  })
+})
+
+describe('inferNodeTypeFromKey', () => {
+  it('infers type from key prefix for user-facing types', () => {
+    expect(inferNodeTypeFromKey('identity.name')).toBe('identity')
+    expect(inferNodeTypeFromKey('preference.theme')).toBe('preference')
+    expect(inferNodeTypeFromKey('project.my_app')).toBe('project')
+    expect(inferNodeTypeFromKey('decision.use_react')).toBe('decision')
+    expect(inferNodeTypeFromKey('fact.typescript_typed')).toBe('fact')
+    expect(inferNodeTypeFromKey('episode.debug_session')).toBe('episode')
+  })
+
+  it('handles plural prefixes', () => {
+    expect(inferNodeTypeFromKey('preferences.theme')).toBe('preference')
+    expect(inferNodeTypeFromKey('facts.something')).toBe('fact')
+    expect(inferNodeTypeFromKey('episodes.session1')).toBe('episode')
+    expect(inferNodeTypeFromKey('identities.user_name')).toBe('identity')
+  })
+
+  it('does not infer system types from key prefix', () => {
+    expect(inferNodeTypeFromKey('moc.preferences')).toBeNull()
+    expect(inferNodeTypeFromKey('index.main')).toBeNull()
+    expect(inferNodeTypeFromKey('now.current')).toBeNull()
+    expect(inferNodeTypeFromKey('reflection.insight')).toBeNull()
+  })
+
+  it('returns null for keys without a dot', () => {
+    expect(inferNodeTypeFromKey('nodot')).toBeNull()
+    expect(inferNodeTypeFromKey('')).toBeNull()
+  })
+
+  it('returns null for unrecognizable prefixes', () => {
+    expect(inferNodeTypeFromKey('foobar.something')).toBeNull()
+    expect(inferNodeTypeFromKey('custom.key')).toBeNull()
+  })
+
+  it('handles case-insensitive prefix matching', () => {
+    expect(inferNodeTypeFromKey('Preference.theme')).toBe('preference')
+    expect(inferNodeTypeFromKey('FACT.something')).toBe('fact')
+  })
+})
+
+describe('INFERABLE_NODE_TYPES', () => {
+  it('contains exactly the 6 user-facing types', () => {
+    expect(INFERABLE_NODE_TYPES).toHaveLength(6)
+    expect(INFERABLE_NODE_TYPES).toContain('identity')
+    expect(INFERABLE_NODE_TYPES).toContain('preference')
+    expect(INFERABLE_NODE_TYPES).toContain('project')
+    expect(INFERABLE_NODE_TYPES).toContain('decision')
+    expect(INFERABLE_NODE_TYPES).toContain('fact')
+    expect(INFERABLE_NODE_TYPES).toContain('episode')
+  })
+
+  it('does not contain system types', () => {
+    const inferable = INFERABLE_NODE_TYPES as readonly string[]
+    expect(inferable).not.toContain('moc')
+    expect(inferable).not.toContain('index')
+    expect(inferable).not.toContain('now')
+    expect(inferable).not.toContain('reflection')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 1: Tolerance improvements in parser
+// ---------------------------------------------------------------------------
+
+describe('parseObserverOutput — type recovery', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('recovers uppercase type "Identity"', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="Identity" priority="high"',
+      `<canonical-key>identity.name</canonical-key>
+       <title>User Name</title>
+       <description>User prefers to be called John</description>
+       <content>Call me John.</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.type).toBe('identity')
+    }
+  })
+
+  it('recovers fully uppercase type "PREFERENCE"', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="PREFERENCE" priority="medium"',
+      `<canonical-key>preference.dark_mode</canonical-key>
+       <title>Dark Mode</title>
+       <description>User prefers dark mode</description>
+       <content>Dark mode preference.</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.type).toBe('preference')
+    }
+  })
+
+  it('recovers plural type "Preferences"', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="Preferences" priority="low"',
+      `<canonical-key>preference.editor</canonical-key>
+       <title>Editor Pref</title>
+       <description>Prefers vim</description>
+       <content>Vim user.</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.type).toBe('preference')
+    }
+  })
+
+  it('infers type from canonical-key prefix when type is unrecognizable', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="pref" priority="medium"',
+      `<canonical-key>preference.theme</canonical-key>
+       <title>Theme</title>
+       <description>Prefers dark mode</description>
+       <content>Dark mode.</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.type).toBe('preference')
+    }
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('recovered type'))
+  })
+
+  it('infers type from plural key prefix "preferences."', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="pref" priority="medium"',
+      `<canonical-key>preferences.theme</canonical-key>
+       <title>Theme</title>
+       <description>Prefers dark mode</description>
+       <content>Dark mode.</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.type).toBe('preference')
+    }
+  })
+
+  it('generates canonical-key from type + title when key is missing', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="fact" priority="medium"',
+      `<title>TypeScript Is Typed</title>
+       <description>TypeScript adds static types</description>
+       <content>TS is typed.</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.canonicalKey).toBe('fact.typescript_is_typed')
+    }
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('generated canonical-key'))
+  })
+
+  it('still rejects when type is unrecoverable and key prefix is unrecognizable', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="xyz" priority="high"',
+      `<canonical-key>foobar.baz</canonical-key>
+       <title>Title</title>
+       <description>desc</description>
+       <content>body</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(0)
+  })
+
+  it('still rejects when both key and title are missing', () => {
+    const xml = makeXml(`<operations>${makeOperation(
+      'type="fact" priority="high"',
+      `<description>No key or title</description>
+       <content>body</content>`,
+    )}</operations>`)
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(0)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('missing canonical-key and no title'))
+  })
+
+  it('recovers a mixed batch: valid + uppercase + missing key + truly invalid', () => {
+    const valid = makeOperation(
+      'type="fact" priority="medium"',
+      `<canonical-key>fact.ts</canonical-key>
+       <title>TS</title>
+       <description>TypeScript fact</description>
+       <content>body</content>`,
+    )
+    const uppercase = makeOperation(
+      'type="IDENTITY" priority="high"',
+      `<canonical-key>identity.name</canonical-key>
+       <title>Name</title>
+       <description>User name</description>
+       <content>body</content>`,
+    )
+    const missingKey = makeOperation(
+      'type="episode" priority="low"',
+      `<title>Debug Session</title>
+       <description>Debugging the parser</description>
+       <content>body</content>`,
+    )
+    const invalid = makeOperation(
+      'type="xyz" priority="medium"',
+      `<canonical-key>unknown.thing</canonical-key>
+       <title>Thing</title>
+       <description>Unknown thing</description>
+       <content>body</content>`,
+    )
+    const xml = makeXml(`<operations>${valid}${uppercase}${missingKey}${invalid}</operations>`)
+    const output = parseObserverOutput(xml)
+    // valid, uppercase, and missingKey should all be recovered; invalid should be dropped
+    expect(output.operations).toHaveLength(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 1: Tolerance improvements in parseExtractOutput
+// ---------------------------------------------------------------------------
+
+describe('parseExtractOutput — type recovery', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('recovers uppercase type in extract candidates', () => {
+    const xml = `<observations>
+<operations>
+<operation type="DECISION" priority="high">
+  <canonical-key>decision.use_react</canonical-key>
+  <title>Use React</title>
+  <description>Decided to use React</description>
+  <content>React chosen.</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(1)
+    expect(result.candidates[0]!.type).toBe('decision')
+  })
+
+  it('infers type from key prefix in extract candidates', () => {
+    const xml = `<observations>
+<operations>
+<operation type="pref" priority="low">
+  <canonical-key>fact.something</canonical-key>
+  <title>Something</title>
+  <description>Some fact</description>
+  <content>body</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(1)
+    expect(result.candidates[0]!.type).toBe('fact')
+  })
+
+  it('generates key from type + title when key is missing', () => {
+    const xml = `<observations>
+<operations>
+<operation type="preference" priority="medium">
+  <title>Dark Mode Setting</title>
+  <description>User prefers dark mode</description>
+  <content>Dark mode.</content>
+</operation>
+</operations>
+</observations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(1)
+    expect(result.candidates[0]!.canonicalKey).toBe('preference.dark_mode_setting')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 2: Structured diagnostics
+// ---------------------------------------------------------------------------
+
+describe('parseExtractOutputWithDiagnostics', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('returns diagnostics with correct counts on success', () => {
+    const xml = `<observations>
+<operations>
+<operation type="fact" priority="medium">
+  <canonical-key>fact.one</canonical-key>
+  <title>One</title>
+  <description>First fact</description>
+  <content>body</content>
+</operation>
+<operation type="fact" priority="low">
+  <canonical-key>fact.two</canonical-key>
+  <title>Two</title>
+  <description>Second fact</description>
+  <content>body</content>
+</operation>
+</operations>
+</observations>`
+    const { output, diagnostics } = parseExtractOutputWithDiagnostics(xml)
+    expect(output.candidates).toHaveLength(2)
+    expect(diagnostics.totalCandidates).toBe(2)
+    expect(diagnostics.accepted).toBe(2)
+    expect(diagnostics.rejected).toHaveLength(0)
+  })
+
+  it('reports rejections with reasons and snippets', () => {
+    const xml = `<observations>
+<operations>
+<operation type="xyz" priority="medium">
+  <canonical-key>unknown.thing</canonical-key>
+  <title>Thing</title>
+  <description>Unknown type</description>
+  <content>body</content>
+</operation>
+<operation type="fact" priority="medium">
+  <canonical-key>fact.valid</canonical-key>
+  <title>Valid</title>
+  <description>Valid fact</description>
+  <content>body</content>
+</operation>
+</operations>
+</observations>`
+    const { output, diagnostics } = parseExtractOutputWithDiagnostics(xml)
+    expect(output.candidates).toHaveLength(1)
+    expect(diagnostics.totalCandidates).toBe(2)
+    expect(diagnostics.accepted).toBe(1)
+    expect(diagnostics.rejected).toHaveLength(1)
+    expect(diagnostics.rejected[0]!.reason).toContain('unknown type')
+    expect(diagnostics.rejected[0]!.rawSnippet).toContain('xyz')
+  })
+
+  it('returns empty diagnostics for empty input', () => {
+    const { output, diagnostics } = parseExtractOutputWithDiagnostics('')
+    expect(output.candidates).toHaveLength(0)
+    expect(diagnostics.totalCandidates).toBe(0)
+    expect(diagnostics.accepted).toBe(0)
+    expect(diagnostics.rejected).toHaveLength(0)
+  })
+
+  it('returns empty diagnostics for non-string input', () => {
+    const { output, diagnostics } = parseExtractOutputWithDiagnostics(null as unknown as string)
+    expect(output.candidates).toHaveLength(0)
+    expect(diagnostics.totalCandidates).toBe(0)
+  })
+
+  it('includes recovered candidates in accepted count', () => {
+    const xml = `<observations>
+<operations>
+<operation type="IDENTITY" priority="high">
+  <canonical-key>identity.name</canonical-key>
+  <title>Name</title>
+  <description>User name</description>
+  <content>body</content>
+</operation>
+</operations>
+</observations>`
+    const { diagnostics } = parseExtractOutputWithDiagnostics(xml)
+    expect(diagnostics.totalCandidates).toBe(1)
+    expect(diagnostics.accepted).toBe(1)
+    expect(diagnostics.rejected).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3: Root element recovery
+// ---------------------------------------------------------------------------
+
+describe('parseObserverOutput — root element recovery', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  let errorSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+    errorSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('recovers from <operations> root (no <observations> wrapper)', () => {
+    const xml = `<operations>
+<operation type="fact" priority="medium">
+  <canonical-key>fact.recovered</canonical-key>
+  <title>Recovered</title>
+  <description>Recovered from alt root</description>
+  <content>body</content>
+</operation>
+</operations>`
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.canonicalKey).toBe('fact.recovered')
+    }
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('alternative root <operations>'))
+  })
+
+  it('recovers from <output> root wrapping <operations>', () => {
+    const xml = `<output>
+<operations>
+<operation type="preference" priority="high">
+  <canonical-key>preference.theme</canonical-key>
+  <title>Theme</title>
+  <description>Prefers dark</description>
+  <content>Dark.</content>
+</operation>
+</operations>
+</output>`
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('alternative root <output>'))
+  })
+
+  it('recovers from <response> root wrapping <operations>', () => {
+    const xml = `<response>
+<operations>
+<operation type="fact" priority="low">
+  <canonical-key>fact.resp</canonical-key>
+  <title>Response Fact</title>
+  <description>From response root</description>
+  <content>body</content>
+</operation>
+</operations>
+</response>`
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('alternative root <response>'))
+  })
+
+  it('prefers <observations> over alternative roots when both present', () => {
+    const xml = `<observations>
+<operations>
+<operation type="fact" priority="high">
+  <canonical-key>fact.primary</canonical-key>
+  <title>Primary</title>
+  <description>From primary root</description>
+  <content>body</content>
+</operation>
+</operations>
+</observations>
+<response>
+<operations>
+<operation type="fact" priority="low">
+  <canonical-key>fact.secondary</canonical-key>
+  <title>Secondary</title>
+  <description>From secondary root</description>
+  <content>body</content>
+</operation>
+</operations>
+</response>`
+    const output = parseObserverOutput(xml)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.canonicalKey).toBe('fact.primary')
+    }
+  })
+
+  it('returns empty output when no root element matches', () => {
+    const output = parseObserverOutput('<custom-root><data/></custom-root>')
+    expect(output.operations).toHaveLength(0)
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('no recognizable root'))
+  })
+})
+
+describe('parseExtractOutput — root element recovery', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('recovers from bare <operations> root in extract', () => {
+    const xml = `<operations>
+<operation type="identity" priority="high">
+  <canonical-key>identity.name</canonical-key>
+  <title>Name</title>
+  <description>User name preference</description>
+  <content>body</content>
+</operation>
+</operations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(1)
+    expect(result.candidates[0]!.type).toBe('identity')
+  })
+
+  it('parseExtractOutputWithDiagnostics also recovers from alt roots', () => {
+    const xml = `<operations>
+<operation type="fact" priority="medium">
+  <canonical-key>fact.alt</canonical-key>
+  <title>Alt</title>
+  <description>From alt root</description>
+  <content>body</content>
+</operation>
+</operations>`
+    const { output, diagnostics } = parseExtractOutputWithDiagnostics(xml)
+    expect(output.candidates).toHaveLength(1)
+    expect(diagnostics.accepted).toBe(1)
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('alternative root'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Combined recovery: multiple recovery mechanisms in one batch
+// ---------------------------------------------------------------------------
+
+describe('parser — combined recovery scenarios', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warnSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  it('recovers alt root + uppercase type + missing key in one batch', () => {
+    const xml = `<operations>
+<operation type="IDENTITY" priority="high">
+  <title>User Name</title>
+  <description>User prefers to be called John</description>
+  <content>Call me John.</content>
+</operation>
+<operation type="Preference" priority="medium">
+  <canonical-key>preference.theme</canonical-key>
+  <title>Theme</title>
+  <description>Dark mode preferred</description>
+  <content>Dark mode.</content>
+</operation>
+</operations>`
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(2)
+    // First candidate: alt root + uppercase type + key generated from title
+    expect(result.candidates[0]!.type).toBe('identity')
+    expect(result.candidates[0]!.canonicalKey).toBe('identity.user_name')
+    // Second candidate: alt root + mixed-case type
+    expect(result.candidates[1]!.type).toBe('preference')
   })
 })

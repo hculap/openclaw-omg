@@ -38,6 +38,78 @@ export function isNodeType(v: unknown): v is NodeType {
   return typeof v === 'string' && (NODE_TYPES as readonly string[]).includes(v)
 }
 
+/**
+ * Node types that can be inferred from a canonical-key prefix.
+ * Only user-facing types — system types (moc, index, now, reflection) are
+ * excluded to prevent accidental system-node creation.
+ */
+export const INFERABLE_NODE_TYPES = [
+  'identity',
+  'preference',
+  'project',
+  'decision',
+  'fact',
+  'episode',
+] as const satisfies readonly NodeType[]
+
+/** Lookup table mapping lowercased type strings (including plurals) to canonical NodeType. */
+const NODE_TYPE_LOOKUP: ReadonlyMap<string, NodeType> = (() => {
+  const map = new Map<string, NodeType>()
+  for (const t of NODE_TYPES) {
+    map.set(t, t)
+  }
+  // Plural forms for inferable types
+  map.set('identities', 'identity')
+  map.set('preferences', 'preference')
+  map.set('projects', 'project')
+  map.set('decisions', 'decision')
+  map.set('facts', 'fact')
+  map.set('episodes', 'episode')
+  map.set('reflections', 'reflection')
+  map.set('mocs', 'moc')
+  return map
+})()
+
+/**
+ * Attempts to coerce an unknown value into a valid `NodeType`.
+ * Handles case-insensitive matching, trimming, and plural forms.
+ * Returns `null` if the value cannot be coerced.
+ */
+export function coerceNodeType(raw: unknown): NodeType | null {
+  if (typeof raw !== 'string') return null
+  const normalized = raw.trim().toLowerCase()
+  return NODE_TYPE_LOOKUP.get(normalized) ?? null
+}
+
+/** Lookup table mapping inferable key prefixes (including plurals) to NodeType. */
+const KEY_PREFIX_LOOKUP: ReadonlyMap<string, NodeType> = (() => {
+  const map = new Map<string, NodeType>()
+  for (const t of INFERABLE_NODE_TYPES) {
+    map.set(t, t)
+  }
+  // Plural prefixes
+  map.set('identities', 'identity')
+  map.set('preferences', 'preference')
+  map.set('projects', 'project')
+  map.set('decisions', 'decision')
+  map.set('facts', 'fact')
+  map.set('episodes', 'episode')
+  return map
+})()
+
+/**
+ * Infers a `NodeType` from a canonical-key prefix.
+ * For example, `"identity.name"` → `"identity"`, `"preferences.theme"` → `"preference"`.
+ * Only infers user-facing types (identity, preference, project, decision, fact, episode).
+ * Returns `null` if the prefix is not recognizable.
+ */
+export function inferNodeTypeFromKey(canonicalKey: string): NodeType | null {
+  const dotIndex = canonicalKey.indexOf('.')
+  if (dotIndex <= 0) return null
+  const prefix = canonicalKey.slice(0, dotIndex).toLowerCase()
+  return KEY_PREFIX_LOOKUP.get(prefix) ?? null
+}
+
 /** Importance level of a node, used for context injection ranking. */
 export type Priority = 'high' | 'medium' | 'low'
 

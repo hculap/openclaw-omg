@@ -165,7 +165,7 @@ describe('runObservation', () => {
     })
 
     it('filters out operations whose node type slipped through the parser (post-validation)', async () => {
-      // Simulate a parser bug: inject a candidate with an invalid type via parseExtractOutput
+      // Simulate a parser bug: inject a candidate with an invalid type via parseExtractOutputWithDiagnostics
       const parserModule = await import('../../src/observer/parser.js')
       const badExtractOutput: ExtractOutput = {
         candidates: [
@@ -181,7 +181,10 @@ describe('runObservation', () => {
         nowPatch: null,
         mocUpdates: [],
       }
-      const parseSpy = vi.spyOn(parserModule, 'parseExtractOutput').mockReturnValue(badExtractOutput)
+      const parseSpy = vi.spyOn(parserModule, 'parseExtractOutputWithDiagnostics').mockReturnValue({
+        output: badExtractOutput,
+        diagnostics: { totalCandidates: 1, accepted: 1, rejected: [] },
+      })
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
       try {
@@ -449,7 +452,10 @@ describe('runExtract', () => {
         nowPatch: null,
         mocUpdates: [],
       }
-      const parseSpy = vi.spyOn(parserModule, 'parseExtractOutput').mockReturnValue(badExtractOutput)
+      const parseSpy = vi.spyOn(parserModule, 'parseExtractOutputWithDiagnostics').mockReturnValue({
+        output: badExtractOutput,
+        diagnostics: { totalCandidates: 1, accepted: 1, rejected: [] },
+      })
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
 
       try {

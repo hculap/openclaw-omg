@@ -3,8 +3,11 @@ export type { OmgConfig, ParseConfigOptions } from './config.js'
 
 export {
   NODE_TYPES,
+  INFERABLE_NODE_TYPES,
   PRIORITY_ORDER,
   isNodeType,
+  coerceNodeType,
+  inferNodeTypeFromKey,
   isCompressionLevel,
   ReflectorInvariantError,
   createReflectorOutput,
@@ -38,7 +41,8 @@ export { createLlmClient } from './llm/client.js'
 export type { LlmClient, LlmResponse, LlmUsage, LlmGenerateParams, GenerateFn } from './llm/client.js'
 
 export { runObservation } from './observer/observer.js'
-export { parseObserverOutput } from './observer/parser.js'
+export { parseObserverOutput, parseExtractOutput, parseExtractOutputWithDiagnostics } from './observer/parser.js'
+export type { ParserRejection, ParserDiagnostics } from './observer/parser.js'
 export { buildObserverSystemPrompt, buildObserverUserPrompt } from './observer/prompts.js'
 export type { ObserverUserPromptParams } from './observer/prompts.js'
 
