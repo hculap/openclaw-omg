@@ -273,6 +273,14 @@ export interface ObserverOutput {
   readonly nowUpdate: string | null
   /** IDs of MOC nodes that need to be regenerated after this run. */
   readonly mocUpdates: readonly string[]
+  /** Parser diagnostics from the extract phase (optional — won't break existing callers). */
+  readonly diagnostics?: {
+    readonly totalCandidates: number
+    readonly accepted: number
+    readonly rejectedReasons: readonly string[]
+  }
+  /** True when the LLM response was likely truncated (output tokens near max). */
+  readonly truncated?: boolean
 }
 
 // ---------------------------------------------------------------------------

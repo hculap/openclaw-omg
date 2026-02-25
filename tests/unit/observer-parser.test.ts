@@ -3,6 +3,7 @@ import {
   parseObserverOutput,
   parseExtractOutput,
   parseExtractOutputWithDiagnostics,
+  stripMarkdownFences,
 } from '../../src/observer/parser.js'
 import {
   coerceNodeType,
@@ -1202,5 +1203,81 @@ describe('parser — combined recovery scenarios', () => {
     expect(result.candidates[0]!.canonicalKey).toBe('identity.user_name')
     // Second candidate: alt root + mixed-case type
     expect(result.candidates[1]!.type).toBe('preference')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// stripMarkdownFences
+// ---------------------------------------------------------------------------
+
+describe('stripMarkdownFences', () => {
+  it('strips fences with xml language tag', () => {
+    const input = '```xml\n<observations><operations></operations></observations>\n```'
+    expect(stripMarkdownFences(input)).toBe(
+      '<observations><operations></operations></observations>',
+    )
+  })
+
+  it('strips fences without language tag', () => {
+    const input = '```\n<observations><operations></operations></observations>\n```'
+    expect(stripMarkdownFences(input)).toBe(
+      '<observations><operations></operations></observations>',
+    )
+  })
+
+  it('strips fences with preamble text before', () => {
+    const input = 'Here is the XML output:\n```xml\n<observations><operations></operations></observations>\n```'
+    expect(stripMarkdownFences(input)).toBe(
+      '<observations><operations></operations></observations>',
+    )
+  })
+
+  it('returns original string when no fences present', () => {
+    const input = '<observations><operations></operations></observations>'
+    expect(stripMarkdownFences(input)).toBe(input)
+  })
+
+  it('strips fences with trailing text after closing fence', () => {
+    const input = '```xml\n<observations><operations></operations></observations>\n```\nDone.'
+    expect(stripMarkdownFences(input)).toBe(
+      '<observations><operations></operations></observations>',
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fence-wrapped XML end-to-end: parseObserverOutput
+// ---------------------------------------------------------------------------
+
+describe('parseObserverOutput — fenced XML', () => {
+  it('parses fenced XML with xml language tag', () => {
+    const xml = `<observations><operations>${VALID_UPSERT_PREFERENCE}</operations></observations>`
+    const fenced = '```xml\n' + xml + '\n```'
+    const output = parseObserverOutput(fenced)
+    expect(output.operations).toHaveLength(1)
+    if (output.operations[0]!.kind === 'upsert') {
+      expect(output.operations[0]!.canonicalKey).toBe('preferences.editor_theme')
+    }
+  })
+
+  it('parses fenced XML with preamble', () => {
+    const xml = `<observations><operations>${VALID_UPSERT_PREFERENCE}</operations></observations>`
+    const fenced = 'Here is the extracted data:\n```xml\n' + xml + '\n```'
+    const output = parseObserverOutput(fenced)
+    expect(output.operations).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Fence-wrapped XML end-to-end: parseExtractOutput
+// ---------------------------------------------------------------------------
+
+describe('parseExtractOutput — fenced XML', () => {
+  it('parses fenced extract output correctly', () => {
+    const xml = `<observations><operations>${VALID_UPSERT_PREFERENCE}</operations></observations>`
+    const fenced = '```xml\n' + xml + '\n```'
+    const output = parseExtractOutput(fenced)
+    expect(output.candidates).toHaveLength(1)
+    expect(output.candidates[0]!.canonicalKey).toBe('preferences.editor_theme')
   })
 })

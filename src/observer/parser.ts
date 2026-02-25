@@ -83,6 +83,27 @@ const xmlParser = new XMLParser({
 })
 
 // ---------------------------------------------------------------------------
+// Markdown fence stripping
+// ---------------------------------------------------------------------------
+
+/**
+ * Strips markdown code fences that LLMs commonly wrap around XML output.
+ *
+ * Handles:
+ *   - Full-text fence: `` ```xml\n...\n``` `` or `` ```\n...\n``` ``
+ *   - Preamble + fence: text before `` ``` `` is discarded
+ *   - No fences: returns original string unchanged
+ */
+export function stripMarkdownFences(raw: string): string {
+  // Match ```<optional-lang>\n...\n``` — capture content between fences
+  const fenceMatch = raw.match(/```[a-zA-Z]*\s*\n([\s\S]*?)\n\s*```/)
+  if (fenceMatch) {
+    return fenceMatch[1]!
+  }
+  return raw
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -480,7 +501,8 @@ export function parseObserverOutput(raw: string): ObserverOutput {
     return { ...EMPTY_OUTPUT }
   }
 
-  const extracted = extractXmlRoot(raw, '[omg] Observer parser:')
+  const stripped = stripMarkdownFences(raw)
+  const extracted = extractXmlRoot(stripped, '[omg] Observer parser:')
   if (extracted === null) {
     console.error('[omg] Observer parser: no recognizable root element found — returning empty output')
     return { ...EMPTY_OUTPUT }
@@ -589,7 +611,8 @@ export function parseExtractOutputWithDiagnostics(
     }
   }
 
-  const extracted = extractXmlRoot(raw, '[omg] Extract parser:')
+  const stripped = stripMarkdownFences(raw)
+  const extracted = extractXmlRoot(stripped, '[omg] Extract parser:')
   if (extracted === null) {
     console.error('[omg] Extract parser: no recognizable root element found — returning empty output')
     return {
