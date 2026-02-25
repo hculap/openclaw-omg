@@ -646,10 +646,25 @@ export interface RetryResult {
  */
 export async function runBootstrapRetry(params: RetryParams): Promise<RetryResult> {
   const { workspaceDir, config, llmClient } = params
-  const omgRoot = resolveOmgRoot(workspaceDir, config)
+
+  let omgRoot: string
+  try {
+    omgRoot = resolveOmgRoot(workspaceDir, config)
+  } catch (err) {
+    console.error('[omg] bootstrap retry: failed to resolve omgRoot:', err)
+    return { ran: false, failedBatchCount: 0, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
+  }
+
   const scope = config.scope ?? workspaceDir
 
-  const failures = await readFailureLog(omgRoot)
+  let failures: BootstrapFailureEntry[]
+  try {
+    failures = await readFailureLog(omgRoot)
+  } catch (err) {
+    console.error('[omg] bootstrap retry: failed to read failure log:', err)
+    return { ran: false, failedBatchCount: 0, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
+  }
+
   if (failures.length === 0) {
     console.log('[omg] bootstrap retry: no failures found — nothing to retry')
     return { ran: false, failedBatchCount: 0, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
@@ -669,13 +684,22 @@ export async function runBootstrapRetry(params: RetryParams): Promise<RetryResul
     const srcs = config.bootstrap.sources
     const [memoryEntries, logEntries, sqliteEntries] = await Promise.all([
       srcs.workspaceMemory
-        ? readWorkspaceMemory(workspaceDir, config.storagePath).catch(() => [])
+        ? readWorkspaceMemory(workspaceDir, config.storagePath).catch((err) => {
+            console.error('[omg] bootstrap retry: workspace memory read failed:', err)
+            return []
+          })
         : Promise.resolve([]),
       srcs.openclawLogs
-        ? readOpenclawLogs().catch(() => [])
+        ? readOpenclawLogs().catch((err) => {
+            console.error('[omg] bootstrap retry: openclaw logs read failed:', err)
+            return []
+          })
         : Promise.resolve([]),
       srcs.openclawSessions
-        ? readSqliteChunks(workspaceDir).catch(() => [])
+        ? readSqliteChunks(workspaceDir).catch((err) => {
+            console.error('[omg] bootstrap retry: sqlite chunks read failed:', err)
+            return []
+          })
         : Promise.resolve([]),
     ])
 
