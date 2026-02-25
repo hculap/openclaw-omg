@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { buildObserverSystemPrompt, buildObserverUserPrompt } from '../../src/observer/prompts.js'
+import {
+  buildObserverSystemPrompt,
+  buildObserverUserPrompt,
+  buildExtractSystemPrompt,
+} from '../../src/observer/prompts.js'
+import { parseExtractOutput } from '../../src/observer/parser.js'
 import { NODE_TYPES } from '../../src/types.js'
 import type { Message } from '../../src/types.js'
 
@@ -63,6 +68,147 @@ describe('buildObserverSystemPrompt', () => {
   it('includes <moc-hints> in the schema', () => {
     const prompt = buildObserverSystemPrompt()
     expect(prompt).toContain('moc-hints')
+  })
+
+  it('type guide includes personal identity examples', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('family members')
+    expect(prompt).toContain('personality traits')
+    expect(prompt).toContain('hobbies')
+  })
+
+  it('type guide includes personal preference examples', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('morning routine')
+    expect(prompt).toContain('communication style')
+    expect(prompt).toContain('dietary choices')
+  })
+
+  it('type guide includes personal fact examples', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('hometown')
+    expect(prompt).toContain('alma mater')
+    expect(prompt).toContain('pet names')
+  })
+
+  it('XML schema includes identity.family_structure example', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('identity.family_structure')
+  })
+
+  it('XML schema includes preferences.morning_routine example', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('preferences.morning_routine')
+  })
+
+  it('priority guidance includes ALWAYS high priority for personal data', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('ALWAYS high priority')
+  })
+
+  it('rules include personal information extraction guidance', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('Personal information')
+    expect(prompt).toContain('identity or preference nodes with high priority')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Extract system prompt
+// ---------------------------------------------------------------------------
+
+describe('buildExtractSystemPrompt', () => {
+  it('returns a non-empty string', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(typeof prompt).toBe('string')
+    expect(prompt.length).toBeGreaterThan(0)
+  })
+
+  it('includes all NodeType names', () => {
+    const prompt = buildExtractSystemPrompt()
+    for (const type of NODE_TYPES) {
+      expect(prompt).toContain(type)
+    }
+  })
+
+  it('type guide includes personal identity examples', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('family members')
+    expect(prompt).toContain('personality traits')
+    expect(prompt).toContain('hobbies')
+  })
+
+  it('type guide includes personal preference examples', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('morning routine')
+    expect(prompt).toContain('communication style')
+    expect(prompt).toContain('dietary choices')
+  })
+
+  it('type guide includes personal fact examples', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('hometown')
+    expect(prompt).toContain('alma mater')
+    expect(prompt).toContain('pet names')
+  })
+
+  it('XML schema includes identity.family_structure example', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('identity.family_structure')
+  })
+
+  it('XML schema includes preferences.morning_routine example', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('preferences.morning_routine')
+  })
+
+  it('priority guidance includes ALWAYS high priority for personal data', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('ALWAYS high priority')
+  })
+
+  it('rules include personal information extraction guidance', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('Personal information')
+    expect(prompt).toContain('identity or preference nodes with high priority')
+  })
+
+  it('includes <now-patch> in the schema (not <now-update>)', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('now-patch')
+    expect(prompt).not.toContain('now-update')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Identity parsing via parseExtractOutput
+// ---------------------------------------------------------------------------
+
+describe('parseExtractOutput — identity node', () => {
+  it('parses an identity operation from personal XML', () => {
+    const xml = `<observations>
+  <operations>
+    <operation type="identity" priority="high">
+      <canonical-key>identity.personality_type</canonical-key>
+      <title>Personality Type</title>
+      <description>User identifies as ENTP personality type</description>
+      <content>
+The user mentioned they are an ENTP and find brainstorming energizing.
+      </content>
+      <moc-hints>identity</moc-hints>
+      <tags>personality, ENTP, personal</tags>
+    </operation>
+  </operations>
+</observations>`
+
+    const result = parseExtractOutput(xml)
+    expect(result.candidates).toHaveLength(1)
+
+    const candidate = result.candidates[0]!
+    expect(candidate.type).toBe('identity')
+    expect(candidate.priority).toBe('high')
+    expect(candidate.canonicalKey).toBe('identity.personality_type')
+    expect(candidate.description).toContain('ENTP')
   })
 })
 
