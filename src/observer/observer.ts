@@ -12,7 +12,7 @@
 import type { ObserverOutput, ObservationParams, ExtractOutput, ExtractParams, MergeAction } from '../types.js'
 import { isNodeType, candidateToUpsertOperation } from '../types.js'
 import { buildObserverSystemPrompt, buildObserverUserPrompt, buildExtractSystemPrompt, buildExtractUserPrompt } from './prompts.js'
-import { parseObserverOutput, EMPTY_OUTPUT, parseExtractOutput } from './parser.js'
+import { parseObserverOutput, EMPTY_OUTPUT, parseExtractOutput, parseExtractOutputWithDiagnostics } from './parser.js'
 import { buildMergeSystemPrompt, buildMergeUserPrompt, parseMergeOutput } from './merge-prompt.js'
 import type { ScoredMergeTarget } from '../types.js'
 import type { ExtractCandidate } from '../types.js'
@@ -88,7 +88,14 @@ export async function runExtract(params: ExtractParams): Promise<ExtractOutput> 
     )
   }
 
-  const output = parseExtractOutput(response.content)
+  const { output, diagnostics } = parseExtractOutputWithDiagnostics(response.content)
+
+  if (diagnostics.rejected.length > 0) {
+    console.warn(
+      `[omg] Extract: ${diagnostics.accepted}/${diagnostics.totalCandidates} candidates survived parsing. ` +
+      `Rejected: ${diagnostics.rejected.map((r) => r.reason).join('; ')}`,
+    )
+  }
 
   // Belt-and-suspenders: re-filter candidates with invalid types
   const validatedCandidates = output.candidates.filter((c) => {
