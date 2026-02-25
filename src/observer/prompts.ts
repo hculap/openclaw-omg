@@ -65,11 +65,11 @@ to upsert (create or update), and how to patch the current-state snapshot.
 Every node has one of these types: ${nodeTypeList}
 
 Type selection guide:
-- **identity**   — Persistent self-description of the user (name, role, working style, etc.)
-- **preference** — Explicit user preference or stated choice (editor theme, tool, workflow)
+- **identity**   — Persistent self-description of the user: family members, personality traits, hobbies, location, physical characteristics, social groups, relationships, name, role, working style
+- **preference** — Explicit user preference or stated choice: morning routine, communication style, dietary choices, editor theme, tool, workflow
 - **project**    — A project the user is working on: goals, status, tech stack, constraints
 - **decision**   — A recorded decision with rationale (e.g. "chose PostgreSQL over MySQL because…")
-- **fact**       — A standalone factual observation not tied to a project or preference
+- **fact**       — A standalone factual observation not tied to a project or preference (e.g. hometown, alma mater, pet names)
 - **episode**    — A specific event or activity from this session (what was done, what happened)
 - **reflection** — (Reserved for Reflector agent. Do not produce nodes of this type.)
 - **moc**        — (Reserved for system. Do not produce nodes of this type.)
@@ -79,7 +79,7 @@ Type selection guide:
 ## Priority Rules
 
 Assign priority based on how durable and important the information is:
-- **high**   — Explicit, direct user assertion (name, role, core preference, major decision)
+- **high**   — Explicit, direct user assertion (name, role, core preference, major decision). Personal identity information (family, personality, location, hobbies) is ALWAYS high priority.
 - **medium** — Project details, implicit preferences, factual context from the conversation
 - **low**    — Minor context, ephemeral details unlikely to matter in future sessions
 
@@ -104,6 +104,30 @@ Respond ONLY with valid XML matching this schema. Do not add any text outside th
 \`\`\`xml
 <observations>
   <operations>
+    <operation type="identity" priority="high">
+      <canonical-key>identity.family_structure</canonical-key>
+      <title>Family Structure</title>
+      <description>User's partner and children</description>
+      <content>
+The user lives with their partner Alex and two children (ages 7 and 4).
+They mentioned this while discussing work-life balance.
+      </content>
+      <moc-hints>identity</moc-hints>
+      <tags>family, personal, relationships</tags>
+    </operation>
+
+    <operation type="preference" priority="high">
+      <canonical-key>preferences.morning_routine</canonical-key>
+      <title>Morning Routine Preference</title>
+      <description>User's preferred morning routine and schedule</description>
+      <content>
+The user starts their day at 6 AM with a run and coffee before work.
+They prefer not to schedule meetings before 9 AM.
+      </content>
+      <moc-hints>preferences</moc-hints>
+      <tags>routine, schedule, personal</tags>
+    </operation>
+
     <operation type="preference" priority="high">
       <canonical-key>preferences.editor_theme</canonical-key>
       <title>Editor Theme Preference</title>
@@ -150,6 +174,7 @@ Updated project description with new details from this session.
 9. The <now-patch> open-loops is a comma-separated list of outstanding items from this session.
 10. The <now-patch> suggested-links is a comma-separated list of canonical keys of relevant nodes.
 11. Omit <now-patch> entirely if there is no meaningful current-state change.
+12. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
 `
 }
 
@@ -185,11 +210,11 @@ to upsert (create or update), and how to update the current-state snapshot.
 Every node has one of these types: ${nodeTypeList}
 
 Type selection guide:
-- **identity**   — Persistent self-description of the user (name, role, working style, etc.)
-- **preference** — Explicit user preference or stated choice (editor theme, tool, workflow)
+- **identity**   — Persistent self-description of the user: family members, personality traits, hobbies, location, physical characteristics, social groups, relationships, name, role, working style
+- **preference** — Explicit user preference or stated choice: morning routine, communication style, dietary choices, editor theme, tool, workflow
 - **project**    — A project the user is working on: goals, status, tech stack, constraints
 - **decision**   — A recorded decision with rationale (e.g. "chose PostgreSQL over MySQL because…")
-- **fact**       — A standalone factual observation not tied to a project or preference
+- **fact**       — A standalone factual observation not tied to a project or preference (e.g. hometown, alma mater, pet names)
 - **episode**    — A specific event or activity from this session (what was done, what happened)
 - **reflection** — (Reserved for Reflector agent. Do not produce nodes of this type.)
 - **moc**        — (Reserved for system. Do not produce nodes of this type.)
@@ -199,7 +224,7 @@ Type selection guide:
 ## Priority Rules
 
 Assign priority based on how durable and important the information is:
-- **high**   — Explicit, direct user assertion (name, role, core preference, major decision)
+- **high**   — Explicit, direct user assertion (name, role, core preference, major decision). Personal identity information (family, personality, location, hobbies) is ALWAYS high priority.
 - **medium** — Project details, implicit preferences, factual context from the conversation
 - **low**    — Minor context, ephemeral details unlikely to matter in future sessions
 
@@ -224,6 +249,30 @@ Respond ONLY with valid XML matching this schema. Do not add any text outside th
 \`\`\`xml
 <observations>
   <operations>
+    <operation type="identity" priority="high">
+      <canonical-key>identity.family_structure</canonical-key>
+      <title>Family Structure</title>
+      <description>User's partner and children</description>
+      <content>
+The user lives with their partner Alex and two children (ages 7 and 4).
+They mentioned this while discussing work-life balance.
+      </content>
+      <moc-hints>identity</moc-hints>
+      <tags>family, personal, relationships</tags>
+    </operation>
+
+    <operation type="preference" priority="high">
+      <canonical-key>preferences.morning_routine</canonical-key>
+      <title>Morning Routine Preference</title>
+      <description>User's preferred morning routine and schedule</description>
+      <content>
+The user starts their day at 6 AM with a run and coffee before work.
+They prefer not to schedule meetings before 9 AM.
+      </content>
+      <moc-hints>preferences</moc-hints>
+      <tags>routine, schedule, personal</tags>
+    </operation>
+
     <operation type="preference" priority="high">
       <canonical-key>preferences.editor_theme</canonical-key>
       <title>Editor Theme Preference</title>
@@ -272,6 +321,7 @@ Setting up the login flow with email + password.
 6. Use <tags> as a comma-separated list: preferences, dark-mode, editor
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-update> should reflect the user's current focus and state — not a full history.
+9. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
 `
 }
 

@@ -239,6 +239,55 @@ describe('Phase 4 — Deterministic IDs + no-op write', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Extract (identity / personal nodes)
+// ---------------------------------------------------------------------------
+
+describe('Phase 4 — Extract (identity/personal nodes)', () => {
+  it('extracts identity nodes from rich personal data', async () => {
+    const { llmClient, config } = buildLlmClient('phase-4-identity')
+
+    const result = await runExtract({
+      unobservedMessages: [
+        {
+          role: 'user' as const,
+          content: [
+            'A bit about me: I have ADHD and I\'m an ENTP personality type.',
+            'I live in Kraków, Poland with my partner Ewa and our cat Mruczek.',
+            'I\'m really into bouldering and board games on weekends.',
+            'Mornings I always start with a double espresso — no meetings before 10 AM please.',
+          ].join(' '),
+        },
+        {
+          role: 'assistant' as const,
+          content: 'Thanks for sharing! I\'ll keep all of that in mind for our future sessions.',
+        },
+      ],
+      nowNode: null,
+      config,
+      llmClient,
+      sessionContext: { sessionKey: 'live-test-identity', source: 'live-test' },
+    })
+
+    for (const c of result.candidates) {
+      console.log(`[observer:identity]   - ${c.type}/${c.canonicalKey}: ${c.title} (priority: ${c.priority})`)
+    }
+
+    // At least 1 identity node should be extracted
+    const identityCandidates = result.candidates.filter(c => c.type === 'identity')
+    console.log(`[observer:identity] Identity candidates: ${identityCandidates.length}`)
+    expect(identityCandidates.length).toBeGreaterThanOrEqual(1)
+
+    // Identity nodes should have high priority
+    for (const c of identityCandidates) {
+      expect(c.priority).toBe('high')
+    }
+
+    // Total extraction should produce non-technical nodes
+    expect(result.candidates.length).toBeGreaterThan(0)
+  }, 180_000)
+})
+
+// ---------------------------------------------------------------------------
 // Node count sanity
 // ---------------------------------------------------------------------------
 
