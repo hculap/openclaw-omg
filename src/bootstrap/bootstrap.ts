@@ -43,6 +43,14 @@ import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
 import type { SourceBatch } from './batcher.js'
 import type { GraphNode, ObserverOutput } from '../types.js'
+import {
+  appendFailureEntry,
+  clearFailureLog,
+  readFailureLog,
+  type BootstrapFailureEntry,
+  type FailureErrorType,
+} from './failure-log.js'
+import { computeBootstrapQuality, logQualityReport } from './quality-metrics.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -211,8 +219,45 @@ async function processBatch(
         throw err
       }
       console.error(`[omg] bootstrap: observation failed for "${batchLabel}":`, err)
+      await appendFailureEntry(omgRoot, {
+        batchIndex: batch.batchIndex,
+        labels: batch.chunks.map((c) => c.source),
+        errorType: 'llm-error',
+        error: err instanceof Error ? err.message : String(err),
+        timestamp: new Date().toISOString(),
+        diagnostics: null,
+        chunkCount: batch.chunks.length,
+      }).catch((logErr) => console.error('[omg] bootstrap: failed to write failure log:', logErr))
       return { nodesWritten: 0, chunkCount: batch.chunks.length, observationSucceeded: false }
     }
+  }
+
+  // Capture diagnostics from observer output (available when using runObservation → runExtractWithDiagnostics)
+  const diag = observerOutput.diagnostics ?? null
+  const batchLabels = batch.chunks.map((c) => c.source)
+
+  // Check for parse-empty: LLM succeeded but 0 candidates parsed from response
+  if (observerOutput.operations.length === 0) {
+    const errorType: FailureErrorType = diag && diag.totalCandidates > 0
+      ? 'zero-operations'
+      : 'parse-empty'
+    const error = errorType === 'zero-operations'
+      ? `${diag!.totalCandidates} candidates parsed but all rejected`
+      : 'LLM response parsed but 0 operations extracted'
+
+    await appendFailureEntry(omgRoot, {
+      batchIndex: batch.batchIndex,
+      labels: batchLabels,
+      errorType,
+      error,
+      timestamp: new Date().toISOString(),
+      diagnostics: diag ? {
+        totalCandidates: diag.totalCandidates,
+        accepted: diag.accepted,
+        rejectedReasons: [...diag.rejectedReasons],
+      } : null,
+      chunkCount: batch.chunks.length,
+    }).catch((logErr) => console.error('[omg] bootstrap: failed to write failure log:', logErr))
   }
 
   // Phase 2: write nodes
@@ -231,6 +276,23 @@ async function processBatch(
       `[omg] bootstrap: ${failedWrites.length}/${writeResults.length} write(s) failed for "${batchLabel}":`,
       failedWrites.map((f) => f.reason)
     )
+  }
+
+  // Log write-all-failed if operations existed but all writes failed
+  if (observerOutput.operations.length > 0 && writtenNodes.length === 0) {
+    await appendFailureEntry(omgRoot, {
+      batchIndex: batch.batchIndex,
+      labels: batchLabels,
+      errorType: 'write-all-failed',
+      error: `${failedWrites.length} write(s) attempted, all failed`,
+      timestamp: new Date().toISOString(),
+      diagnostics: diag ? {
+        totalCandidates: diag.totalCandidates,
+        accepted: diag.accepted,
+        rejectedReasons: [...diag.rejectedReasons],
+      } : null,
+      chunkCount: batch.chunks.length,
+    }).catch((logErr) => console.error('[omg] bootstrap: failed to write failure log:', logErr))
   }
 
   // Phase 3: update MOCs — deduplicate domains across all operations in the batch
@@ -353,6 +415,13 @@ async function _runBootstrapLocked(params: BootstrapParams & {
     return { ran: false, totalChunks: 0, batchCount: 0, batchesProcessed: 0, nodesWritten: 0, chunksSucceeded: 0, moreWorkRemains: false, completed: false }
   }
   const previousDone = force ? undefined : decision.resumeFromDone
+
+  // Clear failure log on force runs
+  if (force) {
+    await clearFailureLog(omgRoot).catch((err) =>
+      console.error('[omg] bootstrap: failed to clear failure log:', err)
+    )
+  }
 
   // Resolve which sources to use.
   // config.bootstrap.sources is the canonical config; the deprecated `source`
@@ -488,6 +557,15 @@ async function _runBootstrapLocked(params: BootstrapParams & {
     console.log(
       `[omg] bootstrap: complete — ${state.ok}/${totalChunks} chunks succeeded (${batches.length} batches), ${nodesWritten} nodes written`
     )
+
+    // Post-bootstrap quality analysis
+    try {
+      const registryEntries = await getRegistryEntries(omgRoot)
+      const report = computeBootstrapQuality(registryEntries)
+      logQualityReport(report)
+    } catch (err) {
+      console.error('[omg] bootstrap: quality metrics failed:', err)
+    }
   }
 
   return {
@@ -529,6 +607,134 @@ export async function runBootstrapTick(params: BootstrapParams): Promise<Bootstr
       nodesWritten: result.nodesWritten,
       moreWorkRemains: result.moreWorkRemains,
       completed: result.completed,
+    }
+  } finally {
+    await releaseLock(omgRoot)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Retry failed batches
+// ---------------------------------------------------------------------------
+
+/** Parameters for {@link runBootstrapRetry}. */
+export interface RetryParams {
+  readonly workspaceDir: string
+  readonly config: OmgConfig
+  readonly llmClient: LlmClient
+}
+
+/** Result summary returned by {@link runBootstrapRetry}. */
+export interface RetryResult {
+  readonly ran: boolean
+  readonly failedBatchCount: number
+  readonly retriedCount: number
+  readonly nodesWritten: number
+  readonly stillFailedCount: number
+}
+
+/**
+ * Retries batches that previously failed during bootstrap.
+ *
+ * 1. Reads `.bootstrap-failures.jsonl`
+ * 2. Re-gathers sources + builds batches (same pipeline)
+ * 3. Filters to only batches whose batchIndex is in the failure log
+ * 4. Processes with existing `processBatch` pipeline
+ * 5. Clears successful retry entries from failure log
+ *
+ * Never throws (all errors are caught and logged).
+ */
+export async function runBootstrapRetry(params: RetryParams): Promise<RetryResult> {
+  const { workspaceDir, config, llmClient } = params
+  const omgRoot = resolveOmgRoot(workspaceDir, config)
+  const scope = config.scope ?? workspaceDir
+
+  const failures = await readFailureLog(omgRoot)
+  if (failures.length === 0) {
+    console.log('[omg] bootstrap retry: no failures found — nothing to retry')
+    return { ran: false, failedBatchCount: 0, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
+  }
+
+  const failedIndices = new Set(failures.map((f) => f.batchIndex))
+  console.log(`[omg] bootstrap retry: ${failedIndices.size} failed batch(es) to retry`)
+
+  const lockAcquired = await acquireLock(omgRoot)
+  if (!lockAcquired) {
+    console.error('[omg] bootstrap retry: could not acquire lock — another process may be running')
+    return { ran: false, failedBatchCount: failures.length, retriedCount: 0, nodesWritten: 0, stillFailedCount: failures.length }
+  }
+
+  try {
+    // Re-gather sources and build batches (same pipeline as initial bootstrap)
+    const srcs = config.bootstrap.sources
+    const [memoryEntries, logEntries, sqliteEntries] = await Promise.all([
+      srcs.workspaceMemory
+        ? readWorkspaceMemory(workspaceDir, config.storagePath).catch(() => [])
+        : Promise.resolve([]),
+      srcs.openclawLogs
+        ? readOpenclawLogs().catch(() => [])
+        : Promise.resolve([]),
+      srcs.openclawSessions
+        ? readSqliteChunks(workspaceDir).catch(() => [])
+        : Promise.resolve([]),
+    ])
+
+    const allChunks: SourceChunk[] = []
+    for (const entry of [...memoryEntries, ...logEntries, ...sqliteEntries]) {
+      const chunks = chunkText(entry.text, entry.label)
+      allChunks.push(...chunks)
+    }
+
+    const batches = batchChunks(allChunks, config.bootstrap.batchCharBudget)
+    const retryBatches = batches.filter((b) => failedIndices.has(b.batchIndex))
+
+    if (retryBatches.length === 0) {
+      console.log('[omg] bootstrap retry: failed batch indices no longer match current batches — clearing failure log')
+      await clearFailureLog(omgRoot)
+      return { ran: true, failedBatchCount: failures.length, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
+    }
+
+    // Clear failure log before retry — new failures will be re-appended by processBatch
+    await clearFailureLog(omgRoot)
+
+    const breaker = new RateLimitBreaker()
+    let nodesWritten = 0
+
+    const tasks = retryBatches.map((batch) => async () => {
+      if (breaker.aborted) throw new PipelineAbortedError()
+      return processBatch(batch, omgRoot, scope, config, llmClient, breaker)
+    })
+
+    const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
+
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value.observationSucceeded) {
+        nodesWritten += result.value.nodesWritten
+      }
+    }
+
+    // Read back failure log to count remaining failures
+    const remainingFailures = await readFailureLog(omgRoot)
+
+    console.log(
+      `[omg] bootstrap retry: retried ${retryBatches.length} batch(es) → ${nodesWritten} nodes written, ${remainingFailures.length} still failing`
+    )
+
+    // Run quality metrics after retry
+    try {
+      const registryEntries = await getRegistryEntries(omgRoot)
+      const report = computeBootstrapQuality(registryEntries)
+      logQualityReport(report)
+    } catch (err) {
+      console.error('[omg] bootstrap retry: quality metrics failed:', err)
+    }
+
+    return {
+      ran: true,
+      failedBatchCount: failures.length,
+      retriedCount: retryBatches.length,
+      nodesWritten,
+      stillFailedCount: remainingFailures.length,
     }
   } finally {
     await releaseLock(omgRoot)

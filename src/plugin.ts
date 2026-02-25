@@ -31,7 +31,7 @@ import {
   listWorkspacePaths,
 } from './cron/workspace-registry.js'
 import { scaffoldGraphIfNeeded } from './scaffold.js'
-import { runBootstrap, runBootstrapTick } from './bootstrap/bootstrap.js'
+import { runBootstrap, runBootstrapTick, runBootstrapRetry } from './bootstrap/bootstrap.js'
 import { resolveOmgRoot } from './utils/paths.js'
 import type { Message } from './types.js'
 import type { GenerateFn } from './llm/client.js'
@@ -577,6 +577,7 @@ export function register(api: PluginApi): void {
           .command('omg bootstrap')
           .option('--force', 'Re-run bootstrap from scratch, ignoring previous state')
           .option('--source <source>', 'Source to ingest: memory|logs|sqlite|all', 'all')
+          .option('--retry-failed', 'Retry only batches that failed in a previous run')
           .action(async (...actionArgs: unknown[]) => {
             // Commander calls action as (...positionalArgs, options, command).
             // 'omg bootstrap' registers 'bootstrap' as a positional arg of command 'omg',
@@ -598,6 +599,13 @@ export function register(api: PluginApi): void {
             }
             if (!workspaceDir) {
               console.error('[omg] bootstrap: workspaceDir is not available')
+              return
+            }
+            if (Boolean(opts['retryFailed'])) {
+              const result = await runBootstrapRetry({ workspaceDir, config, llmClient })
+              if (!result.ran) {
+                console.log('[omg] bootstrap retry: no failures to retry')
+              }
               return
             }
             const force = Boolean(opts['force'])

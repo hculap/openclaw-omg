@@ -13,6 +13,7 @@ import type { ObserverOutput, ObservationParams, ExtractOutput, ExtractParams, M
 import { isNodeType, candidateToUpsertOperation } from '../types.js'
 import { buildObserverSystemPrompt, buildObserverUserPrompt, buildExtractSystemPrompt, buildExtractUserPrompt } from './prompts.js'
 import { parseObserverOutput, EMPTY_OUTPUT, parseExtractOutput, parseExtractOutputWithDiagnostics } from './parser.js'
+import type { ParserDiagnostics } from './parser.js'
 import { buildMergeSystemPrompt, buildMergeUserPrompt, parseMergeOutput } from './merge-prompt.js'
 import type { ScoredMergeTarget } from '../types.js'
 import type { ExtractCandidate } from '../types.js'
@@ -29,6 +30,93 @@ const MERGE_MAX_TOKENS = 1024
 
 /** @deprecated Kept for backward compat — use EXTRACT_MAX_TOKENS. */
 const OBSERVER_MAX_TOKENS = EXTRACT_MAX_TOKENS
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Extract result with full parser diagnostics and truncation flag. */
+export interface ExtractResultWithDiagnostics {
+  readonly output: ExtractOutput
+  readonly diagnostics: ParserDiagnostics
+  readonly truncated: boolean
+}
+
+// ---------------------------------------------------------------------------
+// runExtractWithDiagnostics
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the Extract phase and returns full parser diagnostics alongside the output.
+ * Used by callers (e.g. bootstrap) that need programmatic access to rejection details.
+ *
+ * Throws if the LLM call fails.
+ */
+export async function runExtractWithDiagnostics(params: ExtractParams): Promise<ExtractResultWithDiagnostics> {
+  const { unobservedMessages, nowNode, llmClient, sessionContext, maxOutputTokens } = params
+
+  if (unobservedMessages.length === 0) {
+    return {
+      output: { candidates: [], nowPatch: null, mocUpdates: [] },
+      diagnostics: { totalCandidates: 0, accepted: 0, rejected: [] },
+      truncated: false,
+    }
+  }
+
+  const system = buildExtractSystemPrompt()
+  const user = buildExtractUserPrompt({
+    nowNode,
+    messages: unobservedMessages,
+    sessionContext,
+  })
+
+  const effectiveMaxTokens = maxOutputTokens ?? EXTRACT_MAX_TOKENS
+
+  let response: Awaited<ReturnType<typeof llmClient.generate>>
+  try {
+    response = await llmClient.generate({ system, user, maxTokens: effectiveMaxTokens })
+  } catch (err) {
+    throw new Error(
+      `[omg] Extract: LLM call failed (messageCount: ${unobservedMessages.length}): ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    )
+  }
+
+  console.log(
+    `[omg] Extract: tokens used — input: ${response.usage.inputTokens}, output: ${response.usage.outputTokens}`,
+  )
+
+  const truncated = effectiveMaxTokens > 0 && response.usage.outputTokens >= Math.floor(effectiveMaxTokens * 0.95)
+  if (truncated) {
+    console.warn(
+      `[omg] Extract: response may be truncated — used ${response.usage.outputTokens}/${effectiveMaxTokens} output tokens (${Math.round((response.usage.outputTokens / effectiveMaxTokens) * 100)}%). Consider reducing batchCharBudget if bootstrap chunks are being lost.`,
+    )
+  }
+
+  const { output, diagnostics } = parseExtractOutputWithDiagnostics(response.content)
+
+  if (diagnostics.rejected.length > 0) {
+    console.warn(
+      `[omg] Extract: ${diagnostics.accepted}/${diagnostics.totalCandidates} candidates survived parsing. ` +
+      `Rejected: ${diagnostics.rejected.map((r) => r.reason).join('; ')}`,
+    )
+  }
+
+  // Belt-and-suspenders: re-filter candidates with invalid types
+  const validatedCandidates = output.candidates.filter((c) => {
+    if (isNodeType(c.type)) return true
+    console.error(
+      `[omg] Extract: post-validation rejected candidate with unknown type "${String(c.type)}" — this indicates a parser bug`,
+    )
+    return false
+  })
+
+  return {
+    output: { ...output, candidates: validatedCandidates },
+    diagnostics,
+    truncated,
+  }
+}
 
 // ---------------------------------------------------------------------------
 // runExtract
@@ -182,9 +270,9 @@ export async function runObservation(params: ObservationParams): Promise<Observe
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
   }
 
-  let extractOutput: ExtractOutput
+  let extractResult: ExtractResultWithDiagnostics
   try {
-    extractOutput = await runExtract(extractParams)
+    extractResult = await runExtractWithDiagnostics(extractParams)
   } catch (err) {
     // Re-throw with the legacy error prefix so callers can detect format
     throw new Error(
@@ -192,6 +280,8 @@ export async function runObservation(params: ObservationParams): Promise<Observe
       { cause: err instanceof Error && err.cause ? err.cause : err },
     )
   }
+
+  const extractOutput = extractResult.output
 
   // Convert ExtractCandidates → ObserverOperations
   const operations = extractOutput.candidates.map(candidateToUpsertOperation)
@@ -215,6 +305,12 @@ export async function runObservation(params: ObservationParams): Promise<Observe
     operations: validatedOperations,
     nowUpdate,
     mocUpdates: extractOutput.mocUpdates,
+    diagnostics: {
+      totalCandidates: extractResult.diagnostics.totalCandidates,
+      accepted: extractResult.diagnostics.accepted,
+      rejectedReasons: extractResult.diagnostics.rejected.map((r) => r.reason),
+    },
+    truncated: extractResult.truncated,
   }
 }
 
