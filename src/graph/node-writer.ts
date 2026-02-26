@@ -78,8 +78,11 @@ async function readExistingCreated(filePath: string): Promise<string | null> {
     const { frontmatter } = parseFrontmatter(raw)
     const created = frontmatter['created']
     return typeof created === 'string' ? created : null
-  } catch {
-    // Malformed frontmatter is recoverable — fall back to current time.
+  } catch (err) {
+    console.warn(
+      `[omg] node-writer: readExistingCreated — frontmatter parse failed for ${filePath}, using current time:`,
+      err instanceof Error ? err.message : String(err),
+    )
     return null
   }
 }
@@ -263,7 +266,7 @@ export async function writeObservationNode(
     try {
       await registerNode(context.omgRoot, node.frontmatter.id, buildRegistryEntry(node, 'observation'))
     } catch (err) {
-      console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id}:`, err)
+      console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id} (node written to disk but invisible to registry):`, err)
     }
     return node
   }
@@ -275,7 +278,7 @@ export async function writeObservationNode(
   try {
     await registerNode(context.omgRoot, frontmatter.id, buildRegistryEntry(node, 'observation'))
   } catch (err) {
-    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id}:`, err)
+    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id} (node written to disk but invisible to registry):`, err)
   }
   return node
 }
@@ -294,8 +297,52 @@ export async function writeReflectionNode(
   try {
     await registerNode(context.omgRoot, node.frontmatter.id, buildRegistryEntry(written, 'reflection'))
   } catch (err) {
-    console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id}:`, err)
+    console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id} (node written to disk but invisible to registry):`, err)
   }
+  return written
+}
+
+/** Parameters for writing a domain-scoped clustered reflection node. */
+export interface ClusteredReflectionParams {
+  readonly frontmatter: NodeFrontmatter
+  readonly body: string
+  readonly sourceNodeIds: readonly string[]
+  /** Domain slug used for directory scoping. */
+  readonly domain: string
+  /** Time range for deterministic file naming. */
+  readonly timeRange: { readonly start: string; readonly end: string }
+}
+
+/**
+ * Writes a clustered reflection node to a deterministic, domain-scoped path.
+ *
+ * File location: {omgRoot}/reflections/{domain}/{start}__{end}.md
+ *
+ * Reruns overwrite the same file (idempotent, deterministic path).
+ */
+export async function writeClusteredReflectionNode(
+  params: ClusteredReflectionParams,
+  context: WriteContext,
+): Promise<GraphNode> {
+  const { frontmatter, body, domain, timeRange } = params
+  const dir = join(context.omgRoot, 'reflections', slugify(domain))
+  await ensureDir(dir)
+
+  const startDate = timeRange.start.slice(0, 10)
+  const endDate = timeRange.end.slice(0, 10)
+  const filePath = join(dir, `${startDate}__${endDate}.md`)
+
+  const content = serializeFrontmatter(frontmatterToRecord(frontmatter), body)
+  await atomicWrite(filePath, content)
+
+  const written: GraphNode = { frontmatter, body, filePath }
+
+  try {
+    await registerNode(context.omgRoot, frontmatter.id, buildRegistryEntry(written, 'reflection'))
+  } catch (err) {
+    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id} (node written to disk but invisible to registry):`, err)
+  }
+
   return written
 }
 
@@ -338,7 +385,7 @@ export async function writeNowNode(
   try {
     await registerNode(context.omgRoot, 'omg/now', buildRegistryEntry(node, 'observation'))
   } catch (err) {
-    console.error('[omg] node-writer: registry update failed for omg/now:', err)
+    console.error('[omg] node-writer: registry update failed for omg/now (node written to disk but invisible to registry):', err)
   }
   return node
 }

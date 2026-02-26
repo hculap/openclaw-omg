@@ -26,7 +26,8 @@ export function applyPatch(
   frontmatter: NodeFrontmatter,
   body: string,
   patch: MergePlan['patch'],
-  aliasKeys: readonly string[]
+  aliasKeys: readonly string[],
+  mergedNodeIds?: readonly string[],
 ): { frontmatter: NodeFrontmatter; body: string } {
   const now = new Date().toISOString()
 
@@ -44,6 +45,12 @@ export function applyPatch(
   const existingAliases = frontmatter.aliases ?? []
   const mergedAliases = [...new Set([...existingAliases, ...aliasKeys])]
 
+  // Union mergedFrom provenance
+  const existingMergedFrom = frontmatter.mergedFrom ?? []
+  const newMergedFrom = mergedNodeIds && mergedNodeIds.length > 0
+    ? [...new Set([...existingMergedFrom, ...mergedNodeIds])]
+    : existingMergedFrom.length > 0 ? [...existingMergedFrom] : undefined
+
   const newFrontmatter: NodeFrontmatter = {
     ...frontmatter,
     description: patch.description ?? frontmatter.description,
@@ -51,6 +58,7 @@ export function applyPatch(
     ...(mergedTags.length > 0 ? { tags: mergedTags } : {}),
     ...(mergedLinks.length > 0 ? { links: mergedLinks } : {}),
     ...(mergedAliases.length > 0 ? { aliases: mergedAliases } : {}),
+    ...(newMergedFrom ? { mergedFrom: newMergedFrom } : {}),
   }
 
   const newBody = patch.bodyAppend
@@ -142,7 +150,7 @@ export async function executeMerge(
 
   // Build typed frontmatter
   const fm: NodeFrontmatter = rawFm as unknown as NodeFrontmatter
-  const { frontmatter: patchedFm, body: patchedBody } = applyPatch(fm, body, plan.patch, plan.aliasKeys)
+  const { frontmatter: patchedFm, body: patchedBody } = applyPatch(fm, body, plan.patch, plan.aliasKeys, plan.mergeNodeIds)
 
   // Serialize and write back
   const record: Record<string, unknown> = {
@@ -158,6 +166,7 @@ export async function executeMerge(
     ...(patchedFm.links !== undefined && { links: patchedFm.links }),
     ...(patchedFm.tags !== undefined && { tags: patchedFm.tags }),
     ...(patchedFm.archived !== undefined && { archived: patchedFm.archived }),
+    ...(patchedFm.mergedFrom !== undefined && { mergedFrom: patchedFm.mergedFrom }),
   }
   await atomicWrite(keeperPath, serializeFrontmatter(record, patchedBody))
 

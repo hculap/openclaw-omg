@@ -10,6 +10,7 @@
  */
 
 import type { ObserverOutput, ObservationParams, ExtractOutput, ExtractParams, MergeAction } from '../types.js'
+import { emitMetric } from '../metrics/index.js'
 import { isNodeType, candidateToUpsertOperation } from '../types.js'
 import { buildObserverSystemPrompt, buildObserverUserPrompt, buildExtractSystemPrompt, buildExtractUserPrompt } from './prompts.js'
 import { parseObserverOutput, EMPTY_OUTPUT, parseExtractOutput, parseExtractOutputWithDiagnostics } from './parser.js'
@@ -109,6 +110,19 @@ export async function runExtractWithDiagnostics(params: ExtractParams): Promise<
       `[omg] Extract: post-validation rejected candidate with unknown type "${String(c.type)}" — this indicates a parser bug`,
     )
     return false
+  })
+
+  // Emit extract metrics
+  emitMetric({
+    stage: 'extract',
+    timestamp: new Date().toISOString(),
+    data: {
+      stage: 'extract',
+      candidatesCount: diagnostics.totalCandidates,
+      parserRejectCount: diagnostics.rejected.length,
+      parserRejectReasons: diagnostics.rejected.map((r) => r.reason),
+      writtenNodesCount: validatedCandidates.length,
+    },
   })
 
   return {

@@ -9,6 +9,7 @@
 
 import type { GraphNode, CompressionLevel } from '../types.js'
 import { serializeFrontmatter } from '../utils/frontmatter.js'
+import { serializeCompactPackets, type CompactNodePacket } from './compact-packet.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -187,6 +188,49 @@ export function buildReflectorUserPrompt(params: ReflectorUserPromptParams): str
       return `\`\`\`markdown\n${serialized}\n\`\`\``
     })
     parts.push(`## Nodes to Process\n\n${nodeBlocks.join('\n\n')}`)
+  }
+
+  return parts.join('\n\n')
+}
+
+// ---------------------------------------------------------------------------
+// Clustered user prompt
+// ---------------------------------------------------------------------------
+
+/** Parameters for building a domain-scoped clustered reflection prompt. */
+export interface ClusteredReflectorUserPromptParams {
+  /** Compact packets (not full nodes) — token-efficient input. */
+  readonly compactPackets: readonly CompactNodePacket[]
+  /** Compression level directive for this pass. */
+  readonly compressionLevel: CompressionLevel
+  /** Domain this cluster covers. */
+  readonly domain: string
+  /** Time range for context. */
+  readonly timeRange: { readonly start: string; readonly end: string }
+}
+
+/**
+ * Builds a domain-scoped user prompt using compact packets instead of full nodes.
+ * Adds domain context and time range for LLM grounding.
+ */
+export function buildClusteredReflectorUserPrompt(params: ClusteredReflectorUserPromptParams): string {
+  const { compactPackets, compressionLevel, domain, timeRange } = params
+  const parts: string[] = []
+
+  // --- Domain context ---
+  parts.push(
+    `## Domain Context\nThis reflection covers the '${domain}' domain, ` +
+    `from ${timeRange.start} to ${timeRange.end}.`
+  )
+
+  // --- Compression level directive ---
+  parts.push(`## Compression Level\n${compressionLevel}`)
+
+  // --- Compact node packets ---
+  if (compactPackets.length === 0) {
+    parts.push('## Nodes to Process\n(none)')
+  } else {
+    parts.push(`## Nodes to Process (${compactPackets.length} nodes)\n\n${serializeCompactPackets(compactPackets)}`)
   }
 
   return parts.join('\n\n')

@@ -85,6 +85,9 @@ function hydrateState(parsed: unknown): OmgSessionState {
     observationBoundaryMessageIndex: toNonNegativeNumber(obj['observationBoundaryMessageIndex']),
     nodeCount: toNonNegativeNumber(obj['nodeCount']),
     lastObservationNodeIds: toStringArray(obj['lastObservationNodeIds']),
+    ...(Array.isArray(obj['recentSourceFingerprints'])
+      ? { recentSourceFingerprints: toFingerprintArray(obj['recentSourceFingerprints']) }
+      : {}),
   }
 }
 
@@ -96,4 +99,18 @@ function toNonNegativeNumber(v: unknown): number {
 function toStringArray(v: unknown): string[] {
   if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string')
   return []
+}
+
+function toFingerprintArray(v: unknown): import('../observer/source-fingerprint.js').SourceFingerprint[] {
+  if (!Array.isArray(v)) return []
+  return v.filter((item): item is import('../observer/source-fingerprint.js').SourceFingerprint => {
+    if (item === null || typeof item !== 'object') return false
+    const obj = item as Record<string, unknown>
+    return (
+      Array.isArray(obj['shingleHashes']) &&
+      typeof obj['messageCount'] === 'number' &&
+      typeof obj['totalChars'] === 'number' &&
+      typeof obj['timestamp'] === 'string'
+    )
+  })
 }
