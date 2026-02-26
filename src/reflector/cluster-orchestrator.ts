@@ -75,13 +75,30 @@ export async function buildReflectionClusters(
 
   for (const cluster of allClusters) {
     const nodes: GraphNode[] = []
+    let hydrationFailures = 0
     for (const nodeId of cluster.nodeIds) {
       const entry = entryById.get(nodeId)
       if (!entry) continue
-      const node = await hydrateNode(entry.filePath)
-      if (node) {
-        nodes.push(node)
+      try {
+        const node = await hydrateNode(entry.filePath)
+        if (node) {
+          nodes.push(node)
+        } else {
+          hydrationFailures++
+        }
+      } catch (err) {
+        hydrationFailures++
+        console.warn(
+          `[omg] cluster-orchestrator: failed to hydrate node "${nodeId}" at ${entry.filePath}:`,
+          err instanceof Error ? err.message : String(err),
+        )
       }
+    }
+    if (hydrationFailures > 0) {
+      console.warn(
+        `[omg] cluster-orchestrator: ${hydrationFailures}/${cluster.nodeIds.length} node(s) ` +
+        `failed hydration in cluster ${cluster.domain}`,
+      )
     }
 
     if (nodes.length === 0) continue

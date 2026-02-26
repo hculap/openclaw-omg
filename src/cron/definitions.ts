@@ -132,6 +132,7 @@ export async function graphMaintenanceCronHandler(
       let totalEdits = 0
       let totalDeletions = 0
       let totalTokens = 0
+      let clusterFailures = 0
 
       for (const cluster of clusters) {
         try {
@@ -151,6 +152,7 @@ export async function graphMaintenanceCronHandler(
           totalDeletions += result.deletions.length
           totalTokens += result.tokensUsed
         } catch (err) {
+          clusterFailures++
           console.error(
             `[omg] cron omg-reflection: cluster ${cluster.domain} (${cluster.timeRange.start}..${cluster.timeRange.end}) failed:`,
             err,
@@ -160,7 +162,8 @@ export async function graphMaintenanceCronHandler(
 
       console.warn(
         `[omg] cron omg-reflection: clustered reflection — ${totalEdits} node(s) written, ` +
-          `${totalDeletions} archived, ${totalTokens} tokens across ${clusters.length} cluster(s)`
+          `${totalDeletions} archived, ${totalTokens} tokens across ${clusters.length} cluster(s)` +
+          (clusterFailures > 0 ? ` (${clusterFailures} cluster(s) FAILED)` : '')
       )
     } catch (err) {
       console.error('[omg] cron omg-reflection: clustered reflection failed:', err)

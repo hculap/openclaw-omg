@@ -3,9 +3,9 @@
  * for bounded reflection passes.
  *
  * Algorithm:
- *   1. Sort entries by `updatedAt` ascending.
+ *   1. Sort entries by `updated` ascending.
  *   2. Walk entries, accumulating into the current window.
- *   3. Split when: updatedAt - windowStart > windowSpanDays,
+ *   3. Split when: updated - windowStart > windowSpanDays,
  *      OR estimatedTokens > maxInputTokensPerCluster,
  *      OR nodeCount >= maxNodesPerCluster.
  */
@@ -33,7 +33,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000
 /**
  * Estimates the token footprint of a registry entry for budget purposes.
  * Uses description length as a proxy (body is not available at this stage).
- * A multiplier accounts for the fact that body is typically 5-10x longer.
+ * A fixed 8x multiplier on description tokens approximates the full body token count.
  */
 function estimateEntryTokens(entry: RegistryNodeEntry): number {
   const descTokens = estimateTokens(entry.description)

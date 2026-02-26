@@ -78,8 +78,7 @@ export function checkSourceOverlap(
   }
 
   if (maxOverlap >= guardrailConfig.truncateOverlapThreshold) {
-    // Estimate how many trailing messages are non-overlapping.
-    // Binary search for the suffix where overlap drops below truncateThreshold.
+    // Linear scan from full window downward to find the largest non-overlapping suffix.
     const truncatedCount = findNonOverlappingSuffix(messages, recentFingerprints, guardrailConfig.truncateOverlapThreshold)
     return {
       action: 'truncate',
@@ -98,15 +97,16 @@ export function checkSourceOverlap(
 }
 
 /**
- * Finds the number of trailing messages that form a non-overlapping suffix.
- * Starts from the end and grows backward until overlap exceeds threshold.
+ * Finds the largest trailing suffix of messages whose overlap with recent
+ * fingerprints falls below the given threshold. Scans from the full window
+ * downward, returning the first count where overlap is acceptable.
  */
 function findNonOverlappingSuffix(
   messages: readonly Message[],
   recentFingerprints: readonly SourceFingerprint[],
   threshold: number,
 ): number {
-  // Start with just the last message and grow backward
+  // Start with the full window and shrink until overlap is acceptable
   for (let count = messages.length; count >= 1; count--) {
     const suffix = messages.slice(messages.length - count)
     const fp = buildFingerprint(suffix)

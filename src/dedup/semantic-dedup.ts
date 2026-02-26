@@ -99,9 +99,12 @@ export async function runSemanticDedup(params: SemanticDedupParams): Promise<Sem
         const raw = await fs.readFile(filePath, 'utf-8')
         const { body } = parseFrontmatter(raw)
         nodeContents.set(nodeId, body.slice(0, sdConfig.maxBodyCharsPerNode))
-      } catch {
-        // Skip nodes we can't read — non-fatal
-        nodeContents.set(nodeId, '')
+      } catch (err) {
+        console.warn(
+          `[omg] semantic-dedup: failed to read node "${nodeId}" at ${filePath} — excluded from block:`,
+          err instanceof Error ? err.message : String(err),
+        )
+        // Do NOT add to nodeContents — skip the node entirely
       }
     }
 
@@ -140,7 +143,9 @@ export async function runSemanticDedup(params: SemanticDedupParams): Promise<Sem
         try {
           await appendAuditEntry(omgRoot, result.auditEntry)
         } catch (err) {
-          console.error(`[omg] semantic-dedup: failed to append audit for "${suggestion.keepNodeId}":`, err)
+          const msg = `Failed to append audit for "${suggestion.keepNodeId}": ${err instanceof Error ? err.message : String(err)}`
+          console.error('[omg] semantic-dedup:', msg)
+          errors.push(msg)
         }
       } catch (err) {
         const msg = `Merge failed for keeper "${suggestion.keepNodeId}": ${err instanceof Error ? err.message : String(err)}`
@@ -201,8 +206,11 @@ function parseLlmResponse(
   let parsed: unknown
   try {
     parsed = JSON.parse(jsonContent)
-  } catch {
-    console.error('[omg] semantic-dedup: LLM returned non-JSON:', content.slice(0, 200))
+  } catch (err) {
+    console.error(
+      `[omg] semantic-dedup: LLM returned non-JSON (${err instanceof Error ? err.message : 'unknown error'}):`,
+      content.slice(0, 300),
+    )
     return null
   }
 

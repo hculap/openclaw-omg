@@ -63,15 +63,11 @@ export function resolvePrimaryDomain(entry: RegistryNodeEntry): string {
 export function assignDomains(
   entries: readonly [string, RegistryNodeEntry][],
 ): ReadonlyMap<string, readonly [string, RegistryNodeEntry][]> {
-  const result = new Map<string, [string, RegistryNodeEntry][]>()
+  const result = new Map<string, readonly [string, RegistryNodeEntry][]>()
   for (const pair of entries) {
     const domain = resolvePrimaryDomain(pair[1])
     const existing = result.get(domain)
-    if (existing) {
-      existing.push(pair)
-    } else {
-      result.set(domain, [pair])
-    }
+    result.set(domain, existing ? [...existing, pair] : [pair])
   }
   return result
 }

@@ -6,12 +6,12 @@
  * reducing token usage per cluster.
  */
 
-import type { GraphNode } from '../types.js'
+import type { GraphNode, NodeType } from '../types.js'
 
 /** A compact representation of a node for reflection input. */
 export interface CompactNodePacket {
   readonly canonicalKey: string
-  readonly type: string
+  readonly type: NodeType
   readonly description: string
   readonly summaryLines: readonly string[]
   readonly recentUpdates: readonly string[]
@@ -31,7 +31,7 @@ const MAX_RECENT_UPDATES = 3
  * Builds a compact packet from a full GraphNode.
  *
  * Extracts the first ~10 non-empty lines of the body as summary,
- * the last 1-3 bullets from an `## Updates` section (if present),
+ * up to the last 3 bullets from an `## Updates` section (if present),
  * and the first 5 links from frontmatter.
  */
 export function buildCompactPacket(node: GraphNode): CompactNodePacket {
@@ -76,7 +76,8 @@ function extractRecentUpdates(body: string): readonly string[] {
 /**
  * Serializes an array of compact packets into a string for LLM prompt injection.
  *
- * Format: one fenced block per packet with key metadata fields.
+ * Format: one markdown section (### heading) per packet, separated by
+ * horizontal rules, with key metadata as bold-prefixed fields.
  */
 export function serializeCompactPackets(packets: readonly CompactNodePacket[]): string {
   return packets.map((packet) => {

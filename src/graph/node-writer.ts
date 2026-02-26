@@ -78,8 +78,11 @@ async function readExistingCreated(filePath: string): Promise<string | null> {
     const { frontmatter } = parseFrontmatter(raw)
     const created = frontmatter['created']
     return typeof created === 'string' ? created : null
-  } catch {
-    // Malformed frontmatter is recoverable — fall back to current time.
+  } catch (err) {
+    console.warn(
+      `[omg] node-writer: readExistingCreated — frontmatter parse failed for ${filePath}, using current time:`,
+      err instanceof Error ? err.message : String(err),
+    )
     return null
   }
 }
@@ -263,7 +266,7 @@ export async function writeObservationNode(
     try {
       await registerNode(context.omgRoot, node.frontmatter.id, buildRegistryEntry(node, 'observation'))
     } catch (err) {
-      console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id}:`, err)
+      console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id} (node written to disk but invisible to registry):`, err)
     }
     return node
   }
@@ -275,7 +278,7 @@ export async function writeObservationNode(
   try {
     await registerNode(context.omgRoot, frontmatter.id, buildRegistryEntry(node, 'observation'))
   } catch (err) {
-    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id}:`, err)
+    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id} (node written to disk but invisible to registry):`, err)
   }
   return node
 }
@@ -294,7 +297,7 @@ export async function writeReflectionNode(
   try {
     await registerNode(context.omgRoot, node.frontmatter.id, buildRegistryEntry(written, 'reflection'))
   } catch (err) {
-    console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id}:`, err)
+    console.error(`[omg] node-writer: registry update failed for ${node.frontmatter.id} (node written to disk but invisible to registry):`, err)
   }
   return written
 }
@@ -337,7 +340,7 @@ export async function writeClusteredReflectionNode(
   try {
     await registerNode(context.omgRoot, frontmatter.id, buildRegistryEntry(written, 'reflection'))
   } catch (err) {
-    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id}:`, err)
+    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id} (node written to disk but invisible to registry):`, err)
   }
 
   return written
@@ -382,7 +385,7 @@ export async function writeNowNode(
   try {
     await registerNode(context.omgRoot, 'omg/now', buildRegistryEntry(node, 'observation'))
   } catch (err) {
-    console.error('[omg] node-writer: registry update failed for omg/now:', err)
+    console.error('[omg] node-writer: registry update failed for omg/now (node written to disk but invisible to registry):', err)
   }
   return node
 }

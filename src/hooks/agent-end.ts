@@ -148,7 +148,16 @@ export async function tryRunObservation(
   }
 
   // ── Post-Extract: Guardrail candidate suppression ────────────────────────
-  const allRegistryEntries = await getRegistryEntries(omgRoot)
+  let allRegistryEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
+  try {
+    allRegistryEntries = await getRegistryEntries(omgRoot)
+  } catch (err) {
+    console.error(
+      `[omg] agent_end [${sessionKey}]: registry read failed for guardrail suppression — proceeding with all candidates:`,
+      err,
+    )
+    allRegistryEntries = []
+  }
   let filteredCandidates = extractOutput.candidates
 
   if (config.extractionGuardrails.enabled && state.lastObservationNodeIds.length > 0) {

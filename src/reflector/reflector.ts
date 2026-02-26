@@ -152,8 +152,11 @@ async function applyNodeFieldUpdate(
     const parsed = parseFrontmatter(raw)
     frontmatterRecord = { ...parsed.frontmatter }
     body = parsed.body
-  } catch {
-    console.warn(`[omg] Reflector: skipping node-update for "${nodeId}" — frontmatter parse failed`)
+  } catch (err) {
+    console.warn(
+      `[omg] Reflector: skipping node-update for "${nodeId}" — frontmatter parse failed:`,
+      err instanceof Error ? err.message : String(err),
+    )
     return
   }
 

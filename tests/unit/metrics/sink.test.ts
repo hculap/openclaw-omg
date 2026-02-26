@@ -15,9 +15,9 @@ const { emitMetric, appendMetricsFile } = await import('../../../src/metrics/sin
 
 const OMG_ROOT = '/workspace/memory/omg'
 
-function makeEvent(stage = 'extract'): MetricEvent {
+function makeExtractEvent(): MetricEvent {
   return {
-    stage,
+    stage: 'extract',
     timestamp: '2026-01-01T00:00:00Z',
     data: {
       stage: 'extract',
@@ -25,6 +25,22 @@ function makeEvent(stage = 'extract'): MetricEvent {
       parserRejectCount: 1,
       parserRejectReasons: ['missing canonicalKey'],
       writtenNodesCount: 4,
+    },
+  }
+}
+
+function makeReflectionEvent(): MetricEvent {
+  return {
+    stage: 'reflection',
+    timestamp: '2026-01-01T00:00:00Z',
+    data: {
+      stage: 'reflection',
+      clusterCount: 2,
+      nodesPerCluster: [3, 4],
+      tokensInPerCluster: [100, 200],
+      tokensOutPerCluster: [50, 75],
+      reflectionNodesWritten: 1,
+      nodesArchived: 0,
     },
   }
 }
@@ -41,7 +57,7 @@ describe('emitMetric', () => {
   })
 
   it('writes structured JSON to console.warn with [omg:metrics] prefix', () => {
-    const event = makeEvent()
+    const event = makeExtractEvent()
     emitMetric(event)
 
     expect(warnSpy).toHaveBeenCalledOnce()
@@ -59,7 +75,7 @@ describe('appendMetricsFile', () => {
   })
 
   it('creates .metrics.jsonl and appends a line', async () => {
-    const event = makeEvent()
+    const event = makeExtractEvent()
     await appendMetricsFile(OMG_ROOT, event)
 
     const content = vol.readFileSync(`${OMG_ROOT}/.metrics.jsonl`, 'utf-8') as string
@@ -71,8 +87,8 @@ describe('appendMetricsFile', () => {
   })
 
   it('appends multiple events', async () => {
-    await appendMetricsFile(OMG_ROOT, makeEvent('extract'))
-    await appendMetricsFile(OMG_ROOT, makeEvent('reflection'))
+    await appendMetricsFile(OMG_ROOT, makeExtractEvent())
+    await appendMetricsFile(OMG_ROOT, makeReflectionEvent())
 
     const content = vol.readFileSync(`${OMG_ROOT}/.metrics.jsonl`, 'utf-8') as string
     const lines = content.trim().split('\n')
@@ -82,7 +98,7 @@ describe('appendMetricsFile', () => {
   it('does not throw on filesystem error', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     // Write to a path that doesn't exist and can't be created
-    await expect(appendMetricsFile('/nonexistent/readonly/path', makeEvent())).resolves.toBeUndefined()
+    await expect(appendMetricsFile('/nonexistent/readonly/path', makeExtractEvent())).resolves.toBeUndefined()
     errorSpy.mockRestore()
   })
 })

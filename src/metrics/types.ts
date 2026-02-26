@@ -60,9 +60,12 @@ export interface GuardrailMetrics {
   readonly candidatesSurvived: number
 }
 
+/** Union of all metric payload types. */
+export type MetricData = ExtractMetrics | ReflectionMetrics | SelectorMetrics | ErrorMetrics | SemanticDedupMetrics | GuardrailMetrics
+
 /** A timestamped metric event carrying one of the metric payloads. */
 export interface MetricEvent {
-  readonly stage: string
+  readonly stage: MetricData['stage']
   readonly timestamp: string
-  readonly data: ExtractMetrics | ReflectionMetrics | SelectorMetrics | ErrorMetrics | SemanticDedupMetrics | GuardrailMetrics
+  readonly data: MetricData
 }

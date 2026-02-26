@@ -153,7 +153,7 @@ const observationSchema = z
       .number()
       .int()
       .positive('messageTokenThreshold must be a positive integer')
-      .default(80_000),
+      .default(8_000),
     /**
      * How observation runs are triggered:
      * - "threshold" — automatically when messageTokenThreshold is reached (default)
