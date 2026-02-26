@@ -182,7 +182,8 @@ Old content.`,
 
     const reflectionCalls = vi.mocked(runReflection).mock.calls
     if (reflectionCalls.length > 0) {
-      expect(reflectionCalls[0]![0].sessionKey).toBe('cron:omg-reflection')
+      // Clustered mode (default) uses domain-scoped session keys
+      expect(reflectionCalls[0]![0].sessionKey).toMatch(/^cron:omg-reflection/)
     }
   })
 

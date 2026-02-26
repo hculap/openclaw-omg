@@ -194,6 +194,8 @@ export interface NodeFrontmatter {
   readonly aliases?: readonly string[]
   /** Node ID this node was merged into during semantic dedup. Set when the node is archived by the dedup process. */
   readonly mergedInto?: string
+  /** IDs of nodes that were merged into this node (provenance trail). Append-only. */
+  readonly mergedFrom?: readonly string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +430,8 @@ export interface OmgSessionState {
   readonly nodeCount: number
   /** IDs of nodes written during the most recent Observer run. Empty if no observation has run. */
   readonly lastObservationNodeIds: readonly string[]
+  /** Rolling window of recent source fingerprints for extraction guardrail overlap detection. */
+  readonly recentSourceFingerprints?: readonly import('./observer/source-fingerprint.js').SourceFingerprint[]
 }
 
 /**
@@ -458,6 +462,7 @@ export function createOmgSessionState(
     readonly observationBoundaryMessageIndex: number
     readonly nodeCount: number
     readonly lastObservationNodeIds: readonly string[]
+    readonly recentSourceFingerprints?: readonly import('./observer/source-fingerprint.js').SourceFingerprint[]
   },
   previousTotalObservationTokens?: number
 ): OmgSessionState {

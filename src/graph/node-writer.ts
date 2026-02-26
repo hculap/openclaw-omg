@@ -299,6 +299,50 @@ export async function writeReflectionNode(
   return written
 }
 
+/** Parameters for writing a domain-scoped clustered reflection node. */
+export interface ClusteredReflectionParams {
+  readonly frontmatter: NodeFrontmatter
+  readonly body: string
+  readonly sourceNodeIds: readonly string[]
+  /** Domain slug used for directory scoping. */
+  readonly domain: string
+  /** Time range for deterministic file naming. */
+  readonly timeRange: { readonly start: string; readonly end: string }
+}
+
+/**
+ * Writes a clustered reflection node to a deterministic, domain-scoped path.
+ *
+ * File location: {omgRoot}/reflections/{domain}/{start}__{end}.md
+ *
+ * Reruns overwrite the same file (idempotent, deterministic path).
+ */
+export async function writeClusteredReflectionNode(
+  params: ClusteredReflectionParams,
+  context: WriteContext,
+): Promise<GraphNode> {
+  const { frontmatter, body, domain, timeRange } = params
+  const dir = join(context.omgRoot, 'reflections', slugify(domain))
+  await ensureDir(dir)
+
+  const startDate = timeRange.start.slice(0, 10)
+  const endDate = timeRange.end.slice(0, 10)
+  const filePath = join(dir, `${startDate}__${endDate}.md`)
+
+  const content = serializeFrontmatter(frontmatterToRecord(frontmatter), body)
+  await atomicWrite(filePath, content)
+
+  const written: GraphNode = { frontmatter, body, filePath }
+
+  try {
+    await registerNode(context.omgRoot, frontmatter.id, buildRegistryEntry(written, 'reflection'))
+  } catch (err) {
+    console.error(`[omg] node-writer: registry update failed for ${frontmatter.id}:`, err)
+  }
+
+  return written
+}
+
 /**
  * Writes (or overwrites) the singleton now.md node.
  *

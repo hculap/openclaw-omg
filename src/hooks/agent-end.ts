@@ -16,6 +16,9 @@ import { findMergeTargets, shouldMerge, DEFAULT_MERGE_RETRIEVAL_CONFIG } from '.
 import type { MergeRetrievalConfig } from '../observer/retrieval.js'
 import { renderNowPatch, shouldUpdateNow } from '../observer/now-renderer.js'
 import type { MemoryTools } from '../context/memory-search.js'
+import { checkSourceOverlap, suppressDuplicateCandidates, updateRecentFingerprints } from '../observer/extraction-guardrails.js'
+import { buildFingerprint, type SourceFingerprint } from '../observer/source-fingerprint.js'
+import { emitMetric } from '../metrics/index.js'
 import path from 'node:path'
 
 // ---------------------------------------------------------------------------
@@ -91,11 +94,46 @@ export async function tryRunObservation(
   sessionKey: string,
   memoryTools: MemoryTools | null = null
 ): Promise<OmgSessionState> {
+  // ── Pre-Extract: Guardrail overlap check ────────────────────────────────
+  const unobservedMessages = Array.from(messages.slice(state.observationBoundaryMessageIndex))
+
+  if (config.extractionGuardrails.enabled) {
+    const recentFingerprints = state.recentSourceFingerprints ?? []
+    const decision = checkSourceOverlap(unobservedMessages, recentFingerprints, config)
+
+    if (decision.action === 'skip') {
+      console.warn(
+        `[omg] agent_end [${sessionKey}]: guardrail SKIP — overlap ${(decision.overlapScore * 100).toFixed(1)}% ` +
+        `exceeds threshold (${unobservedMessages.length} messages)`
+      )
+      emitMetric({
+        stage: 'guardrail',
+        timestamp: new Date().toISOString(),
+        data: {
+          stage: 'guardrail',
+          overlapScore: decision.overlapScore,
+          action: 'skip',
+          candidatesSuppressed: 0,
+          candidatesSurvived: 0,
+        },
+      })
+      return state
+    }
+
+    if (decision.action === 'truncate' && decision.filteredMessageCount < unobservedMessages.length) {
+      const truncated = unobservedMessages.length - decision.filteredMessageCount
+      console.warn(
+        `[omg] agent_end [${sessionKey}]: guardrail TRUNCATE — overlap ${(decision.overlapScore * 100).toFixed(1)}%, ` +
+        `keeping ${decision.filteredMessageCount}/${unobservedMessages.length} messages (${truncated} dropped)`
+      )
+      unobservedMessages.splice(0, unobservedMessages.length - decision.filteredMessageCount)
+    }
+  }
+
   // ── Step A: Extract ───────────────────────────────────────────────────────
   // Do NOT advance boundary/reset tokens on failure — preserves retry semantics.
   let extractOutput!: ExtractOutput
   try {
-    const unobservedMessages = Array.from(messages.slice(state.observationBoundaryMessageIndex))
     const nowContent = await readFileOrNull(path.join(omgRoot, 'now.md'))
     extractOutput = await runExtract({
       unobservedMessages,
@@ -109,17 +147,45 @@ export async function tryRunObservation(
     return state
   }
 
+  // ── Post-Extract: Guardrail candidate suppression ────────────────────────
+  const allRegistryEntries = await getRegistryEntries(omgRoot)
+  let filteredCandidates = extractOutput.candidates
+
+  if (config.extractionGuardrails.enabled && state.lastObservationNodeIds.length > 0) {
+    const { survivors, suppressed } = suppressDuplicateCandidates(
+      extractOutput.candidates,
+      state.lastObservationNodeIds,
+      allRegistryEntries,
+      config,
+    )
+    if (suppressed.length > 0) {
+      console.warn(
+        `[omg] agent_end [${sessionKey}]: guardrail suppressed ${suppressed.length} candidate(s): ${suppressed.join(', ')}`
+      )
+    }
+    filteredCandidates = survivors
+    emitMetric({
+      stage: 'guardrail',
+      timestamp: new Date().toISOString(),
+      data: {
+        stage: 'guardrail',
+        overlapScore: 0,
+        action: 'proceed',
+        candidatesSuppressed: suppressed.length,
+        candidatesSurvived: survivors.length,
+      },
+    })
+  }
+
   // ── Step B+C: Merge decision + Write ─────────────────────────────────────
   // For each candidate, find merge targets → decide → apply action.
   // Partial failures are tolerated via Promise.allSettled pattern.
   const writtenIds: string[] = []
   let writeFailureCount = 0
 
-  const allRegistryEntries = await getRegistryEntries(omgRoot)
-
   const mergeConfig = buildMergeRetrievalConfig(config)
 
-  for (const candidate of extractOutput.candidates) {
+  for (const candidate of filteredCandidates) {
     try {
       // Find merge targets (local + optional semantic)
       const targets = await findMergeTargets(candidate, allRegistryEntries, memoryTools, mergeConfig)
@@ -214,7 +280,7 @@ export async function tryRunObservation(
   }
 
   // If no nodes were written and there were candidates, fail-safe: preserve state for retry.
-  if (writtenIds.length === 0 && extractOutput.candidates.length > 0 && writeFailureCount === extractOutput.candidates.length) {
+  if (writtenIds.length === 0 && filteredCandidates.length > 0 && writeFailureCount === filteredCandidates.length) {
     console.error(`[omg] agent_end [${sessionKey}]: all candidate writes/merges failed — state preserved for retry`)
     return state
   }
@@ -271,6 +337,15 @@ export async function tryRunObservation(
   // createOmgSessionState validates invariants and can throw OmgSessionStateError;
   // catching here preserves the "never throws" contract of tryRunObservation.
   const tokensUsed = writtenIds.length > 0 ? state.pendingMessageTokens : 0
+  // Update fingerprints for guardrail overlap detection
+  const updatedFingerprints = config.extractionGuardrails.enabled
+    ? updateRecentFingerprints(
+        state.recentSourceFingerprints ?? [],
+        buildFingerprint(unobservedMessages),
+        config.extractionGuardrails.recentWindowSize,
+      )
+    : state.recentSourceFingerprints
+
   let updatedState: OmgSessionState
   try {
     updatedState = createOmgSessionState(
@@ -282,6 +357,7 @@ export async function tryRunObservation(
         observationBoundaryMessageIndex: messages.length,
         nodeCount: state.nodeCount + writtenIds.length,
         lastObservationNodeIds: writtenIds,
+        ...(updatedFingerprints ? { recentSourceFingerprints: updatedFingerprints } : {}),
       },
       state.totalObservationTokens
     )

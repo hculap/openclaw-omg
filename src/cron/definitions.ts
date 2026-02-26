@@ -10,7 +10,9 @@ import fs from 'node:fs'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
 import { runReflection } from '../reflector/reflector.js'
+import { buildReflectionClusters } from '../reflector/cluster-orchestrator.js'
 import { runDedup } from '../dedup/dedup.js'
+import { runSemanticDedup } from '../dedup/semantic-dedup.js'
 import { runBootstrapTick } from '../bootstrap/bootstrap.js'
 import { readBootstrapState, writeBootstrapState, markMaintenanceDone } from '../bootstrap/state.js'
 import { readGraphNode } from '../graph/node-reader.js'
@@ -70,6 +72,19 @@ export async function graphMaintenanceCronHandler(
     console.error('[omg] cron omg-reflection: dedup failed (continuing to reflection):', err)
   }
 
+  // Step 1.5: Semantic dedup (post-literal, gated by config)
+  if (ctx.config.semanticDedup.enabled) {
+    try {
+      const sdResult = await runSemanticDedup({ omgRoot, config: ctx.config, llmClient: ctx.llmClient })
+      console.warn(
+        `[omg] cron omg-reflection: semantic-dedup — ${sdResult.mergesExecuted} merge(s), ` +
+          `${sdResult.nodesArchived} archived, ${sdResult.tokensUsed} tokens`
+      )
+    } catch (err) {
+      console.error('[omg] cron omg-reflection: semantic-dedup failed (continuing to reflection):', err)
+    }
+  }
+
   // Step 2: Reflection pass over aged non-archived nodes
   // ageCutoffMs=0 means "no age cap" (all nodes eligible); undefined uses the 7-day default.
   const cutoffMs = ageCutoffMs === 0
@@ -95,38 +110,96 @@ export async function graphMaintenanceCronHandler(
     return
   }
 
-  const nodeIds = eligibleEntries.map(([id]) => id)
-  let observationNodes: Awaited<ReturnType<typeof readGraphNode>>[]
-  try {
-    const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
-    observationNodes = await Promise.all(
-      [...filePaths.values()].map((fp) => readGraphNode(fp))
-    )
-  } catch (err) {
-    console.error('[omg] cron omg-reflection: failed to hydrate nodes for reflection:', err)
-    return
-  }
-  const validNodes = observationNodes.filter((n): n is NonNullable<typeof n> => n !== null)
+  // Step 3: Clustered or monolithic reflection
+  const clusteringEnabled = ctx.config.reflection.clustering.enabled
 
-  if (validNodes.length === 0) {
-    console.warn('[omg] cron omg-reflection: no valid nodes for reflection after hydration')
-    return
-  }
+  if (clusteringEnabled) {
+    // --- Clustered reflection ---
+    try {
+      const clusters = await buildReflectionClusters(
+        eligibleEntries,
+        ctx.config,
+        (filePath: string) => readGraphNode(filePath),
+      )
 
-  try {
-    const result = await runReflection({
-      observationNodes: validNodes,
-      config: ctx.config,
-      llmClient: ctx.llmClient,
-      omgRoot,
-      sessionKey: 'cron:omg-reflection',
-    })
-    console.warn(
-      `[omg] cron omg-reflection: reflection — ${result.edits.length} node(s) written, ` +
-        `${result.deletions.length} archived, ${result.tokensUsed} tokens`
-    )
-  } catch (err) {
-    console.error('[omg] cron omg-reflection: reflection pass failed:', err)
+      if (clusters.length === 0) {
+        console.warn('[omg] cron omg-reflection: no clusters produced from eligible entries')
+        return
+      }
+
+      console.warn(`[omg] cron omg-reflection: ${clusters.length} cluster(s) across ${new Set(clusters.map((c) => c.domain)).size} domain(s)`)
+
+      let totalEdits = 0
+      let totalDeletions = 0
+      let totalTokens = 0
+
+      for (const cluster of clusters) {
+        try {
+          const result = await runReflection({
+            observationNodes: cluster.nodes,
+            config: ctx.config,
+            llmClient: ctx.llmClient,
+            omgRoot,
+            sessionKey: `cron:omg-reflection:${cluster.domain}`,
+            cluster: {
+              domain: cluster.domain,
+              timeRange: cluster.timeRange,
+              compactPackets: cluster.compactPackets,
+            },
+          })
+          totalEdits += result.edits.length
+          totalDeletions += result.deletions.length
+          totalTokens += result.tokensUsed
+        } catch (err) {
+          console.error(
+            `[omg] cron omg-reflection: cluster ${cluster.domain} (${cluster.timeRange.start}..${cluster.timeRange.end}) failed:`,
+            err,
+          )
+        }
+      }
+
+      console.warn(
+        `[omg] cron omg-reflection: clustered reflection — ${totalEdits} node(s) written, ` +
+          `${totalDeletions} archived, ${totalTokens} tokens across ${clusters.length} cluster(s)`
+      )
+    } catch (err) {
+      console.error('[omg] cron omg-reflection: clustered reflection failed:', err)
+    }
+  } else {
+    // --- Monolithic reflection (backward compat) ---
+    const nodeIds = eligibleEntries.map(([id]) => id)
+    let observationNodes: Awaited<ReturnType<typeof readGraphNode>>[]
+    try {
+      const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
+      observationNodes = await Promise.all(
+        [...filePaths.values()].map((fp) => readGraphNode(fp))
+      )
+    } catch (err) {
+      console.error('[omg] cron omg-reflection: failed to hydrate nodes for reflection:', err)
+      return
+    }
+    const validNodes = observationNodes.filter((n): n is NonNullable<typeof n> => n !== null)
+
+    if (validNodes.length === 0) {
+      console.warn('[omg] cron omg-reflection: no valid nodes for reflection after hydration')
+      return
+    }
+
+    try {
+      const result = await runReflection({
+        observationNodes: validNodes,
+        config: ctx.config,
+        llmClient: ctx.llmClient,
+        omgRoot,
+        sessionKey: 'cron:omg-reflection',
+      })
+      console.warn(
+        `[omg] cron omg-reflection: reflection — ${result.edits.length} node(s) written, ` +
+          `${result.deletions.length} archived, ${result.tokensUsed} tokens`
+      )
+    } catch (err) {
+      console.error('[omg] cron omg-reflection: reflection pass failed:', err)
+    }
   }
 }
 

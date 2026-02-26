@@ -4,6 +4,7 @@ import type { RegistryNodeEntry } from '../graph/registry.js'
 import type { MemoryTools, SemanticCandidate } from './memory-search.js'
 import { buildSearchQuery, buildSemanticCandidates } from './memory-search.js'
 import { estimateTokens } from '../utils/tokens.js'
+import { emitMetric } from '../metrics/index.js'
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -178,18 +179,20 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
 
   // When no semantic signal, delegate to selectContext directly
   if (semanticByPath.size === 0 || injection.semantic.weight === 0) {
-    return selectContext({
+    const result = selectContext({
       indexContent,
       nowContent,
       allNodes: [...hydratedMocs, ...hydratedRegular],
       recentMessages,
       config,
     })
+    emitSelectorMetrics(result, semanticCandidates.length)
+    return result
   }
 
   // With semantic signal: apply hybrid scoring on hydrated nodes, then use
   // selectContext-like logic with the pre-sorted nodes
-  return selectContextWithSemanticBoost({
+  const result = selectContextWithSemanticBoost({
     indexContent,
     nowContent,
     hydratedMocs,
@@ -198,6 +201,43 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     config,
     semanticByPath,
     semanticWeight: injection.semantic.weight,
+  })
+  emitSelectorMetrics(result, semanticCandidates.length)
+  return result
+}
+
+function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: number): void {
+  const allNodes = [...slice.mocs, ...slice.nodes]
+  if (slice.nowNode) allNodes.push(slice.nowNode)
+
+  const injectedChars = slice.index.length +
+    allNodes.reduce((sum, n) => sum + n.body.length + n.frontmatter.description.length, 0)
+
+  const selectedNodeCountByType: Record<string, number> = {}
+  const selectedNodeCountByDomain: Record<string, number> = {}
+
+  for (const node of allNodes) {
+    const type = node.frontmatter.type
+    selectedNodeCountByType[type] = (selectedNodeCountByType[type] ?? 0) + 1
+
+    // Domain from first omg/moc-* link
+    const links = node.frontmatter.links ?? []
+    const mocLink = links.find((l) => l.startsWith('omg/moc-'))
+    const domain = mocLink ? mocLink.replace('omg/moc-', '') : 'misc'
+    selectedNodeCountByDomain[domain] = (selectedNodeCountByDomain[domain] ?? 0) + 1
+  }
+
+  emitMetric({
+    stage: 'selector',
+    timestamp: new Date().toISOString(),
+    data: {
+      stage: 'selector',
+      injectedChars,
+      injectedTokens: slice.estimatedTokens,
+      selectedNodeCountByType,
+      selectedNodeCountByDomain,
+      memorySearchHitCount,
+    },
   })
 }
 

@@ -13,13 +13,15 @@ import type { GraphNode, ReflectorOutput, ReflectorNodeEdit, CompressionLevel } 
 import { createReflectorOutput } from '../types.js'
 import type { OmgConfig } from '../config.js'
 import type { LlmClient } from '../llm/client.js'
-import { buildReflectorSystemPrompt, buildReflectorUserPrompt } from './prompts.js'
+import { buildReflectorSystemPrompt, buildReflectorUserPrompt, buildClusteredReflectorUserPrompt } from './prompts.js'
+import type { CompactNodePacket } from './compact-packet.js'
 import { parseReflectorOutput, type ReflectorXmlOutput } from './parser.js'
-import { writeReflectionNode } from '../graph/node-writer.js'
+import { writeReflectionNode, writeClusteredReflectionNode } from '../graph/node-writer.js'
 import { getRegistryEntry, updateRegistryEntry } from '../graph/registry.js'
 import { readGraphNode } from '../graph/node-reader.js'
 import { applyMocUpdate } from '../graph/moc-manager.js'
 import { estimateTokens } from '../utils/tokens.js'
+import { emitMetric } from '../metrics/index.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
 import { resolveMocPath } from '../utils/paths.js'
@@ -46,6 +48,15 @@ export interface ReflectionParams {
   readonly sessionKey: string
   /** Maximum compression level to attempt before accepting results. Default: 3. */
   readonly maxCompressionLevel?: CompressionLevel
+  /**
+   * When set, switches to clustered reflection mode:
+   * uses compact packets, domain-scoped prompts, and deterministic paths.
+   */
+  readonly cluster?: {
+    readonly domain: string
+    readonly timeRange: { readonly start: string; readonly end: string }
+    readonly compactPackets?: readonly CompactNodePacket[]
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +262,7 @@ async function findNodeById(nodeId: string, omgRoot: string): Promise<GraphNode 
  * Never throws — errors are caught and logged. Returns empty output on LLM failure.
  */
 export async function runReflection(params: ReflectionParams): Promise<ReflectorOutput> {
-  const { observationNodes, config, llmClient, omgRoot, sessionKey, maxCompressionLevel = 3 } = params
+  const { observationNodes, config, llmClient, omgRoot, sessionKey, maxCompressionLevel = 3, cluster } = params
 
   if (observationNodes.length === 0) {
     return emptyOutput()
@@ -265,10 +276,18 @@ export async function runReflection(params: ReflectionParams): Promise<Reflector
   let totalTokensUsed = 0
 
   for (let level = 0 as CompressionLevel; level <= maxCompressionLevel; level++) {
-    const user = buildReflectorUserPrompt({
-      nodes: observationNodes,
-      compressionLevel: level as CompressionLevel,
-    })
+    // Build prompt: clustered mode uses compact packets + domain context
+    const user = cluster?.compactPackets
+      ? buildClusteredReflectorUserPrompt({
+          compactPackets: cluster.compactPackets,
+          compressionLevel: level as CompressionLevel,
+          domain: cluster.domain,
+          timeRange: cluster.timeRange,
+        })
+      : buildReflectorUserPrompt({
+          nodes: observationNodes,
+          compressionLevel: level as CompressionLevel,
+        })
 
     let responseContent: string
     let responseTokens: number
@@ -336,7 +355,20 @@ export async function runReflection(params: ReflectionParams): Promise<Reflector
         ...(spec.sources.length > 0 ? { links: spec.sources } : {}),
         compressionLevel: spec.compressionLevel,
       }
-      const written = await writeReflectionNode({ frontmatter, body: spec.body, sourceNodeIds: spec.sources }, writeContext)
+
+      // Clustered mode: use deterministic domain-scoped paths
+      const written = cluster
+        ? await writeClusteredReflectionNode(
+            {
+              frontmatter,
+              body: spec.body,
+              sourceNodeIds: spec.sources,
+              domain: cluster.domain,
+              timeRange: cluster.timeRange,
+            },
+            writeContext,
+          )
+        : await writeReflectionNode({ frontmatter, body: spec.body, sourceNodeIds: spec.sources }, writeContext)
       return { spec, written }
     }),
   )
@@ -410,6 +442,21 @@ export async function runReflection(params: ReflectionParams): Promise<Reflector
       )
     }
   }
+
+  // Emit reflection metrics
+  emitMetric({
+    stage: 'reflection',
+    timestamp: new Date().toISOString(),
+    data: {
+      stage: 'reflection',
+      clusterCount: cluster ? 1 : 0,
+      nodesPerCluster: [observationNodes.length],
+      tokensInPerCluster: [totalTokensUsed],
+      tokensOutPerCluster: [edits.reduce((sum, e) => sum + estimateTokens(e.body), 0)],
+      reflectionNodesWritten: edits.length,
+      nodesArchived: xmlOutput.archiveNodeIds.length,
+    },
+  })
 
   try {
     return createReflectorOutput(edits, xmlOutput.archiveNodeIds, totalTokensUsed)

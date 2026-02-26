@@ -165,6 +165,40 @@ const observationSchema = z
   .strip()
 
 /**
+ * Controls cluster-first reflection: groups eligible nodes by domain and time
+ * window before sending each cluster to the LLM for domain-scoped reflection.
+ */
+const clusteringSchema = z
+  .object({
+    /** Enable cluster-first reflection. When false, uses monolithic reflection. */
+    enabled: z.boolean().default(true),
+    /** Time window in days for grouping nodes into clusters. */
+    windowSpanDays: z
+      .number()
+      .int()
+      .min(1, 'clustering.windowSpanDays must be at least 1')
+      .max(30, 'clustering.windowSpanDays must be at most 30')
+      .default(7),
+    /** Maximum number of nodes per cluster. */
+    maxNodesPerCluster: z
+      .number()
+      .int()
+      .min(5, 'clustering.maxNodesPerCluster must be at least 5')
+      .max(100, 'clustering.maxNodesPerCluster must be at most 100')
+      .default(25),
+    /** Maximum estimated input tokens per cluster. */
+    maxInputTokensPerCluster: z
+      .number()
+      .int()
+      .min(1000, 'clustering.maxInputTokensPerCluster must be at least 1000')
+      .max(20000, 'clustering.maxInputTokensPerCluster must be at most 20000')
+      .default(8000),
+    /** Enable anchor-based splitting for oversized clusters. */
+    enableAnchorSplit: z.boolean().default(false),
+  })
+  .strip()
+
+/**
  * Controls scheduling parameters for the Reflector agent's reflection passes.
  * A reflection pass is triggered when either condition is met:
  *   - OmgSessionState.totalObservationTokens exceeds observationTokenThreshold, or
@@ -186,6 +220,8 @@ const reflectionSchema = z
      * Example: "0 3 * * *" runs at 3 AM daily.
      */
     cronSchedule: cronField.default('0 3 * * *'),
+    /** Cluster-first reflection configuration. */
+    clustering: clusteringSchema.default({}),
   })
   .strip()
 
@@ -290,6 +326,122 @@ const identitySchema = z
   })
   .strip()
   .default({ mode: 'session-key' })
+
+// ---------------------------------------------------------------------------
+// Semantic dedup schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls the LLM-based semantic dedup pass that runs after literal dedup.
+ * Uses batched LLM comparison on candidate blocks to detect near-duplicates
+ * that heuristic similarity misses.
+ */
+const semanticDedupSchema = z
+  .object({
+    /** Enable semantic dedup. When false, the pass is skipped entirely. */
+    enabled: z.boolean().default(true),
+    /**
+     * Heuristic pre-filter threshold for candidate blocks. Lower than literal
+     * dedup's threshold to catch near-misses. Range [0, 1].
+     */
+    heuristicPrefilterThreshold: z
+      .number()
+      .min(0, 'semanticDedup.heuristicPrefilterThreshold must be >= 0')
+      .max(1, 'semanticDedup.heuristicPrefilterThreshold must be <= 1')
+      .default(0.25),
+    /** Minimum LLM similarity score (0–100) to accept a merge suggestion. */
+    semanticMergeThreshold: z
+      .number()
+      .int()
+      .min(50, 'semanticDedup.semanticMergeThreshold must be >= 50')
+      .max(100, 'semanticDedup.semanticMergeThreshold must be <= 100')
+      .default(85),
+    /** Maximum nodes in a single semantic comparison block. */
+    maxBlockSize: z
+      .number()
+      .int()
+      .min(2, 'semanticDedup.maxBlockSize must be >= 2')
+      .max(10, 'semanticDedup.maxBlockSize must be <= 10')
+      .default(6),
+    /** Maximum blocks (LLM calls) per run. Controls cost. */
+    maxBlocksPerRun: z
+      .number()
+      .int()
+      .min(1, 'semanticDedup.maxBlocksPerRun must be >= 1')
+      .max(50, 'semanticDedup.maxBlocksPerRun must be <= 50')
+      .default(15),
+    /** Maximum body characters per node sent to the LLM for comparison. */
+    maxBodyCharsPerNode: z
+      .number()
+      .int()
+      .min(100, 'semanticDedup.maxBodyCharsPerNode must be >= 100')
+      .max(2000, 'semanticDedup.maxBodyCharsPerNode must be <= 2000')
+      .default(500),
+    /** Nodes updated further apart than this many days are not blocked together. */
+    timeWindowDays: z
+      .number()
+      .int()
+      .min(1, 'semanticDedup.timeWindowDays must be >= 1')
+      .max(90, 'semanticDedup.timeWindowDays must be <= 90')
+      .default(30),
+  })
+  .strip()
+
+// ---------------------------------------------------------------------------
+// Extraction guardrails schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls upstream extraction guardrails at the observer stage.
+ * Detects repeated source content and suppresses near-identical extractions.
+ */
+const extractionGuardrailsSchema = z
+  .object({
+    /** Enable extraction guardrails. When false, all messages pass through. */
+    enabled: z.boolean().default(true),
+    /** Overlap score (0–1) above which extraction is skipped entirely. */
+    skipOverlapThreshold: z
+      .number()
+      .min(0, 'extractionGuardrails.skipOverlapThreshold must be >= 0')
+      .max(1, 'extractionGuardrails.skipOverlapThreshold must be <= 1')
+      .default(0.90),
+    /** Overlap score (0–1) above which messages are truncated to non-overlapping portion. */
+    truncateOverlapThreshold: z
+      .number()
+      .min(0, 'extractionGuardrails.truncateOverlapThreshold must be >= 0')
+      .max(1, 'extractionGuardrails.truncateOverlapThreshold must be <= 1')
+      .default(0.50),
+    /** Combined similarity score (0–1) above which a candidate is suppressed post-extraction. */
+    candidateSuppressionThreshold: z
+      .number()
+      .min(0, 'extractionGuardrails.candidateSuppressionThreshold must be >= 0')
+      .max(1, 'extractionGuardrails.candidateSuppressionThreshold must be <= 1')
+      .default(0.70),
+    /** Number of recent source fingerprints to keep for overlap detection. */
+    recentWindowSize: z
+      .number()
+      .int()
+      .min(1, 'extractionGuardrails.recentWindowSize must be >= 1')
+      .max(20, 'extractionGuardrails.recentWindowSize must be <= 20')
+      .default(5),
+  })
+  .strip()
+
+// ---------------------------------------------------------------------------
+// Metrics schema
+// ---------------------------------------------------------------------------
+
+/**
+ * Controls structured metric output from OMG pipeline stages.
+ * Metrics are always emitted to stderr via console.warn with `[omg:metrics]`.
+ * File output appends JSONL to `{omgRoot}/.metrics.jsonl`.
+ */
+const metricsSchema = z
+  .object({
+    /** Enable appending metrics to `{omgRoot}/.metrics.jsonl`. */
+    fileOutput: z.boolean().default(false),
+  })
+  .strip()
 
 // ---------------------------------------------------------------------------
 // Bootstrap schema
@@ -530,6 +682,9 @@ export const omgConfigSchema = z
     graphMaintenance: graphMaintenanceSchema.default({}),
     identity: identitySchema,
     bootstrap: bootstrapSchema.default({}),
+    metrics: metricsSchema.default({}),
+    semanticDedup: semanticDedupSchema.default({}),
+    extractionGuardrails: extractionGuardrailsSchema.default({}),
     /**
      * Absolute path to the workspace root directory.
      * When provided, overrides the value supplied by the OpenClaw host API.
@@ -606,6 +761,9 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   graphMaintenance: new Set(Object.keys(graphMaintenanceSchema.shape)),
   bootstrap: new Set(Object.keys(bootstrapSchema.shape)), // includes: sources
   identity: new Set(['mode']),
+  metrics: new Set(Object.keys(metricsSchema.shape)),
+  semanticDedup: new Set(Object.keys(semanticDedupSchema.shape)),
+  extractionGuardrails: new Set(Object.keys(extractionGuardrailsSchema.shape)),
 }
 
 /**
@@ -614,6 +772,7 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
  */
 const SUB_SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   'injection.semantic': new Set(Object.keys(semanticSchema.shape)),
+  'reflection.clustering': new Set(Object.keys(clusteringSchema.shape)),
 }
 
 /**
