@@ -4,19 +4,6 @@
  */
 
 // ---------------------------------------------------------------------------
-// Stopwords
-// ---------------------------------------------------------------------------
-
-const STOPWORDS = new Set([
-  'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-  'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been',
-  'has', 'have', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-  'should', 'may', 'might', 'shall', 'it', 'its', 'this', 'that', 'these',
-  'those', 'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'they',
-  'not', 'no', 'as', 'up',
-])
-
-// ---------------------------------------------------------------------------
 // extractTrigrams
 // ---------------------------------------------------------------------------
 
@@ -72,10 +59,10 @@ export function trigramJaccard(a: string, b: string): number {
  * characters and filtering common stopwords and empty tokens.
  */
 export function tokenize(text: string): Set<string> {
-  const words = text.toLowerCase().split(/[^a-z0-9]+/)
+  const words = text.toLowerCase().split(/[^\p{L}\p{N}]+/u)
   const result = new Set<string>()
   for (const word of words) {
-    if (word.length > 0 && !STOPWORDS.has(word)) {
+    if (word.length > 0) {
       result.add(word)
     }
   }

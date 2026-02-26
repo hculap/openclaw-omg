@@ -78,6 +78,7 @@ Respond ONLY with valid XML. No text outside the XML.
 3. The <body-append> is optional for merge — omit it when the existing body already covers the new content.
 4. For alias, the alias-key must be the candidate's canonical-key.
 5. Respond with exactly ONE <merge-decision> element.
+6. Tags may be bilingual — preserve both English and non-English variants.
 `
 }
 

@@ -433,19 +433,10 @@ function computeKeywordMatch(node: GraphNode, keywords: ReadonlySet<string>): nu
 }
 
 function extractKeywords(messages: readonly Message[]): ReadonlySet<string> {
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'for',
-    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'and',
-    'or', 'but', 'if', 'then', 'that', 'this', 'it', 'its', 'i', 'you',
-    'me', 'my', 'your', 'we', 'our', 'they', 'them', 'their', 'not',
-    'help', 'about', 'what', 'how', 'when', 'where', 'who', 'which',
-  ])
   const words = new Set<string>()
   for (const msg of messages) {
-    for (const word of msg.content.toLowerCase().split(/\W+/)) {
-      if (word.length > 3 && !stopWords.has(word)) {
+    for (const word of msg.content.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+      if (word.length > 3) {
         words.add(word)
       }
     }

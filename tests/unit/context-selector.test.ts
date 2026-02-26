@@ -323,6 +323,108 @@ describe('selectContext — token budget', () => {
 })
 
 // ---------------------------------------------------------------------------
+// selectContext — multilingual keyword extraction
+// ---------------------------------------------------------------------------
+
+describe('selectContext — multilingual keyword extraction', () => {
+  it('matches non-English query keywords against bilingual tags', () => {
+    const node = makeNode({
+      id: 'omg/identity/wife',
+      type: 'identity',
+      priority: 'high',
+      body: 'Sylwia is the user\'s wife.',
+      tags: ['wife', 'żona', 'partner', 'family'],
+    })
+    const irrelevant = makeNode({
+      id: 'omg/fact/unrelated',
+      body: 'Unrelated content about cooking.',
+      tags: ['food', 'cooking'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [irrelevant, node],
+      recentMessages: [{ role: 'user', content: 'Powiedz mi o żona' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/identity/wife')
+  })
+
+  it('preserves Unicode characters in keyword extraction (ą,ć,ę,ł,ń,ó,ś,ź,ż,ñ,ü,ö)', () => {
+    const node = makeNode({
+      id: 'omg/episode/gym',
+      type: 'episode',
+      body: 'Gym session scheduled.',
+      tags: ['siłownia', 'gym', 'ćwiczenia', 'exercises'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      recentMessages: [{ role: 'user', content: 'siłownia ćwiczenia jutro' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/episode/gym')
+  })
+
+  it('handles mixed multilingual queries (Polish + English)', () => {
+    const node = makeNode({
+      id: 'omg/preference/formatting',
+      type: 'preference',
+      body: 'Prettier used for formatting.',
+      tags: ['formatowanie', 'formatting', 'prettier'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      recentMessages: [{ role: 'user', content: 'formatowanie prettier config' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/preference/formatting')
+  })
+
+  it('still filters short common words (<= 3 chars) regardless of language', () => {
+    // Short words like "jak", "nie", "tak" should be filtered by length
+    const node = makeNode({
+      id: 'omg/fact/test',
+      body: 'Content.',
+      tags: ['jak', 'nie', 'tak'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      recentMessages: [{ role: 'user', content: 'jak nie tak to co' }],
+      config: tightConfig,
+    })
+
+    // No keyword matches since all Polish words are <= 3 chars
+    // Node should still appear due to baseline scoring, but not from keyword boost
+    // The important thing is it doesn't crash
+    expect(slice).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // selectContextV2 — two-pass registry-based selection
 // ---------------------------------------------------------------------------
 

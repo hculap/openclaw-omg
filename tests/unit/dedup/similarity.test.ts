@@ -102,10 +102,9 @@ describe('tokenize', () => {
     expect(tokens.has('qux')).toBe(true)
   })
 
-  it('filters common stopwords', () => {
+  it('includes all words (no stopword filtering)', () => {
     const tokens = tokenize('the user prefers dark mode')
-    expect(tokens.has('the')).toBe(false)
-    // meaningful words kept
+    expect(tokens.has('the')).toBe(true)
     expect(tokens.has('user')).toBe(true)
     expect(tokens.has('prefers')).toBe(true)
     expect(tokens.has('dark')).toBe(true)
@@ -117,6 +116,27 @@ describe('tokenize', () => {
     for (const t of tokens) {
       expect(t.length).toBeGreaterThan(0)
     }
+  })
+
+  it('preserves Unicode diacritics (Polish characters)', () => {
+    const tokens = tokenize('siłownia formatowanie ćwiczenia')
+    expect(tokens.has('siłownia')).toBe(true)
+    expect(tokens.has('formatowanie')).toBe(true)
+    expect(tokens.has('ćwiczenia')).toBe(true)
+  })
+
+  it('preserves Unicode diacritics (Spanish, German)', () => {
+    const tokens = tokenize('señor über straße')
+    expect(tokens.has('señor')).toBe(true)
+    expect(tokens.has('über')).toBe(true)
+    expect(tokens.has('straße')).toBe(true)
+  })
+
+  it('splits on non-letter/non-digit Unicode boundaries', () => {
+    const tokens = tokenize('żona — wife, partner')
+    expect(tokens.has('żona')).toBe(true)
+    expect(tokens.has('wife')).toBe(true)
+    expect(tokens.has('partner')).toBe(true)
   })
 })
 
@@ -145,6 +165,11 @@ describe('tokenSetJaccard', () => {
     const a = 'preferences editor theme dark'
     const b = 'editor dark theme mode'
     expect(tokenSetJaccard(a, b)).toBeCloseTo(tokenSetJaccard(b, a))
+  })
+
+  it('produces > 0 similarity for mixed multilingual text with shared tokens', () => {
+    const score = tokenSetJaccard('siłownia gym workout trening', 'gym trening exercise siłownia')
+    expect(score).toBeGreaterThan(0)
   })
 })
 

@@ -111,6 +111,12 @@ describe('buildObserverSystemPrompt', () => {
     expect(prompt).toContain('Personal information')
     expect(prompt).toContain('identity or preference nodes with high priority')
   })
+
+  it('contains bilingual tag instruction', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('bilingual')
+    expect(prompt).toContain('English AND the original conversation language')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -177,6 +183,12 @@ describe('buildExtractSystemPrompt', () => {
     const prompt = buildExtractSystemPrompt()
     expect(prompt).toContain('now-patch')
     expect(prompt).not.toContain('now-update')
+  })
+
+  it('contains bilingual tag instruction', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('bilingual')
+    expect(prompt).toContain('English AND the original conversation language')
   })
 })
 
