@@ -32,10 +32,12 @@ import {
 } from './cron/workspace-registry.js'
 import { scaffoldGraphIfNeeded } from './scaffold.js'
 import { runBootstrap, runBootstrapTick, runBootstrapRetry } from './bootstrap/bootstrap.js'
+import { readBootstrapState, writeBootstrapState, markMaintenanceDone } from './bootstrap/state.js'
 import { resolveOmgRoot } from './utils/paths.js'
 import type { Message } from './types.js'
 import type { GenerateFn } from './llm/client.js'
 import type { BootstrapSource } from './bootstrap/bootstrap.js'
+import { FAILURE_ERROR_TYPES, type FailureErrorType } from './bootstrap/failure-log.js'
 
 // ---------------------------------------------------------------------------
 // Plugin API types (OpenClaw plugin interface)
@@ -299,7 +301,7 @@ async function ensureChatCompletionsEnabled(api: PluginApi): Promise<void> {
  *      If the gateway is unreachable, a `GatewayUnreachableError` is thrown loudly;
  *      rate limit responses throw `RateLimitError` so callers can retry with backoff.
  */
-function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
+function resolveGenerateFn(api: PluginApi, model: string, timeoutMs?: number): GenerateFn {
   const rawGlobal = api.config as Record<string, unknown>
 
   // 1. Host's api.generate (future-proofing)
@@ -315,7 +317,32 @@ function resolveGenerateFn(api: PluginApi, model: string): GenerateFn {
     port: resolveGatewayPort(rawGlobal),
     authToken: resolveGatewayAuthToken(rawGlobal),
     model,
+    timeoutMs,
   })
+}
+
+// ---------------------------------------------------------------------------
+// CLI helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses a comma-separated string of batch indices into a validated array.
+ * Rejects non-integer, negative, or NaN values.
+ *
+ * @example parseBatchIndices('6,12,25') // [6, 12, 25]
+ * @example parseBatchIndices(' 6 , 12 ') // [6, 12]
+ */
+export function parseBatchIndices(raw: string): readonly number[] {
+  const parts = raw.split(',').map((s) => s.trim()).filter((s) => s !== '')
+  const indices: number[] = []
+  for (const part of parts) {
+    const n = Number(part)
+    if (!Number.isInteger(n) || n < 0) {
+      throw new Error(`Invalid batch index "${part}" — must be a non-negative integer`)
+    }
+    indices.push(n)
+  }
+  return indices
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +397,7 @@ export function register(api: PluginApi): void {
   // expose a `generate` method, so we create a direct Anthropic client using
   // the auth token from the gateway's auth-profiles store.
   const observerModel = config.observer.model ?? 'claude-sonnet-4-20250514'
-  const generateFn = resolveGenerateFn(api, observerModel)
+  const generateFn = resolveGenerateFn(api, observerModel, config.observer.timeoutMs)
   const llmClient = createLlmClient(observerModel, generateFn)
 
   // Per-workspace bootstrap flag: tracks which workspaceDirs have already had
@@ -413,10 +440,24 @@ export function register(api: PluginApi): void {
           for (const wsDir of currentAll) {
             try {
               await scaffoldGraphIfNeeded(wsDir, config)
+              const omgRoot = resolveOmgRoot(wsDir, config)
               const result = await runBootstrapTick({ workspaceDir: wsDir, config, llmClient })
-              if (result.completed) {
-                await graphMaintenanceCronHandler({ workspaceDir: wsDir, config, llmClient })
-                  .catch((err) => console.error(`[omg] service: post-bootstrap maintenance failed for ${wsDir}:`, err))
+
+              // Run maintenance when bootstrap just completed on this tick
+              const needsMaintenance = result.completed
+
+              // Also run maintenance if bootstrap completed on a prior tick but
+              // maintenance was interrupted (e.g. gateway restart)
+              const pendingMaintenance = !needsMaintenance && !result.ran
+                && await readBootstrapState(omgRoot).then(
+                    (s) => s?.status === 'completed' && !s.maintenanceDone,
+                    () => false,
+                  )
+
+              if (needsMaintenance || pendingMaintenance) {
+                await graphMaintenanceCronHandler({ workspaceDir: wsDir, config, llmClient }, 0)  // ageCutoffMs=0: all nodes eligible post-bootstrap
+                const state = await readBootstrapState(omgRoot)
+                if (state) await writeBootstrapState(omgRoot, markMaintenanceDone(state))
               }
             } catch (err) {
               console.error(`[omg] service: bootstrap tick failed for ${wsDir}:`, err)
@@ -430,7 +471,7 @@ export function register(api: PluginApi): void {
     })
   }
 
-  api.on('before_prompt_build', (event, ctx) => {
+  api.on('before_prompt_build', async (event, ctx) => {
     // ctx.workspaceDir is populated per-agent by OpenClaw (PluginHookAgentContext).
     // It takes priority over the globally-resolved workspaceDir so that agents with
     // separate workspaces (e.g. "coding" → ~/TechLead, "pati" → ~/Secretary) each
@@ -446,11 +487,19 @@ export function register(api: PluginApi): void {
         .then(() => {
           // Fallback: service API unavailable (old host) → run one bounded tick per turn
           if (!serviceAvailable) {
+            const omgRoot = resolveOmgRoot(effectiveWorkspaceDir, config)
             return runBootstrapTick({ workspaceDir: effectiveWorkspaceDir, config, llmClient })
-              .then((result) => {
-                if (result.completed) {
-                  graphMaintenanceCronHandler({ workspaceDir: effectiveWorkspaceDir, config, llmClient })
-                    .catch((err) => console.error('[omg] before_prompt_build: post-bootstrap maintenance failed:', err))
+              .then(async (result) => {
+                const needsMaintenance = result.completed
+                const pendingMaintenance = !needsMaintenance && !result.ran
+                  && await readBootstrapState(omgRoot).then(
+                      (s) => s?.status === 'completed' && !s.maintenanceDone,
+                      () => false,
+                    )
+                if (needsMaintenance || pendingMaintenance) {
+                  await graphMaintenanceCronHandler({ workspaceDir: effectiveWorkspaceDir, config, llmClient }, 0)
+                  const state = await readBootstrapState(omgRoot)
+                  if (state) await writeBootstrapState(omgRoot, markMaintenanceDone(state))
                 }
               })
               .catch((err) => console.error('[omg] before_prompt_build: bootstrap tick failed:', err))
@@ -483,7 +532,14 @@ export function register(api: PluginApi): void {
     }
 
     const sessionKey = ctx.sessionKey ?? 'default'
-    return beforeAgentStart(event, { workspaceDir: effectiveWorkspaceDir, sessionKey, config, memoryTools })
+    const result = await beforeAgentStart(event, { workspaceDir: effectiveWorkspaceDir, sessionKey, config, memoryTools })
+    if (result) {
+      const chars = result.prependContext.length
+      const estTokens = Math.ceil(chars / 4)
+      const nodeIds = [...result.prependContext.matchAll(/<!-- (omg\/[^ ]+)/g)].map(m => m[1])
+      console.error(`[omg] context-injection [${sessionKey}]: ${estTokens} tokens (~${chars} chars), ${nodeIds.length} nodes: ${nodeIds.join(', ')}`)
+    }
+    return result
   })
 
   api.on('agent_end', (event, ctx) => {
@@ -578,6 +634,9 @@ export function register(api: PluginApi): void {
           .option('--force', 'Re-run bootstrap from scratch, ignoring previous state')
           .option('--source <source>', 'Source to ingest: memory|logs|sqlite|all', 'all')
           .option('--retry-failed', 'Retry only batches that failed in a previous run')
+          .option('--timeout <ms>', 'Override LLM timeout for retry (5000-600000)')
+          .option('--error-type <type>', 'Filter retry by error type: llm-error|parse-empty|zero-operations|write-all-failed')
+          .option('--batches <indices>', 'Comma-separated batch indices to retry (e.g. "6,12,25")')
           .action(async (...actionArgs: unknown[]) => {
             // Commander calls action as (...positionalArgs, options, command).
             // 'omg bootstrap' registers 'bootstrap' as a positional arg of command 'omg',
@@ -602,7 +661,60 @@ export function register(api: PluginApi): void {
               return
             }
             if (Boolean(opts['retryFailed'])) {
-              const result = await runBootstrapRetry({ workspaceDir, config, llmClient })
+              // Validate --timeout
+              let retryTimeoutMs: number | undefined
+              if (opts['timeout'] !== undefined) {
+                retryTimeoutMs = Number(opts['timeout'])
+                if (!Number.isInteger(retryTimeoutMs) || retryTimeoutMs < 5_000 || retryTimeoutMs > 600_000) {
+                  console.error('[omg] bootstrap retry: --timeout must be an integer between 5000 and 600000')
+                  return
+                }
+              }
+
+              // Validate --error-type
+              let errorTypeFilter: FailureErrorType | undefined
+              if (opts['errorType'] !== undefined) {
+                const raw = String(opts['errorType'])
+                if (!(FAILURE_ERROR_TYPES as readonly string[]).includes(raw)) {
+                  console.error(`[omg] bootstrap retry: --error-type must be one of: ${FAILURE_ERROR_TYPES.join(', ')}`)
+                  return
+                }
+                errorTypeFilter = raw as FailureErrorType
+              }
+
+              // Validate --batches
+              let retryBatchIndices: readonly number[] | undefined
+              if (opts['batches'] !== undefined) {
+                try {
+                  retryBatchIndices = parseBatchIndices(String(opts['batches']))
+                } catch (err) {
+                  console.error(`[omg] bootstrap retry: ${err instanceof Error ? err.message : String(err)}`)
+                  return
+                }
+                if (retryBatchIndices.length === 0) {
+                  console.error('[omg] bootstrap retry: --batches must specify at least one batch index')
+                  return
+                }
+              }
+
+              // Build factory closure for timeout override
+              const rawGlobal = api.config as Record<string, unknown>
+              const port = resolveGatewayPort(rawGlobal)
+              const authToken = resolveGatewayAuthToken(rawGlobal)
+              const retryLlmClientFactory = (overrideMs: number): ReturnType<typeof createLlmClient> => {
+                const fn = createGatewayCompletionsGenerateFn({ port, authToken, model: observerModel, timeoutMs: overrideMs })
+                return createLlmClient(observerModel, fn)
+              }
+
+              const result = await runBootstrapRetry({
+                workspaceDir,
+                config,
+                llmClient,
+                timeoutMs: retryTimeoutMs,
+                errorTypeFilter,
+                batchIndices: retryBatchIndices,
+                createLlmClientWithTimeout: retryLlmClientFactory,
+              })
               if (!result.ran) {
                 console.log('[omg] bootstrap retry: no failures to retry')
               }

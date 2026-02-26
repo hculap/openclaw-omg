@@ -7,3 +7,4 @@ memory/
 .npmrc
 .serena/
 tests/live/artifacts/
+docs/context-injection-quality-report.md

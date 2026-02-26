@@ -113,6 +113,17 @@ const observerSchema = z
      * Example: "sk-ant-api03-..."
      */
     apiKey: z.string().min(1).optional(),
+    /**
+     * Per-request timeout in milliseconds for LLM calls via the gateway.
+     * Increase this when the gateway model is slow or under heavy load.
+     * @default 120000 (2 minutes)
+     */
+    timeoutMs: z
+      .number()
+      .int()
+      .min(5_000, 'timeoutMs must be at least 5000 (5 seconds)')
+      .max(600_000, 'timeoutMs must be at most 600000 (10 minutes)')
+      .default(120_000),
   })
   .strip()
 

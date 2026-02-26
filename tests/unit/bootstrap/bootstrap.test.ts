@@ -40,13 +40,15 @@ vi.mock('../../../src/graph/registry.js', () => ({
   getNodeFilePaths: vi.fn().mockResolvedValue(new Map()),
 }))
 
-import { runBootstrap, runBootstrapTick } from '../../../src/bootstrap/bootstrap.js'
+import { runBootstrap, runBootstrapTick, runBootstrapRetry } from '../../../src/bootstrap/bootstrap.js'
 import { _clearActiveClaims } from '../../../src/bootstrap/lock.js'
 import { runObservation } from '../../../src/observer/observer.js'
 import { writeObservationNode } from '../../../src/graph/node-writer.js'
 import { parseConfig } from '../../../src/config.js'
+import { parseBatchIndices } from '../../../src/plugin.js'
 import type { LlmClient } from '../../../src/llm/client.js'
 import type { BootstrapState } from '../../../src/bootstrap/state.js'
+import type { BootstrapFailureEntry } from '../../../src/bootstrap/failure-log.js'
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -70,6 +72,7 @@ const EMPTY_OBSERVER_OUTPUT = {
 const OMG_ROOT = '/workspace/memory/omg'
 const STATE_PATH = `${OMG_ROOT}/.bootstrap-state.json`
 const LEGACY_PATH = `${OMG_ROOT}/.bootstrap-done`
+const FAILURE_LOG_PATH = `${OMG_ROOT}/.bootstrap-failures.jsonl`
 
 function makeBootstrapParams(overrides = {}) {
   return {
@@ -78,6 +81,32 @@ function makeBootstrapParams(overrides = {}) {
     llmClient: mockLlmClient,
     ...overrides,
   }
+}
+
+function makeRetryParams(overrides = {}) {
+  return {
+    workspaceDir: '/workspace',
+    config,
+    llmClient: mockLlmClient,
+    ...overrides,
+  }
+}
+
+function makeFailureEntry(overrides: Partial<BootstrapFailureEntry> = {}): BootstrapFailureEntry {
+  return {
+    batchIndex: 0,
+    labels: ['test-chunk'],
+    errorType: 'llm-error',
+    error: 'LLM timeout',
+    timestamp: '2026-01-01T00:00:00Z',
+    diagnostics: null,
+    chunkCount: 1,
+    ...overrides,
+  }
+}
+
+function writeFailureLog(entries: readonly BootstrapFailureEntry[]): string {
+  return entries.map((e) => JSON.stringify(e)).join('\n') + (entries.length > 0 ? '\n' : '')
 }
 
 function makeCompletedState(overrides: Partial<BootstrapState> = {}): BootstrapState {
@@ -92,6 +121,7 @@ function makeCompletedState(overrides: Partial<BootstrapState> = {}): BootstrapS
     fail: 0,
     done: [],
     lastError: null,
+    maintenanceDone: false,
     ...overrides,
   }
 }
@@ -901,5 +931,250 @@ describe('runBootstrap — still processes all batches (no budget limit)', () =>
     const raw = vol.readFileSync(STATE_PATH, 'utf-8') as string
     const state = JSON.parse(raw) as BootstrapState
     expect(state.status).toBe('completed')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runBootstrapRetry — filtering & timeout
+// ---------------------------------------------------------------------------
+
+describe('runBootstrapRetry — error-type filtering', () => {
+  it('retries only llm-error failures, preserving parse-empty entries', async () => {
+    const llmFailure = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error', error: 'timeout' })
+    const parseFailure = makeFailureEntry({ batchIndex: 1, errorType: 'parse-empty', error: 'no ops' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([llmFailure, parseFailure]),
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    const result = await runBootstrapRetry(makeRetryParams({
+      config: noBatchConfig,
+      errorTypeFilter: 'llm-error' as const,
+    }))
+
+    expect(result.ran).toBe(true)
+    expect(result.retriedCount).toBe(1)
+
+    // Read back failure log — parse-empty entry should be preserved
+    const remaining = vol.readFileSync(FAILURE_LOG_PATH, 'utf-8') as string
+    const lines = remaining.trim().split('\n').filter((l) => l.trim() !== '')
+    // At minimum the parse-empty entry is preserved; the llm-error entry
+    // may or may not be re-appended depending on LLM success
+    const preserved = lines.map((l) => JSON.parse(l) as BootstrapFailureEntry)
+    expect(preserved.some((f) => f.errorType === 'parse-empty' && f.batchIndex === 1)).toBe(true)
+  })
+})
+
+describe('runBootstrapRetry — batch-index filtering', () => {
+  it('retries only specified batch indices', async () => {
+    const failure0 = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error' })
+    const failure1 = makeFailureEntry({ batchIndex: 1, errorType: 'llm-error' })
+    const failure2 = makeFailureEntry({ batchIndex: 2, errorType: 'llm-error' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([failure0, failure1, failure2]),
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    const result = await runBootstrapRetry(makeRetryParams({
+      config: noBatchConfig,
+      batchIndices: [0, 2],
+    }))
+
+    expect(result.ran).toBe(true)
+    // Only batches 0 and 2 retried
+    expect(result.retriedBatchIndices).toBeDefined()
+    expect(result.retriedBatchIndices).toContain(0)
+    expect(result.retriedBatchIndices).toContain(2)
+    expect(result.retriedBatchIndices).not.toContain(1)
+
+    // Failure log should preserve batch 1 entry
+    const remaining = vol.readFileSync(FAILURE_LOG_PATH, 'utf-8') as string
+    const lines = remaining.trim().split('\n').filter((l) => l.trim() !== '')
+    const preserved = lines.map((l) => JSON.parse(l) as BootstrapFailureEntry)
+    expect(preserved.some((f) => f.batchIndex === 1)).toBe(true)
+  })
+})
+
+describe('runBootstrapRetry — combined filters', () => {
+  it('applies both error-type and batch-index filters', async () => {
+    const failure0 = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error' })
+    const failure1 = makeFailureEntry({ batchIndex: 1, errorType: 'parse-empty' })
+    const failure2 = makeFailureEntry({ batchIndex: 2, errorType: 'llm-error' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([failure0, failure1, failure2]),
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    const result = await runBootstrapRetry(makeRetryParams({
+      config: noBatchConfig,
+      errorTypeFilter: 'llm-error' as const,
+      batchIndices: [2],
+    }))
+
+    expect(result.ran).toBe(true)
+    // Only batch 2 (llm-error AND in batchIndices) gets retried
+    expect(result.retriedBatchIndices).toEqual([2])
+  })
+})
+
+describe('runBootstrapRetry — no-match batch indices', () => {
+  it('returns ran:false when batch indices do not match any failures', async () => {
+    const failure0 = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([failure0]),
+    })
+
+    const result = await runBootstrapRetry(makeRetryParams({
+      batchIndices: [99, 100],
+    }))
+
+    expect(result.ran).toBe(false)
+    expect(result.retriedCount).toBe(0)
+    // Original failures are still counted
+    expect(result.stillFailedCount).toBe(1)
+  })
+})
+
+describe('runBootstrapRetry — timeout override', () => {
+  it('calls factory with correct timeout when timeoutMs and factory are provided', async () => {
+    const failure0 = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([failure0]),
+    })
+
+    const factoryClient: LlmClient = {
+      generate: vi.fn().mockResolvedValue({
+        content: '<observations><operations></operations><now-update>now</now-update></observations>',
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    }
+    const factory = vi.fn().mockReturnValue(factoryClient)
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    await runBootstrapRetry(makeRetryParams({
+      config: noBatchConfig,
+      timeoutMs: 300_000,
+      createLlmClientWithTimeout: factory,
+    }))
+
+    expect(factory).toHaveBeenCalledWith(300_000)
+  })
+
+  it('warns and uses default client when timeoutMs provided without factory', async () => {
+    const failure0 = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([failure0]),
+    })
+
+    const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    const result = await runBootstrapRetry(makeRetryParams({
+      config: noBatchConfig,
+      timeoutMs: 300_000,
+      // no createLlmClientWithTimeout
+    }))
+
+    expect(result.ran).toBe(true)
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('timeoutMs specified but no createLlmClientWithTimeout factory provided')
+    )
+
+    consoleWarnSpy.mockRestore()
+  })
+})
+
+describe('runBootstrapRetry — selective failure log preservation', () => {
+  it('preserves entries for batches not being retried', async () => {
+    const failure0 = makeFailureEntry({ batchIndex: 0, errorType: 'llm-error' })
+    const failure1 = makeFailureEntry({ batchIndex: 1, errorType: 'parse-empty', error: 'low signal' })
+    const failure2 = makeFailureEntry({ batchIndex: 2, errorType: 'zero-operations', error: 'rejected' })
+
+    vol.fromJSON({
+      '/workspace/memory/file1.md': '# File 1\n\nContent for file 1.',
+      '/workspace/memory/file2.md': '# File 2\n\nContent for file 2.',
+      '/workspace/memory/file3.md': '# File 3\n\nContent for file 3.',
+      '/workspace/memory/omg/nodes/.keep': '',
+      [STATE_PATH]: JSON.stringify(makeCompletedState()),
+      [FAILURE_LOG_PATH]: writeFailureLog([failure0, failure1, failure2]),
+    })
+
+    const noBatchConfig = parseConfig({ bootstrap: { batchCharBudget: 0 } })
+    await runBootstrapRetry(makeRetryParams({
+      config: noBatchConfig,
+      errorTypeFilter: 'llm-error' as const,
+    }))
+
+    // After retry, parse-empty and zero-operations entries should be preserved
+    const remaining = vol.readFileSync(FAILURE_LOG_PATH, 'utf-8') as string
+    const lines = remaining.trim().split('\n').filter((l) => l.trim() !== '')
+    const preserved = lines.map((l) => JSON.parse(l) as BootstrapFailureEntry)
+
+    // Batch 1 (parse-empty) and batch 2 (zero-operations) must be preserved
+    expect(preserved.some((f) => f.batchIndex === 1 && f.errorType === 'parse-empty')).toBe(true)
+    expect(preserved.some((f) => f.batchIndex === 2 && f.errorType === 'zero-operations')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseBatchIndices
+// ---------------------------------------------------------------------------
+
+describe('parseBatchIndices', () => {
+  it('parses valid comma-separated indices', () => {
+    expect(parseBatchIndices('6,12,25')).toEqual([6, 12, 25])
+  })
+
+  it('handles whitespace around indices', () => {
+    expect(parseBatchIndices(' 6 , 12 , 25 ')).toEqual([6, 12, 25])
+  })
+
+  it('throws on non-integer values', () => {
+    expect(() => parseBatchIndices('6,abc,25')).toThrow('Invalid batch index "abc"')
+  })
+
+  it('throws on negative values', () => {
+    expect(() => parseBatchIndices('6,-1,25')).toThrow('Invalid batch index "-1"')
+  })
+
+  it('throws on floating-point values', () => {
+    expect(() => parseBatchIndices('6,1.5,25')).toThrow('Invalid batch index "1.5"')
+  })
+
+  it('returns empty array for empty string', () => {
+    expect(parseBatchIndices('')).toEqual([])
+  })
+
+  it('handles single index', () => {
+    expect(parseBatchIndices('42')).toEqual([42])
   })
 })

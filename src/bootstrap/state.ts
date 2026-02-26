@@ -45,6 +45,8 @@ const bootstrapStateSchema = z.object({
   done: z.array(z.number().int().min(0)),
   /** Last error message (informational). */
   lastError: z.string().nullable(),
+  /** Whether post-bootstrap maintenance (dedup + reflection) has completed. */
+  maintenanceDone: z.boolean().default(false),
 })
 
 export type BootstrapState = Readonly<z.infer<typeof bootstrapStateSchema>>
@@ -80,6 +82,7 @@ export function createInitialState(totalBatches: number): BootstrapState {
     fail: 0,
     done: [],
     lastError: null,
+    maintenanceDone: false,
   }
 }
 
@@ -135,6 +138,18 @@ export function finalizeState(state: BootstrapState): BootstrapState {
     updatedAt: new Date().toISOString(),
     done: [],
     cursor: state.total,
+    maintenanceDone: false,
+  }
+}
+
+/**
+ * Marks post-bootstrap maintenance as completed (immutable).
+ */
+export function markMaintenanceDone(state: BootstrapState): BootstrapState {
+  return {
+    ...state,
+    maintenanceDone: true,
+    updatedAt: new Date().toISOString(),
   }
 }
 
@@ -247,6 +262,7 @@ export async function readBootstrapState(omgRoot: string): Promise<BootstrapStat
         fail: 0,
         done: [],
         lastError: null,
+        maintenanceDone: true,
       }
 
       // Persist the migrated state so we never need to read the legacy file again

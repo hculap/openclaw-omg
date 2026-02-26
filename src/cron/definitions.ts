@@ -12,6 +12,7 @@ import type { LlmClient } from '../llm/client.js'
 import { runReflection } from '../reflector/reflector.js'
 import { runDedup } from '../dedup/dedup.js'
 import { runBootstrapTick } from '../bootstrap/bootstrap.js'
+import { readBootstrapState, writeBootstrapState, markMaintenanceDone } from '../bootstrap/state.js'
 import { readGraphNode } from '../graph/node-reader.js'
 import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
@@ -70,7 +71,10 @@ export async function graphMaintenanceCronHandler(
   }
 
   // Step 2: Reflection pass over aged non-archived nodes
-  const cutoffMs = ageCutoffMs !== undefined ? ageCutoffMs : Date.now() - SEVEN_DAYS_MS
+  // ageCutoffMs=0 means "no age cap" (all nodes eligible); undefined uses the 7-day default.
+  const cutoffMs = ageCutoffMs === 0
+    ? Date.now()
+    : ageCutoffMs !== undefined ? ageCutoffMs : Date.now() - SEVEN_DAYS_MS
 
   let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
@@ -87,7 +91,7 @@ export async function graphMaintenanceCronHandler(
   }
 
   if (eligibleEntries.length === 0) {
-    console.warn('[omg] cron omg-reflection: no nodes eligible for reflection (none older than 7 days)')
+    console.warn(`[omg] cron omg-reflection: no nodes eligible for reflection (cutoff: ${new Date(cutoffMs).toISOString()})`)
     return
   }
 
@@ -207,6 +211,8 @@ async function bootstrapCronHandler(ctx: CronContext): Promise<void> {
     if (result.completed) {
       await graphMaintenanceCronHandler(ctx, 0)  // no age cap — nodes just bootstrapped
         .catch((err) => console.error('[omg] cron omg-bootstrap: post-bootstrap maintenance failed:', err))
+      const state = await readBootstrapState(omgRoot)
+      if (state) await writeBootstrapState(omgRoot, markMaintenanceDone(state))
     }
   } catch (err) {
     console.error('[omg] cron omg-bootstrap: tick failed:', err)

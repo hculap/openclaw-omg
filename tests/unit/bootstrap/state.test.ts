@@ -40,6 +40,7 @@ function makeState(overrides: Partial<BootstrapState> = {}): BootstrapState {
     fail: 0,
     done: [],
     lastError: null,
+    maintenanceDone: false,
     ...overrides,
   }
 }

@@ -112,3 +112,15 @@ export async function readFailureLog(
 export async function clearFailureLog(omgRoot: string): Promise<void> {
   await writeFile(failurePath(omgRoot), '', 'utf-8')
 }
+
+/**
+ * Atomically overwrites the failure log with the given entries.
+ * Used by selective retry to preserve entries for batches NOT being retried.
+ */
+export async function writeFailureEntries(
+  omgRoot: string,
+  entries: readonly BootstrapFailureEntry[],
+): Promise<void> {
+  const content = entries.map((e) => JSON.stringify(e)).join('\n') + (entries.length > 0 ? '\n' : '')
+  await writeFile(failurePath(omgRoot), content, 'utf-8')
+}

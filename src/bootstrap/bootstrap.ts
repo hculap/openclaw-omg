@@ -47,6 +47,7 @@ import {
   appendFailureEntry,
   clearFailureLog,
   readFailureLog,
+  writeFailureEntries,
   type BootstrapFailureEntry,
   type FailureErrorType,
 } from './failure-log.js'
@@ -622,6 +623,14 @@ export interface RetryParams {
   readonly workspaceDir: string
   readonly config: OmgConfig
   readonly llmClient: LlmClient
+  /** Override LLM timeout for retry (ms). Used with `createLlmClientWithTimeout`. */
+  readonly timeoutMs?: number
+  /** Retry only failures matching this error type. Default: retry all types. */
+  readonly errorTypeFilter?: FailureErrorType
+  /** Retry only these specific batch indices. Default: all failed batches. */
+  readonly batchIndices?: readonly number[]
+  /** Factory to create an LlmClient with a custom timeout. Injected by CLI. */
+  readonly createLlmClientWithTimeout?: (ms: number) => LlmClient
 }
 
 /** Result summary returned by {@link runBootstrapRetry}. */
@@ -631,6 +640,8 @@ export interface RetryResult {
   readonly retriedCount: number
   readonly nodesWritten: number
   readonly stillFailedCount: number
+  /** Batch indices that were actually retried. */
+  readonly retriedBatchIndices?: readonly number[]
 }
 
 /**
@@ -645,7 +656,7 @@ export interface RetryResult {
  * Never throws (all errors are caught and logged).
  */
 export async function runBootstrapRetry(params: RetryParams): Promise<RetryResult> {
-  const { workspaceDir, config, llmClient } = params
+  const { workspaceDir, config, llmClient, timeoutMs, errorTypeFilter, batchIndices, createLlmClientWithTimeout } = params
 
   let omgRoot: string
   try {
@@ -670,8 +681,40 @@ export async function runBootstrapRetry(params: RetryParams): Promise<RetryResul
     return { ran: false, failedBatchCount: 0, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
   }
 
-  const failedIndices = new Set(failures.map((f) => f.batchIndex))
-  console.log(`[omg] bootstrap retry: ${failedIndices.size} failed batch(es) to retry`)
+  // Step 1: Filter by errorTypeFilter (if provided)
+  const filteredFailures = errorTypeFilter
+    ? failures.filter((f) => f.errorType === errorTypeFilter)
+    : failures
+
+  if (filteredFailures.length === 0) {
+    console.log(`[omg] bootstrap retry: no failures match errorType="${errorTypeFilter}" — nothing to retry`)
+    return { ran: false, failedBatchCount: failures.length, retriedCount: 0, nodesWritten: 0, stillFailedCount: failures.length }
+  }
+
+  // Step 2: Compute failed indices from filtered failures
+  const failedIndices = new Set(filteredFailures.map((f) => f.batchIndex))
+
+  // Step 3: Intersect with batchIndices (if provided)
+  const targetIndices = batchIndices
+    ? new Set([...failedIndices].filter((idx) => batchIndices.includes(idx)))
+    : failedIndices
+
+  if (targetIndices.size === 0) {
+    console.log('[omg] bootstrap retry: no failed batches match the specified batch indices — nothing to retry')
+    return { ran: false, failedBatchCount: failures.length, retriedCount: 0, nodesWritten: 0, stillFailedCount: failures.length }
+  }
+
+  console.log(`[omg] bootstrap retry: ${targetIndices.size} batch(es) to retry${errorTypeFilter ? ` (filter: ${errorTypeFilter})` : ''}`)
+
+  // Step 4: Resolve effective LLM client
+  const effectiveLlmClient = timeoutMs !== undefined && createLlmClientWithTimeout
+    ? createLlmClientWithTimeout(timeoutMs)
+    : (() => {
+        if (timeoutMs !== undefined && !createLlmClientWithTimeout) {
+          console.warn('[omg] bootstrap retry: timeoutMs specified but no createLlmClientWithTimeout factory provided — using default client')
+        }
+        return llmClient
+      })()
 
   const lockAcquired = await acquireLock(omgRoot)
   if (!lockAcquired) {
@@ -680,6 +723,10 @@ export async function runBootstrapRetry(params: RetryParams): Promise<RetryResul
   }
 
   try {
+    // Step 5: Selective failure log clearing — preserve entries for batches NOT being retried
+    const preservedEntries = failures.filter((f) => !targetIndices.has(f.batchIndex))
+    await writeFailureEntries(omgRoot, preservedEntries)
+
     // Re-gather sources and build batches (same pipeline as initial bootstrap)
     const srcs = config.bootstrap.sources
     const [memoryEntries, logEntries, sqliteEntries] = await Promise.all([
@@ -710,23 +757,22 @@ export async function runBootstrapRetry(params: RetryParams): Promise<RetryResul
     }
 
     const batches = batchChunks(allChunks, config.bootstrap.batchCharBudget)
-    const retryBatches = batches.filter((b) => failedIndices.has(b.batchIndex))
+
+    // Step 6: Filter rebuilt batches to only target indices
+    const retryBatches = batches.filter((b) => targetIndices.has(b.batchIndex))
 
     if (retryBatches.length === 0) {
-      console.log('[omg] bootstrap retry: failed batch indices no longer match current batches — clearing failure log')
-      await clearFailureLog(omgRoot)
-      return { ran: true, failedBatchCount: failures.length, retriedCount: 0, nodesWritten: 0, stillFailedCount: 0 }
+      console.log('[omg] bootstrap retry: target batch indices no longer match current batches — clearing retried entries')
+      return { ran: true, failedBatchCount: failures.length, retriedCount: 0, nodesWritten: 0, stillFailedCount: preservedEntries.length }
     }
-
-    // Clear failure log before retry — new failures will be re-appended by processBatch
-    await clearFailureLog(omgRoot)
 
     const breaker = new RateLimitBreaker()
     let nodesWritten = 0
 
+    // Step 7: Pass effectiveLlmClient to processBatch calls
     const tasks = retryBatches.map((batch) => async () => {
       if (breaker.aborted) throw new PipelineAbortedError()
-      return processBatch(batch, omgRoot, scope, config, llmClient, breaker)
+      return processBatch(batch, omgRoot, scope, config, effectiveLlmClient, breaker)
     })
 
     const results = await runWithConcurrency(tasks, DEFAULT_CONCURRENCY)
@@ -739,6 +785,7 @@ export async function runBootstrapRetry(params: RetryParams): Promise<RetryResul
 
     // Read back failure log to count remaining failures
     const remainingFailures = await readFailureLog(omgRoot)
+    const retriedBatchIndices = [...targetIndices]
 
     console.log(
       `[omg] bootstrap retry: retried ${retryBatches.length} batch(es) → ${nodesWritten} nodes written, ${remainingFailures.length} still failing`
@@ -759,6 +806,7 @@ export async function runBootstrapRetry(params: RetryParams): Promise<RetryResul
       retriedCount: retryBatches.length,
       nodesWritten,
       stillFailedCount: remainingFailures.length,
+      retriedBatchIndices,
     }
   } finally {
     await releaseLock(omgRoot)
