@@ -281,68 +281,12 @@ describe('agentEnd — manual mode', () => {
 })
 
 // ---------------------------------------------------------------------------
-// agentEnd — reflection trigger
+// agentEnd — reflection removed (handled exclusively by cron)
 // ---------------------------------------------------------------------------
 
-describe('agentEnd — reflection trigger', () => {
-  it('calls LLM a second time for reflection when token delta exceeds threshold', async () => {
+describe('agentEnd — no reflection in agent-end', () => {
+  it('does NOT call reflection even when token delta exceeds threshold', async () => {
     // Pre-seed a state with totalObservationTokens already above the threshold.
-    // Empty observations don't accumulate tokens, so we need an existing baseline.
-    const stateJson = JSON.stringify({
-      lastObservedAtMs: 0,
-      pendingMessageTokens: 0,
-      totalObservationTokens: 50_000,
-      lastReflectionTotalTokens: 0,
-      observationBoundaryMessageIndex: 0,
-      nodeCount: 0,
-      lastObservationNodeIds: [],
-    })
-    // Scaffold an observation node so the reflector has something to work with.
-    vol.fromJSON({
-      ...vol.toJSON(),
-      [`${WORKSPACE}/.omg-state/${SESSION_KEY}.json`]: stateJson,
-      [`${OMG_ROOT}/nodes/fact/fact-existing.md`]: '---\nid: omg/fact-existing\ndescription: Existing fact\ntype: fact\npriority: medium\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\nAn existing fact.',
-    })
-
-    // Threshold of 1 → delta of 50,000 already exceeds it on the first observation.
-    const config = parseConfig({
-      observation: { triggerMode: 'every-turn' },
-      reflection: { observationTokenThreshold: 1 },
-    })
-
-    const observationXml = '<observations></observations>'
-    const reflectionXml = `
-      <reflection>
-        <reflection-nodes>
-          <node compression-level="0">
-            <id>omg/reflection/trigger-test</id>
-            <description>Triggered reflection</description>
-            <sources>omg/fact-existing</sources>
-            <body>Synthesis of existing facts.</body>
-          </node>
-        </reflection-nodes>
-        <archive-nodes></archive-nodes>
-        <moc-updates></moc-updates>
-        <node-updates></node-updates>
-      </reflection>`
-
-    const llmClient: LlmClient = {
-      generate: vi.fn()
-        .mockResolvedValueOnce({ content: observationXml, usage: { inputTokens: 100, outputTokens: 50 } })
-        .mockResolvedValueOnce({ content: reflectionXml, usage: { inputTokens: 200, outputTokens: 100 } }),
-    }
-
-    await agentEnd(
-      { success: true },
-      { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, messages: makeMessages(2), config, llmClient }
-    )
-
-    // First call = observation, second call = reflection
-    expect(llmClient.generate).toHaveBeenCalledTimes(2)
-  })
-
-  it('advances lastReflectionTotalTokens watermark after reflection fires', async () => {
-    // Pre-seed state: totalObservationTokens above threshold, watermark at 0.
     const stateJson = JSON.stringify({
       lastObservedAtMs: 0,
       pendingMessageTokens: 0,
@@ -355,7 +299,6 @@ describe('agentEnd — reflection trigger', () => {
     vol.fromJSON({
       ...vol.toJSON(),
       [`${WORKSPACE}/.omg-state/${SESSION_KEY}.json`]: stateJson,
-      [`${OMG_ROOT}/nodes/fact/fact-existing.md`]: '---\nid: omg/fact-existing\ndescription: Existing fact\ntype: fact\npriority: medium\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\nAn existing fact.',
     })
 
     const config = parseConfig({
@@ -364,31 +307,19 @@ describe('agentEnd — reflection trigger', () => {
     })
 
     const observationXml = '<observations></observations>'
-    const reflectionXml = `
-      <reflection>
-        <reflection-nodes></reflection-nodes>
-        <archive-nodes></archive-nodes>
-        <moc-updates></moc-updates>
-        <node-updates></node-updates>
-      </reflection>`
 
     const llmClient: LlmClient = {
       generate: vi.fn()
-        .mockResolvedValueOnce({ content: observationXml, usage: { inputTokens: 10, outputTokens: 5 } })
-        .mockResolvedValueOnce({ content: reflectionXml, usage: { inputTokens: 10, outputTokens: 5 } }),
+        .mockResolvedValueOnce({ content: observationXml, usage: { inputTokens: 100, outputTokens: 50 } }),
     }
 
-    // Run one turn — observation + reflection fires (2 LLM calls)
     await agentEnd(
       { success: true },
       { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, messages: makeMessages(2), config, llmClient }
     )
-    expect(llmClient.generate).toHaveBeenCalledTimes(2)
 
-    // After turn 1, the watermark must have advanced to match totalObservationTokens.
-    const { loadSessionState } = await import('../../src/state/session-state.js')
-    const state = await loadSessionState(WORKSPACE, SESSION_KEY)
-    expect(state.lastReflectionTotalTokens).toBe(state.totalObservationTokens)
+    // Only 1 call = observation. Reflection does NOT fire from agent-end.
+    expect(llmClient.generate).toHaveBeenCalledTimes(1)
   })
 })
 

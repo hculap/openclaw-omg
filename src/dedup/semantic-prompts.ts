@@ -68,6 +68,37 @@ export function buildSemanticDedupUserPrompt(
   nodeContents: ReadonlyMap<string, string>,
   maxBodyChars: number,
 ): string {
+  return formatBlock(block, nodeContents, maxBodyChars)
+}
+
+/**
+ * Builds a batched user prompt containing multiple semantic dedup blocks.
+ * All blocks are concatenated with clear delimiters so the LLM can process
+ * them in a single call and return suggestions referencing any block.
+ */
+export function buildBatchedSemanticDedupUserPrompt(
+  blocks: readonly SemanticBlock[],
+  nodeContents: ReadonlyMap<string, string>,
+  maxBodyChars: number,
+): string {
+  const parts: string[] = []
+  parts.push(`Analyze the following ${blocks.length} block(s) for semantic duplicates.`)
+  parts.push('Each block groups related nodes — duplicates may exist within a block.\n')
+
+  for (let i = 0; i < blocks.length; i++) {
+    parts.push(`---\n`)
+    parts.push(`# Block ${i + 1} of ${blocks.length}\n`)
+    parts.push(formatBlock(blocks[i]!, nodeContents, maxBodyChars))
+  }
+
+  return parts.join('\n')
+}
+
+function formatBlock(
+  block: SemanticBlock,
+  nodeContents: ReadonlyMap<string, string>,
+  maxBodyChars: number,
+): string {
   const parts: string[] = []
 
   parts.push(`## Semantic Dedup Block — Domain: ${block.domain}`)

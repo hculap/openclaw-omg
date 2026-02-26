@@ -313,10 +313,19 @@ describe('parseConfig — numeric thresholds', () => {
     )
   })
 
-  it('messageTokenThreshold minimum boundary 1 → accepted', () => {
+  it('messageTokenThreshold below 1000 → clamped to 8000', () => {
     expect(
       parseConfig({ observation: { messageTokenThreshold: 1 } }).observation.messageTokenThreshold
-    ).toBe(1)
+    ).toBe(8000)
+    expect(
+      parseConfig({ observation: { messageTokenThreshold: 999 } }).observation.messageTokenThreshold
+    ).toBe(8000)
+  })
+
+  it('messageTokenThreshold at 1000 → accepted as-is', () => {
+    expect(
+      parseConfig({ observation: { messageTokenThreshold: 1000 } }).observation.messageTokenThreshold
+    ).toBe(1000)
   })
 
   it('float messageTokenThreshold → throws ConfigValidationError', () => {

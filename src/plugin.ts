@@ -17,6 +17,7 @@ import { parseConfig, omgConfigSchema } from './config.js'
 import { createLlmClient } from './llm/client.js'
 import { createGatewayCompletionsGenerateFn } from './llm/gateway-completions.js'
 import { agentEnd } from './hooks/agent-end.js'
+import { createCircuitBreaker } from './hooks/circuit-breaker.js'
 import { beforeAgentStart } from './hooks/before-agent-start.js'
 import { createMemoryTools } from './context/memory-search.js'
 import { beforeCompaction } from './hooks/before-compaction.js'
@@ -406,6 +407,9 @@ export function register(api: PluginApi): void {
   // workspace, and correctly bootstraps each distinct workspace independently.
   const bootstrappedWorkspaces = new Set<string>()
 
+  // Circuit breaker: backs off observation LLM calls when gateway is failing.
+  const circuitBreaker = createCircuitBreaker()
+
   // Tracks workspaces for which cron jobs have been registered this gateway lifetime.
   // New workspaces encountered in before_prompt_build get cron jobs registered immediately
   // and are persisted to the registry for future gateway restarts.
@@ -441,6 +445,11 @@ export function register(api: PluginApi): void {
             try {
               await scaffoldGraphIfNeeded(wsDir, config)
               const omgRoot = resolveOmgRoot(wsDir, config)
+
+              // Skip tick entirely if bootstrap is fully completed — avoids lock churn
+              const bsState = await readBootstrapState(omgRoot).catch(() => null)
+              if (bsState?.status === 'completed' && bsState.maintenanceDone) continue
+
               const result = await runBootstrapTick({ workspaceDir: wsDir, config, llmClient })
 
               // Run maintenance when bootstrap just completed on this tick
@@ -561,6 +570,7 @@ export function register(api: PluginApi): void {
       messages,
       config,
       llmClient,
+      circuitBreaker,
     })
   })
 

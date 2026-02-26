@@ -932,6 +932,19 @@ export function parseConfig(raw: unknown, options: ParseConfigOptions = {}): Omg
     }
   }
 
+  // Floor clamp: messageTokenThreshold below 1000 is almost certainly a
+  // misconfiguration (e.g. gateway using JSON Schema "minimum" as default).
+  // Would fire observation on every short turn, burning tokens. Clamp to 8000.
+  const MIN_SAFE_MESSAGE_THRESHOLD = 1000
+  const DEFAULT_MESSAGE_THRESHOLD = 8_000
+  if (result.data.observation.messageTokenThreshold < MIN_SAFE_MESSAGE_THRESHOLD) {
+    console.warn(
+      `[omg] parseConfig: messageTokenThreshold (${result.data.observation.messageTokenThreshold}) ` +
+      `is below minimum safe threshold (${MIN_SAFE_MESSAGE_THRESHOLD}) — clamping to ${DEFAULT_MESSAGE_THRESHOLD}`,
+    )
+    ;(result.data.observation as { messageTokenThreshold: number }).messageTokenThreshold = DEFAULT_MESSAGE_THRESHOLD
+  }
+
   // Cast required: z.infer does not add readonly modifiers; OmgConfig wraps the
   // inferred type in DeepReadonly<...>. The satisfies check ensures the inferred
   // schema type and OmgConfig remain aligned at compile time.
