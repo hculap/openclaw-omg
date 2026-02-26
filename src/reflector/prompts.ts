@@ -69,6 +69,7 @@ The compression level controls how aggressively you compress the content:
    reveals a minor correction or addition that doesn't justify a new reflection node.
 6. **Node IDs**: Reflection node IDs use the format \`omg/reflection/{slug}\`.
    The slug should be lowercase, hyphenated, and describe the synthesised insight.
+7. **Preserve bilingual tags**: Tags may appear in both English and other languages. When merging or updating nodes, preserve all language variants.
 
 ## Output Format
 

@@ -221,7 +221,11 @@ async function runMemorySearch(
     if (!response) return []
 
     return buildSemanticCandidates(response, minScore)
-  } catch {
+  } catch (error) {
+    console.error(
+      '[omg] runMemorySearch: memory_search failed — falling back to registry-only scoring.',
+      error instanceof Error ? error.message : String(error)
+    )
     return []
   }
 }
@@ -363,10 +367,11 @@ function computeRegistryScore(entry: RegistryNodeEntry, keywords: ReadonlySet<st
 
 function computeRegistryKeywordMatch(entry: RegistryNodeEntry, keywords: ReadonlySet<string>): number {
   if (keywords.size === 0) return 1.0
-  const text = (entry.description + ' ' + (entry.tags ?? []).join(' ')).toLowerCase()
+  const tags = (entry.tags ?? []).map((t) => t.toLowerCase())
+  const text = (entry.description + ' ' + tags.join(' ')).toLowerCase()
   let matches = 0
   for (const kw of keywords) {
-    if (text.includes(kw)) matches++
+    if (text.includes(kw) || prefixMatchesTags(kw, tags)) matches++
   }
   return 1.0 + matches * 0.5
 }
@@ -423,29 +428,55 @@ function computeRecencyFactor(updatedIso: string): number {
 
 function computeKeywordMatch(node: GraphNode, keywords: ReadonlySet<string>): number {
   if (keywords.size === 0) return 1.0
-  const text = (node.body + ' ' + (node.frontmatter.tags ?? []).join(' ')).toLowerCase()
+  const tags = (node.frontmatter.tags ?? []).map((t) => t.toLowerCase())
+  const text = (node.body + ' ' + tags.join(' ')).toLowerCase()
   let matches = 0
   for (const kw of keywords) {
-    if (text.includes(kw)) matches++
+    if (text.includes(kw) || prefixMatchesTags(kw, tags)) matches++
   }
   // Base score 1.0 + bonus for keyword hits
   return 1.0 + matches * 0.5
 }
 
+/**
+ * Returns true if the keyword shares a common prefix with any tag, using an
+ * adaptive prefix length: `max(3, floor(min(kwLen, tagLen) * 0.75))`.
+ *
+ * Short stems (3-4 chars) need only 3 matching chars — critical for Polish
+ * words like żona whose inflections (żony, żonie, żonę) share only a 3-char
+ * stem. Longer words require proportionally longer prefixes.
+ *
+ * False positives (e.g. dark↔dart sharing "dar") are acceptable because prefix
+ * matching only provides an additive score boost, not exclusive selection.
+ */
+function prefixMatchesTags(keyword: string, tags: readonly string[]): boolean {
+  for (const tag of tags) {
+    const prefixLen = Math.max(3, Math.floor(Math.min(keyword.length, tag.length) * 0.75))
+    if (keyword.length < prefixLen || tag.length < prefixLen) continue
+    if (tag.startsWith(keyword.slice(0, prefixLen)) || keyword.startsWith(tag.slice(0, prefixLen))) {
+      return true
+    }
+  }
+  return false
+}
+
+/** High-frequency English function words (> 3 chars) that add noise to keyword matching. */
+const STOPWORDS = new Set([
+  'about', 'also', 'been', 'came', 'come', 'could', 'does', 'each',
+  'even', 'from', 'gave', 'goes', 'gone', 'have', 'help', 'here',
+  'into', 'just', 'know', 'like', 'made', 'make', 'many', 'more',
+  'most', 'much', 'must', 'need', 'only', 'over', 'said', 'same',
+  'shall', 'should', 'show', 'some', 'such', 'take', 'tell', 'than',
+  'that', 'them', 'then', 'there', 'these', 'they', 'this', 'very',
+  'want', 'were', 'what', 'when', 'where', 'which', 'will', 'with',
+  'would', 'your',
+])
+
 function extractKeywords(messages: readonly Message[]): ReadonlySet<string> {
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'for',
-    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'and',
-    'or', 'but', 'if', 'then', 'that', 'this', 'it', 'its', 'i', 'you',
-    'me', 'my', 'your', 'we', 'our', 'they', 'them', 'their', 'not',
-    'help', 'about', 'what', 'how', 'when', 'where', 'who', 'which',
-  ])
   const words = new Set<string>()
   for (const msg of messages) {
-    for (const word of msg.content.toLowerCase().split(/\W+/)) {
-      if (word.length > 3 && !stopWords.has(word)) {
+    for (const word of msg.content.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+      if (word.length > 3 && !STOPWORDS.has(word)) {
         words.add(word)
       }
     }

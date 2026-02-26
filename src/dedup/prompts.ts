@@ -32,6 +32,7 @@ RULES:
 3. Preserve unique canonical keys from losers as aliases.
 4. If nodes have contradictory values, list them in "conflicts" — do NOT merge them.
 5. Return ONLY valid JSON matching the schema below. No prose, no rationale, no explanations — not before, not after the JSON. The JSON must be your entire response.
+6. Tags may be bilingual (English + another language). Preserve all language variants when merging.
 
 IMPORTANT: Keep all string values short (under 100 characters). Leave optional fields as empty arrays or omit them when not needed. Do NOT generate bodyAppend — it is reserved for future use.
 

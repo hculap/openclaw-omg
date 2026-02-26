@@ -4,19 +4,6 @@
  */
 
 // ---------------------------------------------------------------------------
-// Stopwords
-// ---------------------------------------------------------------------------
-
-const STOPWORDS = new Set([
-  'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-  'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been',
-  'has', 'have', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-  'should', 'may', 'might', 'shall', 'it', 'its', 'this', 'that', 'these',
-  'those', 'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'she', 'they',
-  'not', 'no', 'as', 'up',
-])
-
-// ---------------------------------------------------------------------------
 // extractTrigrams
 // ---------------------------------------------------------------------------
 
@@ -68,14 +55,15 @@ export function trigramJaccard(a: string, b: string): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Tokenizes text into a set of lowercase words, splitting on non-alphanumeric
- * characters and filtering common stopwords and empty tokens.
+ * Tokenizes text into a set of lowercase words, splitting on non-letter/non-digit
+ * Unicode boundaries. Filters tokens ≤ 2 chars to reduce noise from articles and
+ * prepositions across languages without requiring a language-specific stopword list.
  */
 export function tokenize(text: string): Set<string> {
-  const words = text.toLowerCase().split(/[^a-z0-9]+/)
+  const words = text.toLowerCase().split(/[^\p{L}\p{N}]+/u)
   const result = new Set<string>()
   for (const word of words) {
-    if (word.length > 0 && !STOPWORDS.has(word)) {
+    if (word.length > 2) {
       result.add(word)
     }
   }

@@ -168,13 +168,14 @@ Updated project description with new details from this session.
 3. Use <canonical-key> to identify the concept. The same concept must always get the same key.
 4. Use <moc-hints> as a comma-separated list of domain names: preferences, tools, projects
 5. Use <links> as a comma-separated list of related canonical keys: preferences.editor_theme, projects.my_app
-6. Use <tags> as a comma-separated list: preferences, dark-mode, editor
+6. Use <tags> as a comma-separated bilingual list — always include English tags plus translations in the conversation's language. If the conversation is entirely in English, English-only tags are acceptable.
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-patch> focus must be a single sentence, max 200 chars.
 9. The <now-patch> open-loops is a comma-separated list of outstanding items from this session.
 10. The <now-patch> suggested-links is a comma-separated list of canonical keys of relevant nodes.
 11. Omit <now-patch> entirely if there is no meaningful current-state change.
 12. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
+13. Tags MUST be bilingual — include BOTH English AND the original conversation language. If the conversation is entirely in English, English-only tags are acceptable.
 `
 }
 
@@ -318,10 +319,11 @@ Setting up the login flow with email + password.
 3. Use <canonical-key> to identify the concept. The same concept must always get the same key.
 4. Use <moc-hints> as a comma-separated list of domain names: preferences, tools, projects
 5. Use <links> as a comma-separated list of related canonical keys: preferences.editor_theme, projects.my_app
-6. Use <tags> as a comma-separated list: preferences, dark-mode, editor
+6. Use <tags> as a comma-separated bilingual list — always include English tags plus translations in the conversation's language. If the conversation is entirely in English, English-only tags are acceptable.
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-update> should reflect the user's current focus and state — not a full history.
 9. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
+10. Tags MUST be bilingual — include BOTH English AND the original conversation language. If the conversation is entirely in English, English-only tags are acceptable.
 `
 }
 
