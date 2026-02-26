@@ -363,10 +363,11 @@ function computeRegistryScore(entry: RegistryNodeEntry, keywords: ReadonlySet<st
 
 function computeRegistryKeywordMatch(entry: RegistryNodeEntry, keywords: ReadonlySet<string>): number {
   if (keywords.size === 0) return 1.0
-  const text = (entry.description + ' ' + (entry.tags ?? []).join(' ')).toLowerCase()
+  const tags = (entry.tags ?? []).map((t) => t.toLowerCase())
+  const text = (entry.description + ' ' + tags.join(' ')).toLowerCase()
   let matches = 0
   for (const kw of keywords) {
-    if (text.includes(kw)) matches++
+    if (text.includes(kw) || prefixMatchesTags(kw, tags)) matches++
   }
   return 1.0 + matches * 0.5
 }
@@ -423,13 +424,34 @@ function computeRecencyFactor(updatedIso: string): number {
 
 function computeKeywordMatch(node: GraphNode, keywords: ReadonlySet<string>): number {
   if (keywords.size === 0) return 1.0
-  const text = (node.body + ' ' + (node.frontmatter.tags ?? []).join(' ')).toLowerCase()
+  const tags = (node.frontmatter.tags ?? []).map((t) => t.toLowerCase())
+  const text = (node.body + ' ' + tags.join(' ')).toLowerCase()
   let matches = 0
   for (const kw of keywords) {
-    if (text.includes(kw)) matches++
+    if (text.includes(kw) || prefixMatchesTags(kw, tags)) matches++
   }
   // Base score 1.0 + bonus for keyword hits
   return 1.0 + matches * 0.5
+}
+
+/** Minimum shared prefix length for fuzzy tag matching. */
+const MIN_PREFIX_LENGTH = 4
+
+/**
+ * Returns true if the keyword shares a common prefix (>= MIN_PREFIX_LENGTH chars)
+ * with any tag. Handles inflected forms in morphologically rich languages
+ * (e.g. Polish: muzyce↔muzyka, zespole↔zespół).
+ */
+function prefixMatchesTags(keyword: string, tags: readonly string[]): boolean {
+  if (keyword.length < MIN_PREFIX_LENGTH) return false
+  const kwPrefix = keyword.slice(0, MIN_PREFIX_LENGTH)
+  for (const tag of tags) {
+    if (tag.length < MIN_PREFIX_LENGTH) continue
+    if (tag.startsWith(kwPrefix) || keyword.startsWith(tag.slice(0, MIN_PREFIX_LENGTH))) {
+      return true
+    }
+  }
+  return false
 }
 
 function extractKeywords(messages: readonly Message[]): ReadonlySet<string> {

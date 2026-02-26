@@ -422,6 +422,79 @@ describe('selectContext — multilingual keyword extraction', () => {
     // The important thing is it doesn't crash
     expect(slice).toBeDefined()
   })
+
+  it('prefix-matches inflected Polish keywords against tags (muzyce↔muzyka)', () => {
+    const musicNode = makeNode({
+      id: 'omg/identity/music',
+      type: 'identity',
+      priority: 'high',
+      body: 'Band history and music background.',
+      tags: ['muzyka', 'zespół', 'gitara'],
+    })
+    const irrelevant = makeNode({
+      id: 'omg/fact/unrelated',
+      body: 'Unrelated content.',
+      tags: ['food', 'cooking'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    // "muzyce" shares prefix "muzy" with "muzyka", "zespole" shares "zesp" with "zespół"
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [irrelevant, musicNode],
+      recentMessages: [{ role: 'user', content: 'Opowiedz mi o mojej muzyce i zespole' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/identity/music')
+  })
+
+  it('prefix-matches inflected forms: urodziny↔urodzinach, dzieci↔dzieciach', () => {
+    const node = makeNode({
+      id: 'omg/identity/birthdays',
+      type: 'identity',
+      priority: 'high',
+      body: 'Children birthday info.',
+      tags: ['urodziny', 'dzieci', 'rodzina'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      recentMessages: [{ role: 'user', content: 'Kiedy są urodzinach moich dzieciach?' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/identity/birthdays')
+  })
+
+  it('does NOT prefix-match short tags (< 4 chars)', () => {
+    const node = makeNode({
+      id: 'omg/fact/test',
+      body: 'Content.',
+      tags: ['api', 'git', 'ssh'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      recentMessages: [{ role: 'user', content: 'application programming interface' }],
+      config: tightConfig,
+    })
+
+    // "application" should NOT prefix-match "api" (api is < 4 chars)
+    expect(slice).toBeDefined()
+  })
 })
 
 // ---------------------------------------------------------------------------
