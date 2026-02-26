@@ -282,7 +282,9 @@ async function bootstrapCronHandler(ctx: CronContext): Promise<void> {
   try {
     const state = await readBootstrapState(omgRoot)
     if (state?.status === 'completed' && state.maintenanceDone) return
-  } catch { /* state unreadable — proceed to let tick handle it */ }
+  } catch (err) {
+    console.warn('[omg] cron: bootstrap state unreadable — proceeding to tick:', err)
+  }
 
   try {
     const result = await runBootstrapTick({
