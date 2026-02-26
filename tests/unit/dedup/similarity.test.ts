@@ -102,19 +102,22 @@ describe('tokenize', () => {
     expect(tokens.has('qux')).toBe(true)
   })
 
-  it('includes all words (no stopword filtering)', () => {
+  it('includes content words and filters short tokens (≤ 2 chars)', () => {
     const tokens = tokenize('the user prefers dark mode')
     expect(tokens.has('the')).toBe(true)
     expect(tokens.has('user')).toBe(true)
     expect(tokens.has('prefers')).toBe(true)
     expect(tokens.has('dark')).toBe(true)
     expect(tokens.has('mode')).toBe(true)
+    // Short tokens (≤ 2 chars) are filtered
+    const shortTokens = tokenize('a to is it of an by or on in')
+    expect(shortTokens.size).toBe(0)
   })
 
-  it('filters empty tokens', () => {
+  it('filters empty and short tokens', () => {
     const tokens = tokenize('  multiple   spaces  ')
     for (const t of tokens) {
-      expect(t.length).toBeGreaterThan(0)
+      expect(t.length).toBeGreaterThan(2)
     }
   })
 

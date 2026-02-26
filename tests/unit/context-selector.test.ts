@@ -475,7 +475,36 @@ describe('selectContext — multilingual keyword extraction', () => {
     expect(ids).toContain('omg/identity/birthdays')
   })
 
-  it('does NOT prefix-match short tags (< 4 chars)', () => {
+  it('prefix-matches short-stem Polish inflections: żonie↔żona (3-char stem)', () => {
+    const node = makeNode({
+      id: 'omg/identity/wife',
+      type: 'identity',
+      priority: 'high',
+      body: 'Sylwia is the user\'s wife.',
+      tags: ['żona', 'wife', 'partner'],
+    })
+    const irrelevant = makeNode({
+      id: 'omg/fact/unrelated',
+      body: 'Unrelated content.',
+      tags: ['food', 'cooking'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    // "żonie" (locative of żona) shares 3-char prefix "żon" with tag "żona"
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [irrelevant, node],
+      recentMessages: [{ role: 'user', content: 'Opowiedz mi o mojej żonie' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/identity/wife')
+  })
+
+  it('does NOT prefix-match unrelated short tags (api vs application)', () => {
     const node = makeNode({
       id: 'omg/fact/test',
       body: 'Content.',
@@ -492,7 +521,7 @@ describe('selectContext — multilingual keyword extraction', () => {
       config: tightConfig,
     })
 
-    // "application" should NOT prefix-match "api" (api is < 4 chars)
+    // "application" prefix "app" ≠ "api" prefix "api" — no false match
     expect(slice).toBeDefined()
   })
 })

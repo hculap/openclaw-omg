@@ -221,7 +221,11 @@ async function runMemorySearch(
     if (!response) return []
 
     return buildSemanticCandidates(response, minScore)
-  } catch {
+  } catch (error) {
+    console.error(
+      '[omg] runMemorySearch: memory_search failed — falling back to registry-only scoring.',
+      error instanceof Error ? error.message : String(error)
+    )
     return []
   }
 }
@@ -434,31 +438,45 @@ function computeKeywordMatch(node: GraphNode, keywords: ReadonlySet<string>): nu
   return 1.0 + matches * 0.5
 }
 
-/** Minimum shared prefix length for fuzzy tag matching. */
-const MIN_PREFIX_LENGTH = 4
-
 /**
- * Returns true if the keyword shares a common prefix (>= MIN_PREFIX_LENGTH chars)
- * with any tag. Handles inflected forms in morphologically rich languages
- * (e.g. Polish: muzyce↔muzyka, zespole↔zespół).
+ * Returns true if the keyword shares a common prefix with any tag, using an
+ * adaptive prefix length: `max(3, floor(min(kwLen, tagLen) * 0.75))`.
+ *
+ * Short stems (3-4 chars) need only 3 matching chars — critical for Polish
+ * words like żona whose inflections (żony, żonie, żonę) share only a 3-char
+ * stem. Longer words require proportionally longer prefixes.
+ *
+ * False positives (e.g. dark↔dart sharing "dar") are acceptable because prefix
+ * matching only provides an additive score boost, not exclusive selection.
  */
 function prefixMatchesTags(keyword: string, tags: readonly string[]): boolean {
-  if (keyword.length < MIN_PREFIX_LENGTH) return false
-  const kwPrefix = keyword.slice(0, MIN_PREFIX_LENGTH)
   for (const tag of tags) {
-    if (tag.length < MIN_PREFIX_LENGTH) continue
-    if (tag.startsWith(kwPrefix) || keyword.startsWith(tag.slice(0, MIN_PREFIX_LENGTH))) {
+    const prefixLen = Math.max(3, Math.floor(Math.min(keyword.length, tag.length) * 0.75))
+    if (keyword.length < prefixLen || tag.length < prefixLen) continue
+    if (tag.startsWith(keyword.slice(0, prefixLen)) || keyword.startsWith(tag.slice(0, prefixLen))) {
       return true
     }
   }
   return false
 }
 
+/** High-frequency English function words (> 3 chars) that add noise to keyword matching. */
+const STOPWORDS = new Set([
+  'about', 'also', 'been', 'came', 'come', 'could', 'does', 'each',
+  'even', 'from', 'gave', 'goes', 'gone', 'have', 'help', 'here',
+  'into', 'just', 'know', 'like', 'made', 'make', 'many', 'more',
+  'most', 'much', 'must', 'need', 'only', 'over', 'said', 'same',
+  'shall', 'should', 'show', 'some', 'such', 'take', 'tell', 'than',
+  'that', 'them', 'then', 'there', 'these', 'they', 'this', 'very',
+  'want', 'were', 'what', 'when', 'where', 'which', 'will', 'with',
+  'would', 'your',
+])
+
 function extractKeywords(messages: readonly Message[]): ReadonlySet<string> {
   const words = new Set<string>()
   for (const msg of messages) {
     for (const word of msg.content.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
-      if (word.length > 3) {
+      if (word.length > 3 && !STOPWORDS.has(word)) {
         words.add(word)
       }
     }

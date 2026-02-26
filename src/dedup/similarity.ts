@@ -55,14 +55,15 @@ export function trigramJaccard(a: string, b: string): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Tokenizes text into a set of lowercase words, splitting on non-alphanumeric
- * characters and filtering common stopwords and empty tokens.
+ * Tokenizes text into a set of lowercase words, splitting on non-letter/non-digit
+ * Unicode boundaries. Filters tokens ≤ 2 chars to reduce noise from articles and
+ * prepositions across languages without requiring a language-specific stopword list.
  */
 export function tokenize(text: string): Set<string> {
   const words = text.toLowerCase().split(/[^\p{L}\p{N}]+/u)
   const result = new Set<string>()
   for (const word of words) {
-    if (word.length > 0) {
+    if (word.length > 2) {
       result.add(word)
     }
   }
