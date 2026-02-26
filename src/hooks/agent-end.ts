@@ -3,9 +3,8 @@ import type { LlmClient } from '../llm/client.js'
 import type { Message, OmgSessionState, ExtractOutput } from '../types.js'
 import { createOmgSessionState, candidateToUpsertOperation } from '../types.js'
 import { loadSessionState, saveSessionState, getDefaultSessionState } from '../state/session-state.js'
-import { accumulateTokens, shouldTriggerObservation, shouldTriggerReflection } from '../state/token-tracker.js'
+import { accumulateTokens, shouldTriggerObservation } from '../state/token-tracker.js'
 import { runExtract, runMerge } from '../observer/observer.js'
-import { runReflection } from '../reflector/reflector.js'
 import { writeObservationNode, writeNowNode, appendToExistingNode, addAliasToNode } from '../graph/node-writer.js'
 import { applyMocUpdate, regenerateMoc } from '../graph/moc-manager.js'
 import { readGraphNode } from '../graph/node-reader.js'
@@ -19,6 +18,7 @@ import type { MemoryTools } from '../context/memory-search.js'
 import { checkSourceOverlap, suppressDuplicateCandidates, updateRecentFingerprints } from '../observer/extraction-guardrails.js'
 import { buildFingerprint, type SourceFingerprint } from '../observer/source-fingerprint.js'
 import { emitMetric } from '../metrics/index.js'
+import type { CircuitBreaker } from './circuit-breaker.js'
 import path from 'node:path'
 
 // ---------------------------------------------------------------------------
@@ -37,17 +37,19 @@ export interface AgentEndContext {
   readonly llmClient: LlmClient
   /** Optional memory tools for semantic retrieval during merge targeting. */
   readonly memoryTools?: MemoryTools | null
+  /** Optional circuit breaker to skip observation when gateway is failing. */
+  readonly circuitBreaker?: CircuitBreaker | null
 }
 
 /**
- * OpenClaw `agent_end` hook — triggers observation (and optionally reflection)
- * after each agent turn.
+ * OpenClaw `agent_end` hook — triggers observation after each agent turn.
+ * Reflection is handled exclusively by the cron job (graphMaintenanceCronHandler).
  *
  * Never throws — all errors are caught and logged. State is always persisted
  * even on partial failure.
  */
 export async function agentEnd(event: AgentEndEvent, ctx: AgentEndContext): Promise<void> {
-  const { workspaceDir, sessionKey, messages, config, llmClient, memoryTools } = ctx
+  const { workspaceDir, sessionKey, messages, config, llmClient, memoryTools, circuitBreaker } = ctx
   const omgRoot = resolveOmgRoot(workspaceDir, config)
   const scope = config.scope ?? workspaceDir
   const writeContext = { omgRoot, sessionKey, scope }
@@ -60,9 +62,18 @@ export async function agentEnd(event: AgentEndEvent, ctx: AgentEndContext): Prom
     return
   }
 
+  // Circuit breaker: skip observation when gateway is consistently failing
+  if (circuitBreaker?.shouldSkip()) {
+    console.warn(
+      `[omg] agent_end [${sessionKey}]: circuit breaker OPEN — skipping observation (gateway failing)`
+    )
+    await persistState(workspaceDir, sessionKey, accumulatedState)
+    return
+  }
+
   const finalState = await tryRunObservation(
     messages, accumulatedState, config, llmClient, omgRoot, writeContext, sessionKey,
-    memoryTools ?? null
+    memoryTools ?? null, circuitBreaker ?? null
   )
 
   await persistState(workspaceDir, sessionKey, finalState)
@@ -92,7 +103,8 @@ export async function tryRunObservation(
   omgRoot: string,
   writeContext: { readonly omgRoot: string; readonly sessionKey: string; readonly scope: string },
   sessionKey: string,
-  memoryTools: MemoryTools | null = null
+  memoryTools: MemoryTools | null = null,
+  circuitBreaker: CircuitBreaker | null = null,
 ): Promise<OmgSessionState> {
   // ── Pre-Extract: Guardrail overlap check ────────────────────────────────
   const unobservedMessages = Array.from(messages.slice(state.observationBoundaryMessageIndex))
@@ -144,8 +156,11 @@ export async function tryRunObservation(
     })
   } catch (err) {
     console.error(`[omg] agent_end [${sessionKey}]: Extract phase failed — state preserved for retry:`, err)
+    circuitBreaker?.recordFailure()
     return state
   }
+
+  circuitBreaker?.recordSuccess()
 
   // ── Post-Extract: Guardrail candidate suppression ────────────────────────
   let allRegistryEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
@@ -373,29 +388,6 @@ export async function tryRunObservation(
   } catch (err) {
     console.error(`[omg] agent_end [${sessionKey}]: state factory threw after successful observation — state preserved:`, err)
     return state
-  }
-
-  // Trigger reflection if enough new observation tokens have accumulated since
-  // the last reflection pass. After the pass (successful or not) we advance the
-  // watermark so reflection does not re-fire on the very next turn.
-  if (shouldTriggerReflection(updatedState, config)) {
-    try {
-      // Use registry for metadata-only filter, then hydrate qualifying nodes
-      const eligibleEntries = await getRegistryEntries(omgRoot, { archived: false })
-      const nonReflectionEntries = eligibleEntries.filter(([, e]) => e.type !== 'reflection')
-      const nodeIds = nonReflectionEntries.map(([id]) => id)
-      const filePaths = await getNodeFilePaths(omgRoot, nodeIds)
-      const observationNodes = (await Promise.all(
-        [...filePaths.values()].map((fp) => readGraphNode(fp))
-      )).filter((n): n is NonNullable<typeof n> => n !== null)
-      await runReflection({ observationNodes, config, llmClient, omgRoot, sessionKey })
-        .catch((err) => console.error(`[omg] agent_end [${sessionKey}]: reflection failed:`, err))
-    } catch (err) {
-      console.error(`[omg] agent_end [${sessionKey}]: reflection setup failed — watermark not advanced:`, err)
-      return updatedState
-    }
-    // Advance the watermark regardless of outcome — prevents infinite re-triggering.
-    updatedState = { ...updatedState, lastReflectionTotalTokens: updatedState.totalObservationTokens }
   }
 
   return updatedState

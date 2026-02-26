@@ -278,6 +278,14 @@ async function bootstrapCronHandler(ctx: CronContext): Promise<void> {
     return
   }
 
+  // Skip tick entirely if bootstrap is fully completed — avoids lock churn every 5 min
+  try {
+    const state = await readBootstrapState(omgRoot)
+    if (state?.status === 'completed' && state.maintenanceDone) return
+  } catch (err) {
+    console.warn('[omg] cron: bootstrap state unreadable — proceeding to tick:', err)
+  }
+
   try {
     const result = await runBootstrapTick({
       workspaceDir: ctx.workspaceDir,

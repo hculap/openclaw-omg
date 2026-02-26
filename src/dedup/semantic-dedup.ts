@@ -15,7 +15,7 @@ import type { SemanticDedupResult, SemanticDedupConfig, SemanticMergeSuggestion 
 import { semanticDedupLlmResponseSchema } from './semantic-types.js'
 import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
 import { generateSemanticBlocks } from './semantic-blocks.js'
-import { buildSemanticDedupSystemPrompt, buildSemanticDedupUserPrompt } from './semantic-prompts.js'
+import { buildSemanticDedupSystemPrompt, buildBatchedSemanticDedupUserPrompt } from './semantic-prompts.js'
 import { executeMerge } from './merge.js'
 import { appendAuditEntry } from './audit.js'
 import { emitMetric } from '../metrics/index.js'
@@ -76,64 +76,58 @@ export async function runSemanticDedup(params: SemanticDedupParams): Promise<Sem
     return { blocksProcessed, mergesExecuted, nodesArchived, tokensUsed, errors }
   }
 
-  console.warn(`[omg] semantic-dedup: ${blocks.length} block(s) to process`)
+  console.warn(`[omg] semantic-dedup: ${blocks.length} block(s) to process (batched into 1 LLM call)`)
+  blocksProcessed = blocks.length
 
-  // Step 2: Process each block
-  for (const block of blocks) {
-    blocksProcessed++
+  // Step 2: Read all node bodies across all blocks
+  const allNodeIds = blocks.flatMap((b) => [...b.nodeIds])
+  const nodeContents = new Map<string, string>()
+  let filePaths: Map<string, string>
+  try {
+    filePaths = await getNodeFilePaths(omgRoot, allNodeIds)
+  } catch (err) {
+    const msg = `Failed to resolve file paths: ${err instanceof Error ? err.message : String(err)}`
+    console.error('[omg] semantic-dedup:', msg)
+    errors.push(msg)
+    return { blocksProcessed, mergesExecuted, nodesArchived, tokensUsed, errors }
+  }
 
-    // Read node bodies for this block
-    const nodeContents = new Map<string, string>()
-    let filePaths: Map<string, string>
+  for (const [nodeId, filePath] of filePaths) {
     try {
-      filePaths = await getNodeFilePaths(omgRoot, [...block.nodeIds])
+      const raw = await fs.readFile(filePath, 'utf-8')
+      const { body } = parseFrontmatter(raw)
+      nodeContents.set(nodeId, body.slice(0, sdConfig.maxBodyCharsPerNode))
     } catch (err) {
-      const msg = `Failed to resolve file paths for block: ${err instanceof Error ? err.message : String(err)}`
-      console.error('[omg] semantic-dedup:', msg)
-      errors.push(msg)
-      continue
+      console.warn(
+        `[omg] semantic-dedup: failed to read node "${nodeId}" at ${filePath} — excluded:`,
+        err instanceof Error ? err.message : String(err),
+      )
     }
+  }
 
-    for (const [nodeId, filePath] of filePaths) {
-      try {
-        const raw = await fs.readFile(filePath, 'utf-8')
-        const { body } = parseFrontmatter(raw)
-        nodeContents.set(nodeId, body.slice(0, sdConfig.maxBodyCharsPerNode))
-      } catch (err) {
-        console.warn(
-          `[omg] semantic-dedup: failed to read node "${nodeId}" at ${filePath} — excluded from block:`,
-          err instanceof Error ? err.message : String(err),
-        )
-        // Do NOT add to nodeContents — skip the node entirely
-      }
-    }
+  // Step 3: Single batched LLM call for all blocks
+  const system = buildSemanticDedupSystemPrompt()
+  const user = buildBatchedSemanticDedupUserPrompt(blocks, nodeContents, sdConfig.maxBodyCharsPerNode)
 
-    // Call LLM
-    const system = buildSemanticDedupSystemPrompt()
-    const user = buildSemanticDedupUserPrompt(block, nodeContents, sdConfig.maxBodyCharsPerNode)
+  let responseContent: string
+  try {
+    const response = await llmClient.generate({ system, user, maxTokens: SEMANTIC_DEDUP_MAX_TOKENS })
+    responseContent = response.content
+    tokensUsed += response.usage.inputTokens + response.usage.outputTokens
+  } catch (err) {
+    const msg = `LLM call failed: ${err instanceof Error ? err.message : String(err)}`
+    console.error('[omg] semantic-dedup:', msg)
+    errors.push(msg)
+    return { blocksProcessed, mergesExecuted, nodesArchived, tokensUsed, errors }
+  }
 
-    let responseContent: string
-    try {
-      const response = await llmClient.generate({ system, user, maxTokens: SEMANTIC_DEDUP_MAX_TOKENS })
-      responseContent = response.content
-      tokensUsed += response.usage.inputTokens + response.usage.outputTokens
-    } catch (err) {
-      const msg = `LLM call failed for block [${block.domain}]: ${err instanceof Error ? err.message : String(err)}`
-      console.error('[omg] semantic-dedup:', msg)
-      errors.push(msg)
-      continue
-    }
-
-    // Parse LLM response
-    const suggestions = parseLlmResponse(responseContent, sdConfig.semanticMergeThreshold)
-    if (suggestions === null) {
-      const msg = `Failed to parse LLM response for block [${block.domain}]`
-      console.warn('[omg] semantic-dedup:', msg)
-      errors.push(msg)
-      continue
-    }
-
-    // Execute merges for accepted suggestions
+  // Step 4: Parse response and execute merges
+  const suggestions = parseLlmResponse(responseContent, sdConfig.semanticMergeThreshold)
+  if (suggestions === null) {
+    const msg = 'Failed to parse batched LLM response'
+    console.warn('[omg] semantic-dedup:', msg)
+    errors.push(msg)
+  } else {
     for (const suggestion of suggestions) {
       try {
         const result = await executeSemantic(suggestion, filePaths, omgRoot)
