@@ -73,6 +73,32 @@ describe('parseReflectorOutput — valid XML', () => {
     expect(node.body).toContain('Workflow Preferences')
   })
 
+  it('parses bilingual tags from reflection nodes', () => {
+    const xml = makeReflectionXml(`
+      <reflection-nodes>
+        <node compression-level="2">
+          <id>omg/reflection/family-overview</id>
+          <description>Family structure overview — Przegląd struktury rodziny</description>
+          <tags>family, rodzina, relationships, relacje, children, dzieci, partner, partnerka, identity, tożsamość</tags>
+          <sources>omg/identity/wife, omg/identity/children</sources>
+          <body>Family overview.</body>
+        </node>
+      </reflection-nodes>
+    `)
+    const output = parseReflectorOutput(xml)
+    const node = output.reflectionNodes[0]!
+    expect(node.tags).toContain('family')
+    expect(node.tags).toContain('rodzina')
+    expect(node.tags).toContain('dzieci')
+    expect(node.tags).toHaveLength(10)
+  })
+
+  it('returns empty tags array when <tags> element is missing', () => {
+    const xml = makeReflectionXml(VALID_REFLECTION_NODE)
+    const output = parseReflectorOutput(xml)
+    expect(output.reflectionNodes[0]!.tags).toEqual([])
+  })
+
   it('parses archive node IDs correctly', () => {
     const xml = makeReflectionXml(VALID_ARCHIVE_NODES)
     const output = parseReflectorOutput(xml)
@@ -279,6 +305,25 @@ describe('parseReflectorOutput — invalid records dropped with warning', () => 
     const output = parseReflectorOutput(xml)
     expect(output.nodeUpdates).toHaveLength(0)
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('invalid or missing targetId'))
+  })
+
+  it('warns when reflection node has fewer than 10 tags', () => {
+    const xml = makeReflectionXml(`
+      <reflection-nodes>
+        <node compression-level="1">
+          <id>omg/reflection/few-tags</id>
+          <description>Node with few tags</description>
+          <tags>one, two, three</tags>
+          <sources>omg/preference/dark-mode</sources>
+          <body>Some body.</body>
+        </node>
+      </reflection-nodes>
+    `)
+    const output = parseReflectorOutput(xml)
+    expect(output.reflectionNodes).toHaveLength(1)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('has 3 tags (recommended minimum: 10)')
+    )
   })
 })
 

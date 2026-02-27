@@ -112,10 +112,48 @@ describe('buildObserverSystemPrompt', () => {
     expect(prompt).toContain('identity or preference nodes with high priority')
   })
 
-  it('contains bilingual tag instruction', () => {
+  it('contains bilingual tag instruction with 8–12 count requirement', () => {
     const prompt = buildObserverSystemPrompt()
     expect(prompt).toContain('bilingual')
-    expect(prompt).toContain('English AND the original conversation language')
+    expect(prompt).toContain('8–12')
+    expect(prompt).toContain('most specific')
+  })
+
+  it('does NOT contain English-only escape clause', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).not.toContain('entirely in English')
+  })
+
+  it('few-shot examples contain non-English bilingual tags', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('rodzina')
+    expect(prompt).toContain('rutyna')
+    expect(prompt).toContain('edytor')
+  })
+
+  it('few-shot example descriptions use bilingual separator " — "', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('Rodzina: partnerka Alex')
+    expect(prompt).toContain('Poranna rutyna:')
+    expect(prompt).toContain('Preferencja edytora:')
+  })
+
+  it('few-shot examples have >= 8 tags each (except project with links)', () => {
+    const prompt = buildObserverSystemPrompt()
+    // Extract all <tags>...</tags> from few-shot
+    const tagMatches = [...prompt.matchAll(/<tags>([^<]+)<\/tags>/g)]
+    // Filter to only ones that have actual content (not empty)
+    const tagSets = tagMatches
+      .map(m => m[1]!.split(',').map(t => t.trim()).filter(Boolean))
+      .filter(tags => tags.length > 0)
+    // At least the 3 non-project examples should have >= 8 tags
+    const withEnoughTags = tagSets.filter(tags => tags.length >= 8)
+    expect(withEnoughTags.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('includes proper noun guidance in tag rules', () => {
+    const prompt = buildObserverSystemPrompt()
+    expect(prompt).toContain('Proper nouns preserved as-is')
   })
 })
 
@@ -185,10 +223,45 @@ describe('buildExtractSystemPrompt', () => {
     expect(prompt).not.toContain('now-update')
   })
 
-  it('contains bilingual tag instruction', () => {
+  it('contains bilingual tag instruction with 8–12 count requirement', () => {
     const prompt = buildExtractSystemPrompt()
     expect(prompt).toContain('bilingual')
-    expect(prompt).toContain('English AND the original conversation language')
+    expect(prompt).toContain('8–12')
+    expect(prompt).toContain('most specific')
+  })
+
+  it('does NOT contain English-only escape clause', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).not.toContain('entirely in English')
+  })
+
+  it('few-shot examples contain non-English bilingual tags', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('rodzina')
+    expect(prompt).toContain('rutyna')
+    expect(prompt).toContain('edytor')
+  })
+
+  it('few-shot example descriptions use bilingual separator " — "', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('Rodzina: partnerka Alex')
+    expect(prompt).toContain('Poranna rutyna:')
+    expect(prompt).toContain('Preferencja edytora:')
+  })
+
+  it('few-shot examples have >= 8 tags each (except project with links)', () => {
+    const prompt = buildExtractSystemPrompt()
+    const tagMatches = [...prompt.matchAll(/<tags>([^<]+)<\/tags>/g)]
+    const tagSets = tagMatches
+      .map(m => m[1]!.split(',').map(t => t.trim()).filter(Boolean))
+      .filter(tags => tags.length > 0)
+    const withEnoughTags = tagSets.filter(tags => tags.length >= 8)
+    expect(withEnoughTags.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('includes proper noun guidance in tag rules', () => {
+    const prompt = buildExtractSystemPrompt()
+    expect(prompt).toContain('Proper nouns preserved as-is')
   })
 })
 

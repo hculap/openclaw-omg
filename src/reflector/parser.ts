@@ -22,6 +22,8 @@ interface ReflectionNodeSpec {
   readonly id: string
   readonly description: string
   readonly body: string
+  /** Bilingual keyword tags for retrieval. */
+  readonly tags: readonly string[]
   /** IDs of source observation nodes that contributed to this reflection. */
   readonly sources: readonly string[]
   readonly compressionLevel: CompressionLevel
@@ -128,8 +130,17 @@ function parseReflectionNodes(section: unknown): readonly ReflectionNodeSpec[] {
     }
 
     const sources = parseSources(node['sources'])
+    const rawTags = typeof node['tags'] === 'string' ? node['tags'] : ''
+    const tags = rawTags
+      .split(',')
+      .map((t: string) => t.trim())
+      .filter((t: string) => t.length > 0)
 
-    results.push({ id, description, body, sources, compressionLevel })
+    if (tags.length < 10) {
+      console.warn(`[omg] Reflector parser: reflection node "${id}" has ${tags.length} tags (recommended minimum: 10)`)
+    }
+
+    results.push({ id, description, body, tags, sources, compressionLevel })
   }
 
   return results

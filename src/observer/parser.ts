@@ -236,6 +236,10 @@ function coerceOperationFields(
   const tags = extractCommaSeparated(op['tags'])
   const linkKeys = extractCommaSeparated(op['links'])
 
+  if (tags.length < 8) {
+    console.warn(`${logPrefix} operation "${resolvedKey}" has ${tags.length} tags (recommended minimum: 8)`)
+  }
+
   return {
     fields: {
       type: resolvedType,

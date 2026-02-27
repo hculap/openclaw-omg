@@ -74,6 +74,61 @@ describe('buildReflectorSystemPrompt', () => {
   it('is deterministic — returns same string on multiple calls', () => {
     expect(buildReflectorSystemPrompt()).toBe(buildReflectorSystemPrompt())
   })
+
+  it('includes <tags> element in the XML schema', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('<tags>')
+  })
+
+  it('includes bilingual tag instruction with 10–14 count requirement', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('Bilingual tags (10–14 required)')
+    expect(prompt).toContain('Never monolingual')
+  })
+
+  it('few-shot example contains non-English tags', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('preferencje')
+    expect(prompt).toContain('edytor')
+  })
+
+  it('field reference documents <tags>', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('comma-separated bilingual keyword list')
+  })
+
+  it('includes ID specificity rule with BAD/GOOD examples', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('Specific IDs')
+    expect(prompt).toContain('BAD:')
+    expect(prompt).toContain('GOOD:')
+  })
+
+  it('includes bilingual description rule', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('Bilingual descriptions')
+    expect(prompt).toContain('tłumaczenie w języku użytkownika')
+  })
+
+  it('includes body structure rule with TL;DR', () => {
+    const prompt = buildReflectorSystemPrompt()
+    expect(prompt).toContain('Body structure')
+    expect(prompt).toContain('TL;DR')
+  })
+
+  it('few-shot example has >= 10 tags', () => {
+    const prompt = buildReflectorSystemPrompt()
+    const tagMatch = prompt.match(/<tags>([^<]+)<\/tags>/)
+    expect(tagMatch).not.toBeNull()
+    const tags = tagMatch![1]!.split(',').map(t => t.trim()).filter(Boolean)
+    expect(tags.length).toBeGreaterThanOrEqual(10)
+  })
+
+  it('few-shot example description is bilingual with separator', () => {
+    const prompt = buildReflectorSystemPrompt()
+    // The description in the example should contain " — " separator
+    expect(prompt).toContain('Przepływ pracy CLI')
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -70,7 +70,21 @@ The compression level controls how aggressively you compress the content:
    reveals a minor correction or addition that doesn't justify a new reflection node.
 6. **Node IDs**: Reflection node IDs use the format \`omg/reflection/{slug}\`.
    The slug should be lowercase, hyphenated, and describe the synthesised insight.
-7. **Preserve bilingual tags**: Tags may appear in both English and other languages. When merging or updating nodes, preserve all language variants.
+7. **Bilingual tags (10–14 required)**: Every reflection node MUST include 10–14 bilingual tags.
+   Include BOTH English AND the user's language (detected from source node content).
+   Order: most specific technology/concept first, then broader domain tags.
+   Include: all technologies mentioned in body, translations, action/domain tags
+   (e.g. reliability/niezawodność, architecture/architektura, decision/decyzja).
+   Avoid generic tags on every node — use specific ones.
+   Fewer than 10 tags is unacceptable. Never monolingual.
+8. **Specific IDs**: Node ID slugs must name the specific topic, not a generic category.
+   BAD:  omg/reflection/reliability-guardrails-for-automation-and-cron
+   GOOD: omg/reflection/cron-failure-isolation-cascade-prevention
+9. **Bilingual descriptions**: <description> must name specific technologies and be bilingual.
+   Format: "English summary — tłumaczenie w języku użytkownika"
+   Max 120 chars per side. Start with SUBJECT, not "Consolidated..." or "Unified view of...".
+10. **Body structure**: Start with a 1-sentence TL;DR. Use ## headers per sub-topic.
+    State facts as rules: "X MUST/SHOULD/NEVER...". Prefer bullet points over prose.
 
 ## Output Format
 
@@ -81,17 +95,24 @@ Respond ONLY with valid XML matching this schema. Do not add any text outside th
   <!-- Required: synthesised reflection nodes. May be empty if no synthesis is needed. -->
   <reflection-nodes>
     <node compression-level="2">
-      <id>omg/reflection/user-workflow-preferences</id>
-      <description>Synthesised view of user workflow preferences</description>
+      <id>omg/reflection/vim-dark-mode-cli-workflow</id>
+      <description>CLI-first dev workflow: Vim, dark mode, no GUI — Przepływ pracy CLI: Vim, tryb ciemny, bez GUI</description>
+      <tags>vim, dark-mode, tryb-ciemny, CLI, terminal, edytor, workflow, przepływ-pracy, keyboard-driven, klawiatura, preferences, preferencje, GUI-avoidance, productivity</tags>
       <sources>omg/preference/dark-mode, omg/preference/vim, omg/preference/terminal</sources>
       <body>
-## Workflow Preferences
+CLI-first development workflow: Vim with dark mode, terminal over GUI for all file operations.
 
-The user consistently prefers command-line-first workflows with minimal GUI.
+## Editor Setup
+- Vim MUST be the primary editor — dark mode always enabled
+- GUI editors SHOULD NOT be used for daily work
 
-**Editor**: Vim with dark mode.
-**Terminal**: Primary interface — avoids GUI file managers.
-**Reasoning**: Stated they find keyboard-driven tools faster and more predictable.
+## Terminal Workflow
+- Terminal is the primary interface for file management
+- GUI file managers MUST be avoided — keyboard-driven navigation preferred
+
+## Rationale
+- User stated keyboard-driven tools are faster and more predictable
+- Dark mode reduces eye strain during long coding sessions
       </body>
     </node>
   </reflection-nodes>
@@ -125,6 +146,7 @@ The user consistently prefers command-line-first workflows with minimal GUI.
 **\`<node>\` children:**
 - \`<id>\`: unique ID in \`omg/reflection/{slug}\` format
 - \`<description>\`: single-line human-readable description of the insight
+- \`<tags>\`: comma-separated bilingual keyword list (English + user's language)
 - \`<sources>\`: comma-separated list of source node IDs that contributed
 - \`<body>\`: the synthesised markdown content
 

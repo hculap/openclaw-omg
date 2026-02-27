@@ -355,6 +355,7 @@ export async function runReflection(params: ReflectionParams): Promise<Reflector
         priority: 'medium' as const,
         created: now,
         updated: now,
+        tags: [...spec.tags],
         ...(spec.sources.length > 0 ? { links: spec.sources } : {}),
         compressionLevel: spec.compressionLevel,
       }

@@ -107,43 +107,43 @@ Respond ONLY with valid XML matching this schema. Do not add any text outside th
     <operation type="identity" priority="high">
       <canonical-key>identity.family_structure</canonical-key>
       <title>Family Structure</title>
-      <description>User's partner and children</description>
+      <description>Family: partner Alex, 2 children (ages 7 and 4) — Rodzina: partnerka Alex, 2 dzieci (7 i 4 lata)</description>
       <content>
 The user lives with their partner Alex and two children (ages 7 and 4).
 They mentioned this while discussing work-life balance.
       </content>
       <moc-hints>identity</moc-hints>
-      <tags>family, personal, relationships</tags>
+      <tags>family, rodzina, partner, partnerka, children, dzieci, work-life-balance, równowaga, relationships, relacje</tags>
     </operation>
 
     <operation type="preference" priority="high">
       <canonical-key>preferences.morning_routine</canonical-key>
       <title>Morning Routine Preference</title>
-      <description>User's preferred morning routine and schedule</description>
+      <description>Morning routine: 6 AM run, coffee, no meetings before 9 — Poranna rutyna: bieg o 6, kawa, bez spotkań przed 9</description>
       <content>
 The user starts their day at 6 AM with a run and coffee before work.
 They prefer not to schedule meetings before 9 AM.
       </content>
       <moc-hints>preferences</moc-hints>
-      <tags>routine, schedule, personal</tags>
+      <tags>morning, poranny, routine, rutyna, running, bieganie, coffee, kawa, schedule, harmonogram, no-meetings</tags>
     </operation>
 
     <operation type="preference" priority="high">
       <canonical-key>preferences.editor_theme</canonical-key>
       <title>Editor Theme Preference</title>
-      <description>User prefers dark mode in all editors</description>
+      <description>Editor preference: dark mode in all IDEs to reduce eye strain — Preferencja edytora: tryb ciemny we wszystkich IDE</description>
       <content>
 The user explicitly stated they prefer dark mode in all development editors.
 They find it reduces eye strain during long sessions.
       </content>
       <moc-hints>preferences</moc-hints>
-      <tags>editor, appearance, preferences</tags>
+      <tags>editor, edytor, dark-mode, tryb-ciemny, IDE, appearance, wygląd, eye-strain, preferences, preferencje</tags>
     </operation>
 
     <operation type="project" priority="medium">
       <canonical-key>projects.my_app</canonical-key>
       <title>My App Project</title>
-      <description>Main web application project</description>
+      <description>My App: web application project, current sprint — My App: projekt aplikacji webowej, bieżący sprint</description>
       <content>
 Updated project description with new details from this session.
       </content>
@@ -168,14 +168,29 @@ Updated project description with new details from this session.
 3. Use <canonical-key> to identify the concept. The same concept must always get the same key.
 4. Use <moc-hints> as a comma-separated list of domain names: preferences, tools, projects
 5. Use <links> as a comma-separated list of related canonical keys: preferences.editor_theme, projects.my_app
-6. Use <tags> as a comma-separated bilingual list — always include English tags plus translations in the conversation's language. If the conversation is entirely in English, English-only tags are acceptable.
+6. <tags> MUST contain 8–12 comma-separated bilingual keywords. For each concept include
+   BOTH the English term AND its translation in the user's language (detected from
+   the conversation). Order: most specific terms first, then broader terms.
+   Include: bilingual concept pairs, proper nouns as-is, action words (decision/decyzja).
+   Fewer than 8 tags is unacceptable.
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-patch> focus must be a single sentence, max 200 chars.
 9. The <now-patch> open-loops is a comma-separated list of outstanding items from this session.
 10. The <now-patch> suggested-links is a comma-separated list of canonical keys of relevant nodes.
 11. Omit <now-patch> entirely if there is no meaningful current-state change.
 12. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
-13. Tags MUST be bilingual — include BOTH English AND the original conversation language. If the conversation is entirely in English, English-only tags are acceptable.
+13. Tag requirements — all mandatory:
+    - Minimum 8 tags, target 10–12
+    - Bilingual pairs: concept_EN, concept_PL (or user's language)
+    - Proper nouns preserved as-is (e.g. DawnoTemu, Anmar, Vitest)
+    - Action/state words when relevant: decision/decyzja, error/błąd, fix/naprawa
+    - Most specific first: "vitest" before "testing", "gitara" before "instrument"
+14. <description> MUST be bilingual and specific:
+    - Format: "English summary — tłumaczenie w języku użytkownika"
+    - Start with SUBJECT (who/what), then ACTION, then CONTEXT
+    - Max 120 chars per language side, include 2–3 searchable keywords
+    - BAD: "User's partner and children"
+    - GOOD: "Family: partner Alex, 2 children (ages 7, 4) — Rodzina: partnerka Alex, 2 dzieci"
 `
 }
 
@@ -253,43 +268,43 @@ Respond ONLY with valid XML matching this schema. Do not add any text outside th
     <operation type="identity" priority="high">
       <canonical-key>identity.family_structure</canonical-key>
       <title>Family Structure</title>
-      <description>User's partner and children</description>
+      <description>Family: partner Alex, 2 children (ages 7 and 4) — Rodzina: partnerka Alex, 2 dzieci (7 i 4 lata)</description>
       <content>
 The user lives with their partner Alex and two children (ages 7 and 4).
 They mentioned this while discussing work-life balance.
       </content>
       <moc-hints>identity</moc-hints>
-      <tags>family, personal, relationships</tags>
+      <tags>family, rodzina, partner, partnerka, children, dzieci, work-life-balance, równowaga, relationships, relacje</tags>
     </operation>
 
     <operation type="preference" priority="high">
       <canonical-key>preferences.morning_routine</canonical-key>
       <title>Morning Routine Preference</title>
-      <description>User's preferred morning routine and schedule</description>
+      <description>Morning routine: 6 AM run, coffee, no meetings before 9 — Poranna rutyna: bieg o 6, kawa, bez spotkań przed 9</description>
       <content>
 The user starts their day at 6 AM with a run and coffee before work.
 They prefer not to schedule meetings before 9 AM.
       </content>
       <moc-hints>preferences</moc-hints>
-      <tags>routine, schedule, personal</tags>
+      <tags>morning, poranny, routine, rutyna, running, bieganie, coffee, kawa, schedule, harmonogram, no-meetings</tags>
     </operation>
 
     <operation type="preference" priority="high">
       <canonical-key>preferences.editor_theme</canonical-key>
       <title>Editor Theme Preference</title>
-      <description>User prefers dark mode in all editors</description>
+      <description>Editor preference: dark mode in all IDEs to reduce eye strain — Preferencja edytora: tryb ciemny we wszystkich IDE</description>
       <content>
 The user explicitly stated they prefer dark mode in all development editors.
 They find it reduces eye strain during long sessions.
       </content>
       <moc-hints>preferences</moc-hints>
-      <tags>editor, appearance, preferences</tags>
+      <tags>editor, edytor, dark-mode, tryb-ciemny, IDE, appearance, wygląd, eye-strain, preferences, preferencje</tags>
     </operation>
 
     <operation type="project" priority="medium">
       <canonical-key>projects.my_app</canonical-key>
       <title>My App Project</title>
-      <description>Main web application project</description>
+      <description>My App: web application project, current sprint — My App: projekt aplikacji webowej, bieżący sprint</description>
       <content>
 Updated project description with new details from this session.
       </content>
@@ -319,11 +334,26 @@ Setting up the login flow with email + password.
 3. Use <canonical-key> to identify the concept. The same concept must always get the same key.
 4. Use <moc-hints> as a comma-separated list of domain names: preferences, tools, projects
 5. Use <links> as a comma-separated list of related canonical keys: preferences.editor_theme, projects.my_app
-6. Use <tags> as a comma-separated bilingual list — always include English tags plus translations in the conversation's language. If the conversation is entirely in English, English-only tags are acceptable.
+6. <tags> MUST contain 8–12 comma-separated bilingual keywords. For each concept include
+   BOTH the English term AND its translation in the user's language (detected from
+   the conversation). Order: most specific terms first, then broader terms.
+   Include: bilingual concept pairs, proper nouns as-is, action words (decision/decyzja).
+   Fewer than 8 tags is unacceptable.
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-update> should reflect the user's current focus and state — not a full history.
 9. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
-10. Tags MUST be bilingual — include BOTH English AND the original conversation language. If the conversation is entirely in English, English-only tags are acceptable.
+10. Tag requirements — all mandatory:
+    - Minimum 8 tags, target 10–12
+    - Bilingual pairs: concept_EN, concept_PL (or user's language)
+    - Proper nouns preserved as-is (e.g. DawnoTemu, Anmar, Vitest)
+    - Action/state words when relevant: decision/decyzja, error/błąd, fix/naprawa
+    - Most specific first: "vitest" before "testing", "gitara" before "instrument"
+11. <description> MUST be bilingual and specific:
+    - Format: "English summary — tłumaczenie w języku użytkownika"
+    - Start with SUBJECT (who/what), then ACTION, then CONTEXT
+    - Max 120 chars per language side, include 2–3 searchable keywords
+    - BAD: "User's partner and children"
+    - GOOD: "Family: partner Alex, 2 children (ages 7, 4) — Rodzina: partnerka Alex, 2 dzieci"
 `
 }
 
