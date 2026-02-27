@@ -49,7 +49,7 @@ export async function beforeAgentStart(
       readFileOrNull(path.join(omgRoot, 'index.md')),
       readFileOrNull(path.join(omgRoot, 'now.md')),
       getNodeCount(omgRoot).catch(() => 0),
-      getRegistryEntries(omgRoot).catch((err) => {
+      getRegistryEntries(omgRoot, { archived: false }).catch((err) => {
         console.error('[omg] before_agent_start: failed to load registry entries:', err)
         return [] as readonly [string, RegistryNodeEntry][]
       }),
@@ -60,8 +60,21 @@ export async function beforeAgentStart(
       return undefined
     }
 
-    const recentMessages = event.prompt
-      ? [{ role: 'user' as const, content: event.prompt }]
+    // Extract only the user's actual message from event.prompt for keyword scoring.
+    //
+    // The `before_prompt_build` hook receives the full prompt being assembled, which
+    // may include noise that pollutes keyword extraction:
+    //   1. Prior `<omg-context>` blocks → feedback loop (same nodes re-selected)
+    //   2. Channel metadata (Discord topic, group name) → irrelevant keywords
+    //   3. Conversation info JSON blocks → sender IDs, channel IDs as keywords
+    //   4. `<<<EXTERNAL_UNTRUSTED_CONTENT>>>` wrappers → platform-specific noise
+    //
+    // We strip all of these to isolate the user's actual message text.
+    const cleanedPrompt = event.prompt
+      ? extractUserMessage(event.prompt)
+      : ''
+    const recentMessages = cleanedPrompt
+      ? [{ role: 'user' as const, content: cleanedPrompt }]
       : []
 
     const slice = await selectContextV2({
@@ -82,3 +95,35 @@ export async function beforeAgentStart(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Prompt cleaning — isolate user message from platform noise
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the user's actual message from the raw `event.prompt` string.
+ *
+ * OpenClaw's `before_prompt_build` passes the full prompt being assembled, which
+ * may include platform metadata (Discord channel info, conversation JSON, etc.)
+ * and prior injected `<omg-context>` blocks. We strip all of these so that
+ * keyword extraction only operates on the user's own words.
+ */
+export function extractUserMessage(raw: string): string {
+  let text = raw
+
+  // 1. Strip prior <omg-context> blocks (prevents feedback loop)
+  text = text.replace(/<omg-context>[\s\S]*?<\/omg-context>/g, '')
+
+  // 2. Strip ```json ... ``` metadata blocks (conversation info, sender info)
+  text = text.replace(/```json[\s\S]*?```/g, '')
+
+  // 3. Strip <<<EXTERNAL_UNTRUSTED_CONTENT>>> wrappers (channel metadata)
+  text = text.replace(/<<<EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>/g, '')
+
+  // 4. Strip metadata label lines that precede the stripped blocks
+  text = text.replace(/^(?:Conversation info|Sender|Untrusted context)\s*\([^)]*\)\s*:?\s*$/gm, '')
+
+  // 5. Strip ## Current Now Node and its frontmatter (system prompt injection)
+  text = text.replace(/## Current Now Node[\s\S]*?---\n[\s\S]*?---/g, '')
+
+  return text.trim()
+}

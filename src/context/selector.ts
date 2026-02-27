@@ -139,7 +139,8 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
   const { indexContent, nowContent, registryEntries, recentMessages, config, hydrateNode, memoryTools } = params
   const { injection } = config
 
-  const keywords = extractKeywords(recentMessages)
+  const idfStopwords = buildHighDfTokens(registryEntries)
+  const keywords = extractKeywords(recentMessages, idfStopwords)
 
   // --- Pass 1: metadata-only scoring (+ optional parallel memory_search) ---
   const shouldUseSemantic = memoryTools != null && injection.semantic.enabled
@@ -407,11 +408,14 @@ function computeRegistryScore(entry: RegistryNodeEntry, keywords: ReadonlySet<st
 
 function computeRegistryKeywordMatch(entry: RegistryNodeEntry, keywords: ReadonlySet<string>): number {
   if (keywords.size === 0) return 1.0
-  const tags = (entry.tags ?? []).map((t) => t.toLowerCase())
-  const text = (entry.description + ' ' + tags.join(' ')).toLowerCase()
+  const tags = (entry.tags ?? []).map((t) => fold(t))
+  const canonicalKey = fold(entry.canonicalKey ?? '')
+  const description = fold(entry.description)
+  const text = fold(`${entry.description} ${canonicalKey} ${tags.join(' ')}`)
+  const descWords = description.split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 2)
   let matches = 0
   for (const kw of keywords) {
-    if (text.includes(kw) || prefixMatchesTags(kw, tags)) matches++
+    if (text.includes(kw) || prefixMatchesTags(kw, tags) || (kw.length >= 4 && prefixMatchesTags(kw, descWords))) matches++
   }
   return 1.0 + matches * 0.5
 }
@@ -468,11 +472,14 @@ function computeRecencyFactor(updatedIso: string): number {
 
 function computeKeywordMatch(node: GraphNode, keywords: ReadonlySet<string>): number {
   if (keywords.size === 0) return 1.0
-  const tags = (node.frontmatter.tags ?? []).map((t) => t.toLowerCase())
-  const text = (node.body + ' ' + tags.join(' ')).toLowerCase()
+  const tags = (node.frontmatter.tags ?? []).map((t) => fold(t))
+  const canonicalKey = fold(node.frontmatter.canonicalKey ?? '')
+  const description = fold(node.frontmatter.description)
+  const text = fold(`${node.frontmatter.description} ${node.body} ${canonicalKey} ${tags.join(' ')}`)
+  const descWords = description.split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 2)
   let matches = 0
   for (const kw of keywords) {
-    if (text.includes(kw) || prefixMatchesTags(kw, tags)) matches++
+    if (text.includes(kw) || prefixMatchesTags(kw, tags) || (kw.length >= 4 && prefixMatchesTags(kw, descWords))) matches++
   }
   // Base score 1.0 + bonus for keyword hits
   return 1.0 + matches * 0.5
@@ -490,18 +497,66 @@ function computeKeywordMatch(node: GraphNode, keywords: ReadonlySet<string>): nu
  * matching only provides an additive score boost, not exclusive selection.
  */
 function prefixMatchesTags(keyword: string, tags: readonly string[]): boolean {
+  const foldedKw = fold(keyword)
   for (const tag of tags) {
-    const prefixLen = Math.max(3, Math.floor(Math.min(keyword.length, tag.length) * 0.75))
-    if (keyword.length < prefixLen || tag.length < prefixLen) continue
-    if (tag.startsWith(keyword.slice(0, prefixLen)) || keyword.startsWith(tag.slice(0, prefixLen))) {
+    const foldedTag = fold(tag)
+    const prefixLen = Math.max(3, Math.floor(Math.min(foldedKw.length, foldedTag.length) * 0.75))
+    if (foldedKw.length < prefixLen || foldedTag.length < prefixLen) continue
+    if (foldedTag.startsWith(foldedKw.slice(0, prefixLen)) || foldedKw.startsWith(foldedTag.slice(0, prefixLen))) {
       return true
     }
   }
   return false
 }
 
-/** High-frequency English function words (> 3 chars) that add noise to keyword matching. */
-const STOPWORDS = new Set([
+/**
+ * Language-agnostic diacritics removal via Unicode NFKD decomposition.
+ * Also handles non-decomposable stroke characters (ł→l, đ→d, ø→o, etc.)
+ * that NFKD doesn't split into base + combining mark.
+ */
+export function fold(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .replace(/ł/g, 'l')
+    .replace(/đ/g, 'd')
+    .replace(/ø/g, 'o')
+    .replace(/ħ/g, 'h')
+    .replace(/ŧ/g, 't')
+}
+
+/**
+ * Builds a set of high-document-frequency tokens from the registry.
+ * Tokens appearing in more than `threshold` fraction of nodes are noise
+ * regardless of language — this is truly language-agnostic.
+ */
+export function buildHighDfTokens(
+  registryEntries: readonly [string, RegistryNodeEntry][],
+  threshold = 0.4
+): ReadonlySet<string> {
+  if (registryEntries.length === 0) return new Set()
+  const docFreq = new Map<string, number>()
+  for (const [, entry] of registryEntries) {
+    const tokens = new Set(
+      fold(`${entry.description} ${(entry.tags ?? []).join(' ')}`)
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter(w => w.length > 2)
+    )
+    for (const t of tokens) {
+      docFreq.set(t, (docFreq.get(t) ?? 0) + 1)
+    }
+  }
+  const cutoff = Math.ceil(registryEntries.length * threshold)
+  const result = new Set<string>()
+  for (const [token, count] of docFreq) {
+    if (count >= cutoff) result.add(token)
+  }
+  return result
+}
+
+/** Minimal English-only fallback for selectContext v1 (no registry available). */
+const STOPWORDS_FALLBACK = new Set([
   'about', 'also', 'been', 'came', 'come', 'could', 'does', 'each',
   'even', 'from', 'gave', 'goes', 'gone', 'have', 'help', 'here',
   'into', 'just', 'know', 'like', 'made', 'make', 'many', 'more',
@@ -512,12 +567,14 @@ const STOPWORDS = new Set([
   'would', 'your',
 ])
 
-function extractKeywords(messages: readonly Message[]): ReadonlySet<string> {
+export function extractKeywords(messages: readonly Message[], stopwords?: ReadonlySet<string>): ReadonlySet<string> {
+  const stop = stopwords ?? STOPWORDS_FALLBACK
   const words = new Set<string>()
   for (const msg of messages) {
-    for (const word of msg.content.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
-      if (word.length > 3 && !STOPWORDS.has(word)) {
-        words.add(word)
+    for (const word of msg.content.split(/[^\p{L}\p{N}]+/u)) {
+      const folded = fold(word)
+      if (folded.length > 2 && !stop.has(folded)) {
+        words.add(folded)
       }
     }
   }

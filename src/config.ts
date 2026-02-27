@@ -587,6 +587,17 @@ const graphMaintenanceSchema = z
      * Falls back to `reflection.cronSchedule` when not set.
      */
     cronSchedule: cronField.default('0 3 * * *'),
+    /**
+     * Retention window in days for archived nodes cleaned by weekly maintenance.
+     * Archived nodes older than this are removed from disk and then from the
+     * registry index.
+     * @default 7
+     */
+    archivedNodeRetentionDays: z
+      .number()
+      .int()
+      .positive('graphMaintenance.archivedNodeRetentionDays must be a positive integer')
+      .default(7),
   })
   .strip()
 

@@ -30,7 +30,7 @@ vi.mock('../../src/cron/workspace-registry.js', () => ({
   listWorkspacePaths: vi.fn().mockReturnValue([]),
 }))
 
-const { register } = await import('../../src/plugin.js')
+const { register, resolveAllowedWorkspaces } = await import('../../src/plugin.js')
 
 function makeMockApi(config: Record<string, unknown> = {}): PluginApi & { on: ReturnType<typeof vi.fn> } {
   return {
@@ -140,5 +140,106 @@ describe('register — agent_end handler', () => {
       { success: true },
       expect.objectContaining({ messages })
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolveAllowedWorkspaces
+// ---------------------------------------------------------------------------
+
+describe('resolveAllowedWorkspaces', () => {
+  it('returns empty set when no agents config exists', () => {
+    const result = resolveAllowedWorkspaces({})
+    expect(result.size).toBe(0)
+  })
+
+  it('collects agents.defaults.workspace', () => {
+    const config = { agents: { defaults: { workspace: '/home/user/default' } } }
+    const result = resolveAllowedWorkspaces(config)
+    expect(result.has('/home/user/default')).toBe(true)
+    expect(result.size).toBe(1)
+  })
+
+  it('collects agents.list[].workspace', () => {
+    const config = {
+      agents: {
+        list: [
+          { name: 'coding', workspace: '/home/user/TechLead' },
+          { name: 'pati', workspace: '/home/user/Secretary' },
+        ],
+      },
+    }
+    const result = resolveAllowedWorkspaces(config)
+    expect(result.has('/home/user/TechLead')).toBe(true)
+    expect(result.has('/home/user/Secretary')).toBe(true)
+    expect(result.size).toBe(2)
+  })
+
+  it('includes pluginWorkspaceDir when provided', () => {
+    const result = resolveAllowedWorkspaces({}, '/home/user/plugin-ws')
+    expect(result.has('/home/user/plugin-ws')).toBe(true)
+    expect(result.size).toBe(1)
+  })
+
+  it('deduplicates overlapping workspace paths', () => {
+    const config = {
+      agents: {
+        defaults: { workspace: '/home/user/Secretary' },
+        list: [{ name: 'pati', workspace: '/home/user/Secretary' }],
+      },
+    }
+    const result = resolveAllowedWorkspaces(config, '/home/user/Secretary')
+    expect(result.size).toBe(1)
+  })
+
+  it('combines all three sources', () => {
+    const config = {
+      agents: {
+        defaults: { workspace: '/ws/default' },
+        list: [
+          { name: 'a', workspace: '/ws/agent-a' },
+          { name: 'b', workspace: '/ws/agent-b' },
+        ],
+      },
+    }
+    const result = resolveAllowedWorkspaces(config, '/ws/plugin')
+    expect(result.size).toBe(4)
+    expect(result.has('/ws/default')).toBe(true)
+    expect(result.has('/ws/agent-a')).toBe(true)
+    expect(result.has('/ws/agent-b')).toBe(true)
+    expect(result.has('/ws/plugin')).toBe(true)
+  })
+
+  it('skips empty string workspace values', () => {
+    const config = {
+      agents: {
+        defaults: { workspace: '' },
+        list: [{ name: 'a', workspace: '' }],
+      },
+    }
+    const result = resolveAllowedWorkspaces(config, '')
+    expect(result.size).toBe(0)
+  })
+
+  it('skips non-string workspace values', () => {
+    const config = {
+      agents: {
+        defaults: { workspace: 42 },
+        list: [{ name: 'a', workspace: true }],
+      },
+    }
+    const result = resolveAllowedWorkspaces(config)
+    expect(result.size).toBe(0)
+  })
+
+  it('skips agents without workspace field', () => {
+    const config = {
+      agents: {
+        list: [{ name: 'main' }, { name: 'coding', workspace: '/ws/coding' }],
+      },
+    }
+    const result = resolveAllowedWorkspaces(config)
+    expect(result.size).toBe(1)
+    expect(result.has('/ws/coding')).toBe(true)
   })
 })

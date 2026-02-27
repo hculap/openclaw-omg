@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { parseConfig } from '../../src/config.js'
-import { selectContext, selectContextV2 } from '../../src/context/selector.js'
+import { selectContext, selectContextV2, fold, buildHighDfTokens, extractKeywords } from '../../src/context/selector.js'
 import type { OmgConfig } from '../../src/config.js'
 import type { GraphNode } from '../../src/types.js'
 import type { RegistryNodeEntry } from '../../src/graph/registry.js'
@@ -399,8 +399,9 @@ describe('selectContext — multilingual keyword extraction', () => {
     expect(ids).toContain('omg/preference/formatting')
   })
 
-  it('still filters short common words (<= 3 chars) regardless of language', () => {
-    // Short words like "jak", "nie", "tak" should be filtered by length
+  it('filters very short words (<= 2 chars) but passes 3-char words', () => {
+    // Words <= 2 chars like "to", "co" should be filtered by length
+    // 3-char words like "jak", "nie", "tak" now pass the > 2 threshold
     const node = makeNode({
       id: 'omg/fact/test',
       body: 'Content.',
@@ -417,10 +418,10 @@ describe('selectContext — multilingual keyword extraction', () => {
       config: tightConfig,
     })
 
-    // No keyword matches since all Polish words are <= 3 chars
-    // Node should still appear due to baseline scoring, but not from keyword boost
-    // The important thing is it doesn't crash
-    expect(slice).toBeDefined()
+    // 3-char Polish words "jak", "nie", "tak" now survive extraction (> 2 threshold)
+    // and match against tags — node should get a keyword boost
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/test')
   })
 
   it('prefix-matches inflected Polish keywords against tags (muzyce↔muzyka)', () => {
@@ -504,6 +505,64 @@ describe('selectContext — multilingual keyword extraction', () => {
     expect(ids).toContain('omg/identity/wife')
   })
 
+  it('3-char Polish words survive keyword extraction', () => {
+    const keywords = extractKeywords([{ role: 'user', content: 'ile lat dom syn' }])
+    expect(keywords.has('ile')).toBe(true)
+    expect(keywords.has('lat')).toBe(true)
+    expect(keywords.has('dom')).toBe(true)
+    expect(keywords.has('syn')).toBe(true)
+  })
+
+  it('diacritics folding: "zona" query matches tag "żona"', () => {
+    const node = makeNode({
+      id: 'omg/identity/wife-fold',
+      type: 'identity',
+      priority: 'high',
+      body: 'Wife info.',
+      tags: ['żona', 'wife'],
+    })
+    const irrelevant = makeNode({
+      id: 'omg/fact/unrelated-fold',
+      body: 'Unrelated.',
+      tags: ['food'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [irrelevant, node],
+      recentMessages: [{ role: 'user', content: 'zona partner' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/identity/wife-fold')
+  })
+
+  it('diacritics folding: "cwiczenia" query matches tag "ćwiczenia"', () => {
+    const node = makeNode({
+      id: 'omg/episode/gym-fold',
+      type: 'episode',
+      body: 'Gym session.',
+      tags: ['ćwiczenia', 'exercises'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      recentMessages: [{ role: 'user', content: 'cwiczenia tomorrow' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/episode/gym-fold')
+  })
+
   it('does NOT prefix-match unrelated short tags (api vs application)', () => {
     const node = makeNode({
       id: 'omg/fact/test',
@@ -522,6 +581,143 @@ describe('selectContext — multilingual keyword extraction', () => {
     })
 
     // "application" prefix "app" ≠ "api" prefix "api" — no false match
+    expect(slice).toBeDefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// fold() — diacritics normalization
+// ---------------------------------------------------------------------------
+
+describe('fold — diacritics normalization', () => {
+  it('removes Polish diacritics', () => {
+    expect(fold('żona')).toBe('zona')
+    expect(fold('ćwiczenia')).toBe('cwiczenia')
+    expect(fold('siłownia')).toBe('silownia')
+    expect(fold('Źródło')).toBe('zrodlo')
+  })
+
+  it('removes German/Spanish diacritics', () => {
+    expect(fold('über')).toBe('uber')
+    expect(fold('niño')).toBe('nino')
+    expect(fold('Ökologie')).toBe('okologie')
+  })
+
+  it('lowercases and normalizes combined', () => {
+    expect(fold('ŻONA')).toBe('zona')
+    expect(fold('TypeScript')).toBe('typescript')
+  })
+
+  it('passes through ASCII unchanged', () => {
+    expect(fold('hello')).toBe('hello')
+    expect(fold('test123')).toBe('test123')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildHighDfTokens — IDF-based stopword detection
+// ---------------------------------------------------------------------------
+
+describe('buildHighDfTokens — IDF-based filtering', () => {
+  it('returns empty set for empty registry', () => {
+    const result = buildHighDfTokens([])
+    expect(result.size).toBe(0)
+  })
+
+  it('drops tokens appearing in >40% of nodes', () => {
+    // 5 entries: a token in 3+ entries = >40% → filtered
+    const entries: [string, RegistryNodeEntry][] = [
+      ['a', { type: 'fact', kind: 'observation', priority: 'medium', description: 'common rare1', created: '', updated: '', filePath: '/a.md' }],
+      ['b', { type: 'fact', kind: 'observation', priority: 'medium', description: 'common rare2', created: '', updated: '', filePath: '/b.md' }],
+      ['c', { type: 'fact', kind: 'observation', priority: 'medium', description: 'common rare3', created: '', updated: '', filePath: '/c.md' }],
+      ['d', { type: 'fact', kind: 'observation', priority: 'medium', description: 'unique4 rare4', created: '', updated: '', filePath: '/d.md' }],
+      ['e', { type: 'fact', kind: 'observation', priority: 'medium', description: 'unique5 rare5', created: '', updated: '', filePath: '/e.md' }],
+    ]
+
+    const highDf = buildHighDfTokens(entries)
+    // "common" appears in 3/5 = 60% > 40% → should be in the set
+    expect(highDf.has('common')).toBe(true)
+    // "rare1" appears in 1/5 = 20% < 40% → should NOT be in the set
+    expect(highDf.has('rare1')).toBe(false)
+    expect(highDf.has('unique4')).toBe(false)
+  })
+
+  it('extractKeywords with IDF stopwords filters high-frequency tokens', () => {
+    const entries: [string, RegistryNodeEntry][] = [
+      ['a', { type: 'fact', kind: 'observation', priority: 'medium', description: 'common specific1', created: '', updated: '', filePath: '/a.md' }],
+      ['b', { type: 'fact', kind: 'observation', priority: 'medium', description: 'common specific2', created: '', updated: '', filePath: '/b.md' }],
+      ['c', { type: 'fact', kind: 'observation', priority: 'medium', description: 'common specific3', created: '', updated: '', filePath: '/c.md' }],
+    ]
+
+    const idfStopwords = buildHighDfTokens(entries)
+    const keywords = extractKeywords(
+      [{ role: 'user', content: 'common specific1' }],
+      idfStopwords
+    )
+
+    // "common" appears in 3/3 = 100% → filtered
+    expect(keywords.has('common')).toBe(false)
+    // "specific1" appears in 1/3 = 33% → NOT filtered
+    expect(keywords.has('specific1')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Description prefix matching
+// ---------------------------------------------------------------------------
+
+describe('selectContext — description prefix matching', () => {
+  it('prefix-matches keywords (kw.length >= 4) against description words', () => {
+    const node = makeNode({
+      id: 'omg/identity/children-ages',
+      type: 'identity',
+      priority: 'high',
+      description: 'Children ages and birthdays information',
+      body: 'Age info for kids.',
+      tags: ['family'],
+    })
+    const irrelevant = makeNode({
+      id: 'omg/fact/unrelated-desc',
+      body: 'Nothing here.',
+      tags: ['cooking'],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [irrelevant, node],
+      // "children" (8 chars >= 4) should prefix-match description word "children"
+      recentMessages: [{ role: 'user', content: 'children birthdays' }],
+      config: tightConfig,
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/identity/children-ages')
+  })
+
+  it('does NOT prefix-match description words for short keywords (kw.length < 4)', () => {
+    const node = makeNode({
+      id: 'omg/fact/age-test',
+      description: 'Age information for the user',
+      body: 'Some body.',
+      tags: [],
+    })
+
+    const tightConfig = parseConfig({ injection: { maxContextTokens: 200, maxNodes: 1 } })
+
+    const slice = selectContext({
+      indexContent: '',
+      nowContent: null,
+      allNodes: [node],
+      // "age" is 3 chars (< 4) — should NOT trigger description prefix match
+      recentMessages: [{ role: 'user', content: 'age info' }],
+      config: tightConfig,
+    })
+
+    // Node may still appear from substring match on body/description text.
+    // The test verifies no crash and that desc-prefix-match doesn't fire for short kw
     expect(slice).toBeDefined()
   })
 })

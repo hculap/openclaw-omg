@@ -171,7 +171,7 @@ Updated project description with new details from this session.
 6. <tags> MUST contain 8–12 comma-separated bilingual keywords. For each concept include
    BOTH the English term AND its translation in the user's language (detected from
    the conversation). Order: most specific terms first, then broader terms.
-   Include: bilingual concept pairs, proper nouns as-is, action words (decision/decyzja).
+   Include: bilingual concept pairs, proper nouns as-is, action words (e.g. decision + its translation).
    Fewer than 8 tags is unacceptable.
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-patch> focus must be a single sentence, max 200 chars.
@@ -181,10 +181,10 @@ Updated project description with new details from this session.
 12. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
 13. Tag requirements — all mandatory:
     - Minimum 8 tags, target 10–12
-    - Bilingual pairs: concept_EN, concept_PL (or user's language)
+    - Bilingual pairs: English term + user's language translation
     - Proper nouns preserved as-is (e.g. DawnoTemu, Anmar, Vitest)
-    - Action/state words when relevant: decision/decyzja, error/błąd, fix/naprawa
-    - Most specific first: "vitest" before "testing", "gitara" before "instrument"
+    - Action/state words when relevant (e.g. decision + translation, error + translation)
+    - Most specific first: "vitest" before "testing", specific term before generic
 14. <description> MUST be bilingual and specific:
     - Format: "English summary — tłumaczenie w języku użytkownika"
     - Start with SUBJECT (who/what), then ACTION, then CONTEXT
@@ -337,17 +337,17 @@ Setting up the login flow with email + password.
 6. <tags> MUST contain 8–12 comma-separated bilingual keywords. For each concept include
    BOTH the English term AND its translation in the user's language (detected from
    the conversation). Order: most specific terms first, then broader terms.
-   Include: bilingual concept pairs, proper nouns as-is, action words (decision/decyzja).
+   Include: bilingual concept pairs, proper nouns as-is, action words (e.g. decision + its translation).
    Fewer than 8 tags is unacceptable.
 7. If nothing durable was observed, return an empty <operations> block.
 8. The <now-update> should reflect the user's current focus and state — not a full history.
 9. Personal information (identity, family, personality traits, hobbies, health conditions) is durable knowledge. Extract it as identity or preference nodes with high priority.
 10. Tag requirements — all mandatory:
     - Minimum 8 tags, target 10–12
-    - Bilingual pairs: concept_EN, concept_PL (or user's language)
+    - Bilingual pairs: English term + user's language translation
     - Proper nouns preserved as-is (e.g. DawnoTemu, Anmar, Vitest)
-    - Action/state words when relevant: decision/decyzja, error/błąd, fix/naprawa
-    - Most specific first: "vitest" before "testing", "gitara" before "instrument"
+    - Action/state words when relevant (e.g. decision + translation, error + translation)
+    - Most specific first: "vitest" before "testing", specific term before generic
 11. <description> MUST be bilingual and specific:
     - Format: "English summary — tłumaczenie w języku użytkownika"
     - Start with SUBJECT (who/what), then ACTION, then CONTEXT

@@ -74,7 +74,7 @@ The compression level controls how aggressively you compress the content:
    Include BOTH English AND the user's language (detected from source node content).
    Order: most specific technology/concept first, then broader domain tags.
    Include: all technologies mentioned in body, translations, action/domain tags
-   (e.g. reliability/niezawodność, architecture/architektura, decision/decyzja).
+   (e.g. reliability + translation, architecture + translation, decision + translation).
    Avoid generic tags on every node — use specific ones.
    Fewer than 10 tags is unacceptable. Never monolingual.
 8. **Specific IDs**: Node ID slugs must name the specific topic, not a generic category.

@@ -16,7 +16,7 @@ import { runSemanticDedup } from '../dedup/semantic-dedup.js'
 import { runBootstrapTick } from '../bootstrap/bootstrap.js'
 import { readBootstrapState, writeBootstrapState, markMaintenanceDone } from '../bootstrap/state.js'
 import { readGraphNode } from '../graph/node-reader.js'
-import { getRegistryEntries, getNodeFilePaths } from '../graph/registry.js'
+import { getRegistryEntries, getNodeFilePaths, removeRegistryEntry } from '../graph/registry.js'
 import { resolveOmgRoot } from '../utils/paths.js'
 
 /** A single cron job definition. */
@@ -35,8 +35,7 @@ export interface CronContext {
   readonly jobIdNamespace?: string
 }
 
-/** Age threshold in milliseconds (7 days) for the reflection step. */
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
 
 /** Fixed schedule for the maintenance cron (Sunday 4 AM). */
 const MAINTENANCE_SCHEDULE = '0 4 * * 0'
@@ -89,7 +88,9 @@ export async function graphMaintenanceCronHandler(
   // ageCutoffMs=0 means "no age cap" (all nodes eligible); undefined uses the 7-day default.
   const cutoffMs = ageCutoffMs === 0
     ? Date.now()
-    : ageCutoffMs !== undefined ? ageCutoffMs : Date.now() - SEVEN_DAYS_MS
+    : ageCutoffMs !== undefined
+      ? ageCutoffMs
+      : Date.now() - (7 * MILLISECONDS_PER_DAY)
 
   let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
@@ -226,7 +227,13 @@ export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
     return
   }
 
-  const nodeIdSet = new Set(allEntries.map(([id]) => id))
+  const cleanupResult = await cleanupArchivedNodes(
+    omgRoot,
+    allEntries,
+    ctx.config.graphMaintenance.archivedNodeRetentionDays,
+  )
+
+  const nodeIdSet = new Set(allEntries.filter(([, e]) => !e.archived).map(([id]) => id))
   let brokenLinkCount = 0
   for (const [id, entry] of allEntries) {
     const links = entry.links ?? []
@@ -261,8 +268,54 @@ export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
 
   console.warn(
     `[omg] cron omg-maintenance: completed — ${brokenLinkCount} broken link(s) found, ` +
-      `${duplicateGroupCount} duplicate description group(s) flagged`,
+      `${duplicateGroupCount} duplicate description group(s) flagged, ` +
+      `${cleanupResult.deletedEntries} archived node(s) cleaned`,
   )
+}
+
+async function cleanupArchivedNodes(
+  omgRoot: string,
+  entries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][],
+  retentionDays: number,
+): Promise<{ readonly deletedEntries: number }> {
+  const cutoffMs = Date.now() - retentionDays * MILLISECONDS_PER_DAY
+  const systemTypesToSkip: ReadonlySet<string> = new Set(['index', 'now'])
+  let deletedEntries = 0
+
+  for (const [nodeId, entry] of entries) {
+    if (!entry.archived || systemTypesToSkip.has(entry.type)) continue
+
+    const updatedMs = new Date(entry.updated).getTime()
+    if (Number.isNaN(updatedMs) || updatedMs > cutoffMs) continue
+
+    let shouldRemoveFromRegistry = false
+
+    try {
+      await fs.promises.unlink(entry.filePath)
+      shouldRemoveFromRegistry = true
+    } catch (err) {
+      const enoent = (err as NodeJS.ErrnoException).code === 'ENOENT'
+      if (!enoent) {
+        console.error(
+          `[omg] cron omg-maintenance: failed to delete archived node file ${entry.filePath}:`,
+          err instanceof Error ? err.message : String(err)
+        )
+        continue
+      }
+      shouldRemoveFromRegistry = true
+    }
+
+    if (shouldRemoveFromRegistry) {
+      try {
+        await removeRegistryEntry(omgRoot, nodeId)
+        deletedEntries++
+      } catch (err) {
+        console.error('[omg] cron omg-maintenance: failed to remove archived registry entry:', nodeId, err)
+      }
+    }
+  }
+
+  return { deletedEntries }
 }
 
 /**

@@ -347,6 +347,47 @@ export function parseBatchIndices(raw: string): readonly number[] {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace allowlisting
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the set of workspace paths that should be processed by OMG hooks.
+ *
+ * Collects workspaces from:
+ *   1. `agents.defaults.workspace` — the fallback workspace for all agents
+ *   2. `agents.list[].workspace`  — per-agent overrides
+ *   3. Plugin-level `config.workspaceDir` (explicit OMG config)
+ *
+ * When the returned set is non-empty, hooks whose `effectiveWorkspaceDir` is
+ * NOT in the set are skipped. An empty set means "process all" (backwards compat).
+ */
+export function resolveAllowedWorkspaces(
+  rawGlobal: Record<string, unknown>,
+  pluginWorkspaceDir?: string,
+): ReadonlySet<string> {
+  const agents = rawGlobal?.['agents'] as Record<string, unknown> | undefined
+  const result = new Set<string>()
+
+  // agents.defaults.workspace
+  const defaultWs = (agents?.['defaults'] as Record<string, unknown>)?.['workspace']
+  if (typeof defaultWs === 'string' && defaultWs.length > 0) result.add(defaultWs)
+
+  // agents.list[].workspace
+  const list = agents?.['list']
+  if (Array.isArray(list)) {
+    for (const agent of list) {
+      const ws = (agent as Record<string, unknown>)?.['workspace']
+      if (typeof ws === 'string' && ws.length > 0) result.add(ws)
+    }
+  }
+
+  // Plugin-level config.workspaceDir
+  if (pluginWorkspaceDir) result.add(pluginWorkspaceDir)
+
+  return result
+}
+
+// ---------------------------------------------------------------------------
 // Plugin registration
 // ---------------------------------------------------------------------------
 
@@ -377,6 +418,11 @@ export function register(api: PluginApi): void {
     )?.['config'] ?? api.config
 
   const config = parseConfig(rawPluginConfig)
+
+  // Build the workspace allowlist from agents.defaults.workspace, agents.list[].workspace,
+  // and the plugin's own config.workspaceDir. Hooks for workspaces not in this set are skipped.
+  const allowedWorkspaces = resolveAllowedWorkspaces(rawGlobal, config.workspaceDir)
+  console.error(`[omg] register: allowed workspaces: ${[...allowedWorkspaces].join(', ') || '(all)'}`)
   console.error(`[omg] register: threshold=${config.observation.messageTokenThreshold}, triggerMode=${config.observation.triggerMode}`)
 
   // Probe for OpenClaw memory tools (optional — degrades gracefully to registry-only)
@@ -428,7 +474,10 @@ export function register(api: PluginApi): void {
         const registry = await readWorkspaceRegistry().catch(() => ({ version: 1 as const, workspaces: {} }))
         const pruned = pruneStaleWorkspaces(registry, config)
         const known = listWorkspacePaths(pruned)
-        const all = workspaceDir ? [...new Set([...known, workspaceDir])] : known
+        const allRaw = workspaceDir ? [...new Set([...known, workspaceDir])] : known
+        const all = allowedWorkspaces.size > 0
+          ? allRaw.filter(ws => allowedWorkspaces.has(ws))
+          : allRaw
         if (all.length === 0) return
 
         console.error(`[omg] service: bootstrap loop started for ${all.length} workspace(s): ${all.join(', ')}`)
@@ -437,9 +486,12 @@ export function register(api: PluginApi): void {
           // Re-read registry each tick to pick up newly registered workspaces
           const current = await readWorkspaceRegistry().catch(() => ({ version: 1 as const, workspaces: {} }))
           const currentPruned = pruneStaleWorkspaces(current, config)
-          const currentAll = workspaceDir
+          const currentAllRaw = workspaceDir
             ? [...new Set([...listWorkspacePaths(currentPruned), workspaceDir])]
             : listWorkspacePaths(currentPruned)
+          const currentAll = allowedWorkspaces.size > 0
+            ? currentAllRaw.filter(ws => allowedWorkspaces.has(ws))
+            : currentAllRaw
 
           for (const wsDir of currentAll) {
             try {
@@ -487,6 +539,7 @@ export function register(api: PluginApi): void {
     // get their own graph rather than sharing the default workspace.
     const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
     if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
+    if (allowedWorkspaces.size > 0 && !allowedWorkspaces.has(effectiveWorkspaceDir)) return undefined
 
     // Scaffold once per workspace per gateway lifetime (cheap, idempotent).
     if (!bootstrappedWorkspaces.has(effectiveWorkspaceDir)) {
@@ -554,6 +607,7 @@ export function register(api: PluginApi): void {
   api.on('agent_end', (event, ctx) => {
     const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
     if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
+    if (allowedWorkspaces.size > 0 && !allowedWorkspaces.has(effectiveWorkspaceDir)) return Promise.resolve(undefined)
     // sessionKey may be undefined for CLI-initiated sessions. Use a stable fallback
     // so session state is still persisted (keyed by agentId or a default label).
     const sessionKey = ctx.sessionKey ?? ctx.agentId ?? 'default'
@@ -577,6 +631,7 @@ export function register(api: PluginApi): void {
   api.on('before_compaction', (_event, ctx) => {
     const effectiveWorkspaceDir = (ctx as unknown as { workspaceDir?: string }).workspaceDir ?? workspaceDir
     if (!effectiveWorkspaceDir) return Promise.resolve(undefined)
+    if (allowedWorkspaces.size > 0 && !allowedWorkspaces.has(effectiveWorkspaceDir)) return Promise.resolve(undefined)
     const sessionKey = ctx.sessionKey ?? 'default'
     const rawMessages = (ctx.messages ?? []) as readonly unknown[]
     return beforeCompaction(_event, {
@@ -604,7 +659,12 @@ export function register(api: PluginApi): void {
 
     // Merge registry workspaces with the globally-resolved workspace (if any).
     const known = listWorkspacePaths(pruned)
-    const all = workspaceDir ? [...new Set([...known, workspaceDir])] : known
+    const allRaw = workspaceDir ? [...new Set([...known, workspaceDir])] : known
+
+    // Filter to allowed workspaces only (skip e.g. workspace-main default)
+    const all = allowedWorkspaces.size > 0
+      ? allRaw.filter(ws => allowedWorkspaces.has(ws))
+      : allRaw
 
     if (all.length > 20) {
       console.warn(`[omg] gateway_start: ${all.length} workspaces — check ~/.openclaw/omg-workspaces.json`)

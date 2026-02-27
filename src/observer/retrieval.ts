@@ -95,7 +95,7 @@ export async function findMergeTargets(
   const semanticScores = new Map<string, number>()
 
   if (memoryTools !== null) {
-    const query = `${candidate.title} ${candidate.description}`
+    const query = `${candidate.title} ${candidate.canonicalKey} ${candidate.description}`
     try {
       const response = await memoryTools.search(query)
       if (response !== null && !response.disabled) {

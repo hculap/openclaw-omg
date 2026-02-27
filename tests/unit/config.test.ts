@@ -910,11 +910,24 @@ describe('parseConfig — graphMaintenance', () => {
   it('graphMaintenance defaults applied when not specified', () => {
     const result = parseConfig({})
     expect(result.graphMaintenance.cronSchedule).toBe('0 3 * * *')
+    expect(result.graphMaintenance.archivedNodeRetentionDays).toBe(7)
   })
 
   it('custom graphMaintenance.cronSchedule → applied', () => {
     const result = parseConfig({ graphMaintenance: { cronSchedule: '0 2 * * *' } })
     expect(result.graphMaintenance.cronSchedule).toBe('0 2 * * *')
+  })
+
+  it('custom graphMaintenance.archivedNodeRetentionDays → applied', () => {
+    const result = parseConfig({ graphMaintenance: { archivedNodeRetentionDays: 14 } })
+    expect(result.graphMaintenance.archivedNodeRetentionDays).toBe(14)
+  })
+
+  it('invalid graphMaintenance.archivedNodeRetentionDays → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ graphMaintenance: { archivedNodeRetentionDays: 0 } }),
+      'graphMaintenance.archivedNodeRetentionDays'
+    )
   })
 
   it('invalid graphMaintenance.cronSchedule → throws ConfigValidationError', () => {
