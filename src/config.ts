@@ -220,6 +220,18 @@ const reflectionSchema = z
      * Example: "0 3 * * *" runs at 3 AM daily.
      */
     cronSchedule: cronField.default('0 3 * * *'),
+    /**
+     * Minimum age in days a node must have (by its `updated` timestamp) before
+     * it becomes eligible for reflection. Prevents reflecting on nodes that are
+     * still being actively updated by the observer.
+     * @default 3
+     */
+    ageCutoffDays: z
+      .number()
+      .int()
+      .min(0, 'reflection.ageCutoffDays must be >= 0')
+      .max(30, 'reflection.ageCutoffDays must be <= 30')
+      .default(3),
     /** Cluster-first reflection configuration. */
     clustering: clusteringSchema.default({}),
   })

@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/omg",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "OpenClaw plugin: Observational Memory Graph (OMG) — wiki-linked knowledge graph for agent memory",
   "type": "module",
   "main": "./src/index.ts",

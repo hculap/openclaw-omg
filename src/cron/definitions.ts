@@ -85,12 +85,13 @@ export async function graphMaintenanceCronHandler(
   }
 
   // Step 2: Reflection pass over aged non-archived nodes
-  // ageCutoffMs=0 means "no age cap" (all nodes eligible); undefined uses the 7-day default.
+  // ageCutoffMs=0 means "no age cap" (all nodes eligible); undefined uses the configured default.
+  const defaultCutoffDays = ctx.config.reflection.ageCutoffDays
   const cutoffMs = ageCutoffMs === 0
     ? Date.now()
     : ageCutoffMs !== undefined
       ? ageCutoffMs
-      : Date.now() - (7 * MILLISECONDS_PER_DAY)
+      : Date.now() - (defaultCutoffDays * MILLISECONDS_PER_DAY)
 
   let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
