@@ -999,3 +999,74 @@ describe('parseConfig — bootstrap.cronSchedule', () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// injection.graph config
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — injection.graph', () => {
+  it('graph defaults applied when not specified', () => {
+    const result = parseConfig({})
+    expect(result.injection.graph.enabled).toBe(false)
+    expect(result.injection.graph.expansionTopK).toBe(10)
+    expect(result.injection.graph.maxDepth).toBe(2)
+    expect(result.injection.graph.neighborWeight).toBe(0.5)
+  })
+
+  it('graph.enabled true → accepted', () => {
+    const result = parseConfig({ injection: { graph: { enabled: true } } })
+    expect(result.injection.graph.enabled).toBe(true)
+  })
+
+  it('custom graph values → applied', () => {
+    const result = parseConfig({
+      injection: { graph: { enabled: true, expansionTopK: 5, maxDepth: 1, neighborWeight: 1.0 } },
+    })
+    expect(result.injection.graph.expansionTopK).toBe(5)
+    expect(result.injection.graph.maxDepth).toBe(1)
+    expect(result.injection.graph.neighborWeight).toBe(1.0)
+  })
+
+  it('graph.expansionTopK = 0 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { graph: { expansionTopK: 0 } } }),
+      'injection.graph.expansionTopK'
+    )
+  })
+
+  it('graph.expansionTopK = 51 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { graph: { expansionTopK: 51 } } }),
+      'injection.graph.expansionTopK'
+    )
+  })
+
+  it('graph.maxDepth = 3 → throws ConfigValidationError (only 1 or 2)', () => {
+    expect(() =>
+      parseConfig({ injection: { graph: { maxDepth: 3 } } })
+    ).toThrow(ConfigValidationError)
+  })
+
+  it('graph.neighborWeight > 2 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { graph: { neighborWeight: 2.1 } } }),
+      'injection.graph.neighborWeight'
+    )
+  })
+
+  it('graph.neighborWeight < 0 → throws ConfigValidationError', () => {
+    expectFieldError(
+      () => parseConfig({ injection: { graph: { neighborWeight: -0.1 } } }),
+      'injection.graph.neighborWeight'
+    )
+  })
+
+  it('unknown key in injection.graph → detected by onUnknownKeys', () => {
+    let capturedKeys: readonly string[] = []
+    parseConfig(
+      { injection: { graph: { typo: true } } },
+      { onUnknownKeys: (keys) => { capturedKeys = keys } }
+    )
+    expect(capturedKeys).toContain('injection.graph.typo')
+  })
+})

@@ -287,6 +287,36 @@ const semanticSchema = z
   .strip()
 
 /**
+ * Controls graph-structure-aware expansion of context candidates.
+ * When enabled, the selector expands top keyword-scored candidates by
+ * traversing the adjacency graph (built from registry `links[]`),
+ * surfacing structurally-connected nodes that keyword scoring alone misses.
+ */
+const graphSchema = z
+  .object({
+    /** Enable graph-based candidate expansion. Opt-in to avoid perf cost on large graphs. */
+    enabled: z.boolean().default(false),
+    /** Number of top keyword-scored candidates to expand via graph neighbors. */
+    expansionTopK: z
+      .number()
+      .int()
+      .min(1, 'injection.graph.expansionTopK must be at least 1')
+      .max(50, 'injection.graph.expansionTopK must be at most 50')
+      .default(10),
+    /** Maximum traversal depth (1 = direct neighbors, 2 = friends-of-friends). */
+    maxDepth: z
+      .union([z.literal(1), z.literal(2)])
+      .default(2),
+    /** Weight multiplier applied to graph-expanded candidate scores. */
+    neighborWeight: z
+      .number()
+      .min(0, 'injection.graph.neighborWeight must be >= 0')
+      .max(2, 'injection.graph.neighborWeight must be <= 2')
+      .default(0.5),
+  })
+  .strip()
+
+/**
  * Controls how graph context is assembled and injected into the agent's
  * system prompt at the start of each conversation turn.
  */
@@ -321,6 +351,8 @@ const injectionSchema = z
     pinnedNodes: z.array(nodeIdField).default([]),
     /** Semantic boosting layer — integrates OpenClaw's memory_search tool. */
     semantic: semanticSchema.default({}),
+    /** Graph-structure expansion — traverses adjacency to find related nodes. */
+    graph: graphSchema.default({}),
   })
   .strip()
 
@@ -795,6 +827,7 @@ const SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
  */
 const SUB_SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   'injection.semantic': new Set(Object.keys(semanticSchema.shape)),
+  'injection.graph': new Set(Object.keys(graphSchema.shape)),
   'reflection.clustering': new Set(Object.keys(clusteringSchema.shape)),
 }
 

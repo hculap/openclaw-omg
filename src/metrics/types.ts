@@ -31,6 +31,7 @@ export interface SelectorMetrics {
   readonly selectedNodeCountByType: Readonly<Record<string, number>>
   readonly selectedNodeCountByDomain: Readonly<Record<string, number>>
   readonly memorySearchHitCount: number
+  readonly graphExpansionCount: number
 }
 
 /** Cumulative error metrics per pipeline run. */

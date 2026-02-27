@@ -5,6 +5,7 @@ import type { MemoryTools, SemanticCandidate } from './memory-search.js'
 import { buildSearchQuery, buildSemanticCandidates } from './memory-search.js'
 import { estimateTokens } from '../utils/tokens.js'
 import { emitMetric } from '../metrics/index.js'
+import { getNeighbors } from '../graph/traversal.js'
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -120,6 +121,11 @@ export interface SelectionParamsV2 {
    * When null (or undefined), scoring falls back to registry-only.
    */
   readonly memoryTools?: MemoryTools | null
+  /**
+   * OMG root path, required for graph traversal caching.
+   * When null/undefined, graph expansion is skipped.
+   */
+  readonly omgRoot?: string | null
 }
 
 /**
@@ -136,7 +142,7 @@ export interface SelectionParamsV2 {
  * Apply budget and count limits to produce the final slice.
  */
 export async function selectContextV2(params: SelectionParamsV2): Promise<GraphContextSlice> {
-  const { indexContent, nowContent, registryEntries, recentMessages, config, hydrateNode, memoryTools } = params
+  const { indexContent, nowContent, registryEntries, recentMessages, config, hydrateNode, memoryTools, omgRoot } = params
   const { injection } = config
 
   const idfStopwords = buildHighDfTokens(registryEntries)
@@ -168,9 +174,15 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     .filter(([, entry]) => entry.type === 'moc')
     .slice(0, injection.maxMocs * 3) // generous budget for hydration
 
-  const regularCandidates = boostedEntries
+  const baseRegularCandidates = boostedEntries
     .filter(([, entry]) => entry.type !== 'moc' && entry.type !== 'index' && entry.type !== 'now')
     .slice(0, MAX_HYDRATION_CANDIDATES)
+
+  // --- Graph expansion: add structurally-connected candidates ---
+  const { candidates: regularCandidates, expansionCount: graphExpansionCount } =
+    (injection.graph.enabled && omgRoot)
+      ? expandWithGraphNeighbors(baseRegularCandidates, registryEntries, injection.graph, keywords, omgRoot)
+      : { candidates: baseRegularCandidates, expansionCount: 0 }
 
   // --- Pass 2: hydrate top candidates ---
   const [hydratedMocs, hydratedRegular] = await Promise.all([
@@ -178,16 +190,22 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     hydrateEntries(regularCandidates, hydrateNode),
   ])
 
-  // When no semantic signal, delegate to selectContext directly
+  // When no semantic signal, use graph-aware or plain selection
   if (semanticByPath.size === 0 || injection.semantic.weight === 0) {
-    const result = selectContext({
-      indexContent,
-      nowContent,
-      allNodes: [...hydratedMocs, ...hydratedRegular],
-      recentMessages,
-      config,
-    })
-    emitSelectorMetrics(result, semanticCandidates.length)
+    // When graph expansion ran, hydratedRegular is already ordered by
+    // graph-boosted score from Pass 1. selectContext would re-score from
+    // scratch and discard the boost. Use selectContextPreSorted to preserve
+    // the Pass 1 ordering.
+    const result = (graphExpansionCount > 0)
+      ? selectContextPreSorted({ indexContent, nowContent, hydratedMocs, hydratedRegular, config })
+      : selectContext({
+          indexContent,
+          nowContent,
+          allNodes: [...hydratedMocs, ...hydratedRegular],
+          recentMessages,
+          config,
+        })
+    emitSelectorMetrics(result, semanticCandidates.length, graphExpansionCount)
     return result
   }
 
@@ -203,11 +221,11 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     semanticByPath,
     semanticWeight: injection.semantic.weight,
   })
-  emitSelectorMetrics(result, semanticCandidates.length)
+  emitSelectorMetrics(result, semanticCandidates.length, graphExpansionCount)
   return result
 }
 
-function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: number): void {
+function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: number, graphExpansionCount: number = 0): void {
   const allNodes = [...slice.mocs, ...slice.nodes]
   if (slice.nowNode) allNodes.push(slice.nowNode)
 
@@ -238,6 +256,7 @@ function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: num
       selectedNodeCountByType,
       selectedNodeCountByDomain,
       memorySearchHitCount,
+      graphExpansionCount,
     },
   })
 }
@@ -269,6 +288,57 @@ async function runMemorySearch(
     )
     return []
   }
+}
+
+/**
+ * Variant of selectContext that trusts the input order (from graph-boosted
+ * Pass 1 scoring) instead of re-scoring from scratch. Applies count limits,
+ * pinning, and token budget enforcement — but does NOT re-rank.
+ */
+function selectContextPreSorted(params: {
+  indexContent: string
+  nowContent: string | null
+  hydratedMocs: GraphNode[]
+  hydratedRegular: GraphNode[]
+  config: OmgConfig
+}): GraphContextSlice {
+  const { indexContent, nowContent, hydratedMocs, hydratedRegular, config } = params
+  const { injection } = config
+
+  const sortedMocs = hydratedMocs.slice(0, injection.maxMocs)
+
+  // Collect pinned nodes
+  const pinnedIds = new Set(injection.pinnedNodes)
+  const pinnedNodes = hydratedRegular.filter((n) => pinnedIds.has(n.frontmatter.id))
+  const pinnedIdSet = new Set(pinnedNodes.map((n) => n.frontmatter.id))
+
+  // Non-pinned regular nodes up to maxNodes (already in graph-boosted order)
+  const nonPinned = hydratedRegular
+    .filter((n) => !pinnedIdSet.has(n.frontmatter.id))
+    .slice(0, Math.max(0, injection.maxNodes - pinnedNodes.length))
+
+  // Enforce token budget
+  const pinnedCost = pinnedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
+  let budget = injection.maxContextTokens
+  budget -= estimateTokens(indexContent)
+  if (nowContent !== null) budget -= estimateTokens(nowContent)
+  budget -= pinnedCost
+
+  const selectedMocs = fitInBudget(sortedMocs, budget / 2)
+  budget -= selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
+
+  const selectedNonPinned = fitInBudget(nonPinned, budget)
+  const selectedNodes = [...pinnedNodes, ...selectedNonPinned]
+
+  const estTokens =
+    estimateTokens(indexContent) +
+    (nowContent !== null ? estimateTokens(nowContent) : 0) +
+    selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0) +
+    selectedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
+
+  const nowNode = nowContent !== null ? buildNowNode(nowContent) : null
+
+  return { index: indexContent, nowNode, mocs: selectedMocs, nodes: selectedNodes, estimatedTokens: estTokens }
 }
 
 /**
@@ -434,6 +504,94 @@ async function hydrateEntries(
     }
     return result.value !== null ? [result.value] : []
   })
+}
+
+// ---------------------------------------------------------------------------
+// Graph expansion
+// ---------------------------------------------------------------------------
+
+/**
+ * Two-pronged graph expansion:
+ *
+ * 1. **Score boost**: Existing candidates that are graph neighbors of seed
+ *    nodes get a multiplicative boost (1 + neighborWeight), promoting them
+ *    in the ranking even when the candidate pool already contains them.
+ *
+ * 2. **New candidates**: Neighbors not already in the candidate pool are
+ *    appended (the original expansion logic — matters when the graph
+ *    outgrows MAX_HYDRATION_CANDIDATES).
+ *
+ * Returns a re-sorted candidate array and the count of boosted + added nodes.
+ */
+function expandWithGraphNeighbors(
+  candidates: readonly [string, RegistryNodeEntry][],
+  allEntries: readonly [string, RegistryNodeEntry][],
+  graphConfig: { readonly expansionTopK: number; readonly maxDepth: 1 | 2; readonly neighborWeight: number },
+  keywords: ReadonlySet<string>,
+  omgRoot: string
+): { readonly candidates: [string, RegistryNodeEntry][]; readonly expansionCount: number } {
+  const existingIds = new Set(candidates.map(([id]) => id))
+  const seeds = candidates.slice(0, graphConfig.expansionTopK)
+  const seedIds = new Set(seeds.map(([id]) => id))
+
+  // Collect all graph neighbor IDs (for both boosting and adding)
+  const neighborIds = new Set<string>()
+  const newNeighbors: [string, RegistryNodeEntry][] = []
+
+  for (const [seedId] of seeds) {
+    const neighbors = getNeighbors(
+      omgRoot,
+      allEntries,
+      seedId,
+      'both',
+      graphConfig.maxDepth,
+      keywords
+    )
+
+    for (const neighbor of neighbors) {
+      if (seedIds.has(neighbor.nodeId)) continue
+      if (neighbor.entry.type === 'moc' || neighbor.entry.type === 'index' || neighbor.entry.type === 'now') continue
+
+      neighborIds.add(neighbor.nodeId)
+
+      // New candidate (not in pool yet)
+      if (!existingIds.has(neighbor.nodeId)) {
+        newNeighbors.push([neighbor.nodeId, neighbor.entry])
+      }
+    }
+  }
+
+  // Deduplicate new neighbors
+  const seenNew = new Set<string>()
+  const uniqueNewNeighbors = newNeighbors.filter(([id]) => {
+    if (seenNew.has(id)) return false
+    seenNew.add(id)
+    return true
+  })
+
+  // Re-score all candidates: boost those that are graph neighbors
+  const boostFactor = 1 + graphConfig.neighborWeight
+  const boostedCandidates: Array<{ id: string; entry: RegistryNodeEntry; score: number }> = candidates.map(([id, entry]) => {
+    const baseScore = computeRegistryScore(entry, keywords)
+    const score = neighborIds.has(id) ? baseScore * boostFactor : baseScore
+    return { id, entry, score }
+  })
+
+  // Score new neighbors
+  const scoredNew = uniqueNewNeighbors.map(([id, entry]) => {
+    const baseScore = computeRegistryScore(entry, keywords)
+    return { id, entry, score: baseScore * graphConfig.neighborWeight }
+  })
+
+  // Merge, sort by score, and cap
+  const allScored = [...boostedCandidates, ...scoredNew]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_HYDRATION_CANDIDATES)
+
+  const result: [string, RegistryNodeEntry][] = allScored.map(({ id, entry }) => [id, entry])
+  const expansionCount = neighborIds.size
+
+  return { candidates: result, expansionCount }
 }
 
 // ---------------------------------------------------------------------------

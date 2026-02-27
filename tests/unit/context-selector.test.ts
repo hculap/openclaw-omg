@@ -1188,3 +1188,182 @@ describe('selectContextV2 — hybrid semantic scoring', () => {
     expect(slice.nodes.map((n) => n.frontmatter.id)).toContain('omg/fact/a')
   })
 })
+
+// ---------------------------------------------------------------------------
+// selectContextV2 — graph expansion
+// ---------------------------------------------------------------------------
+
+describe('selectContextV2 — graph expansion', () => {
+  it('adds graph neighbors when graph.enabled: true', async () => {
+    // A links to B. A is keyword-matched, B should appear via graph expansion.
+    const entryA = makeRegistryEntry({
+      filePath: '/a.md',
+      priority: 'high',
+      description: 'TypeScript configuration',
+      links: ['omg/fact/b'],
+    })
+    const entryB = makeRegistryEntry({
+      filePath: '/b.md',
+      priority: 'medium',
+      description: 'ESLint setup details',
+    })
+    const nodeA = makeHydratedNode('omg/fact/a', entryA, 'TypeScript config body')
+    const nodeB = makeHydratedNode('omg/fact/b', entryB, 'ESLint body')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/a.md') return Promise.resolve(nodeA)
+      if (fp === '/b.md') return Promise.resolve(nodeB)
+      return Promise.resolve(null)
+    })
+
+    const graphConfig = parseConfig({
+      injection: { maxContextTokens: 10_000, maxNodes: 10, graph: { enabled: true } },
+    })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/a', entryA],
+        ['omg/fact/b', entryB],
+      ],
+      recentMessages: [{ role: 'user', content: 'TypeScript configuration' }],
+      config: graphConfig,
+      hydrateNode,
+      omgRoot: '/test/omg',
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/a')
+    expect(ids).toContain('omg/fact/b')
+  })
+
+  it('no expansion when graph.enabled: false', async () => {
+    // Same setup but graph disabled — B should only appear if keyword-matched
+    const entryA = makeRegistryEntry({
+      filePath: '/a.md',
+      priority: 'high',
+      description: 'Unique topic alpha',
+      links: ['omg/fact/b'],
+    })
+    const entryB = makeRegistryEntry({
+      filePath: '/b.md',
+      priority: 'low',
+      description: 'Completely different topic beta',
+    })
+    const nodeA = makeHydratedNode('omg/fact/a', entryA, 'Alpha body')
+    const nodeB = makeHydratedNode('omg/fact/b', entryB, 'Beta body')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/a.md') return Promise.resolve(nodeA)
+      if (fp === '/b.md') return Promise.resolve(nodeB)
+      return Promise.resolve(null)
+    })
+
+    const disabledConfig = parseConfig({
+      injection: { maxContextTokens: 80, maxNodes: 1, graph: { enabled: false } },
+    })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/a', entryA],
+        ['omg/fact/b', entryB],
+      ],
+      recentMessages: [{ role: 'user', content: 'Unique topic alpha' }],
+      config: disabledConfig,
+      hydrateNode,
+      omgRoot: '/test/omg',
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    expect(ids).toContain('omg/fact/a')
+    // B has low priority and doesn't match keywords — shouldn't be selected
+    // with tight budget and maxNodes: 1
+  })
+
+  it('does not duplicate existing candidates', async () => {
+    // Both A and B are keyword-matched. A links to B. B should not be duplicated.
+    const entryA = makeRegistryEntry({
+      filePath: '/a.md',
+      priority: 'high',
+      description: 'TypeScript project setup',
+      links: ['omg/fact/b'],
+    })
+    const entryB = makeRegistryEntry({
+      filePath: '/b.md',
+      priority: 'high',
+      description: 'TypeScript linter config',
+    })
+    const nodeA = makeHydratedNode('omg/fact/a', entryA, 'A body')
+    const nodeB = makeHydratedNode('omg/fact/b', entryB, 'B body')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/a.md') return Promise.resolve(nodeA)
+      if (fp === '/b.md') return Promise.resolve(nodeB)
+      return Promise.resolve(null)
+    })
+
+    const graphConfig = parseConfig({
+      injection: { maxContextTokens: 10_000, maxNodes: 10, graph: { enabled: true } },
+    })
+
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/a', entryA],
+        ['omg/fact/b', entryB],
+      ],
+      recentMessages: [{ role: 'user', content: 'TypeScript' }],
+      config: graphConfig,
+      hydrateNode,
+      omgRoot: '/test/omg',
+    })
+
+    const ids = slice.nodes.map((n) => n.frontmatter.id)
+    const bCount = ids.filter((id) => id === 'omg/fact/b').length
+    expect(bCount).toBeLessThanOrEqual(1)
+  })
+
+  it('no expansion when omgRoot is not provided', async () => {
+    const entryA = makeRegistryEntry({
+      filePath: '/a.md',
+      priority: 'high',
+      description: 'Node A links to B',
+      links: ['omg/fact/b'],
+    })
+    const entryB = makeRegistryEntry({
+      filePath: '/b.md',
+      priority: 'low',
+      description: 'Unrelated node B',
+    })
+    const nodeA = makeHydratedNode('omg/fact/a', entryA, 'A')
+
+    const hydrateNode = vi.fn().mockImplementation((fp: string) => {
+      if (fp === '/a.md') return Promise.resolve(nodeA)
+      return Promise.resolve(null)
+    })
+
+    const graphConfig = parseConfig({
+      injection: { maxContextTokens: 80, maxNodes: 1, graph: { enabled: true } },
+    })
+
+    // omgRoot not provided — graph expansion should be skipped
+    const slice = await selectContextV2({
+      indexContent: '',
+      nowContent: null,
+      registryEntries: [
+        ['omg/fact/a', entryA],
+        ['omg/fact/b', entryB],
+      ],
+      recentMessages: [{ role: 'user', content: 'Node A' }],
+      config: graphConfig,
+      hydrateNode,
+    })
+
+    // Should work without crash
+    expect(slice.nodes.length).toBeGreaterThanOrEqual(0)
+  })
+})

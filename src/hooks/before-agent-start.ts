@@ -85,6 +85,7 @@ export async function beforeAgentStart(
       config,
       hydrateNode: readGraphNode,
       memoryTools,
+      omgRoot,
     })
 
     const prependContext = renderContextBlock(slice)

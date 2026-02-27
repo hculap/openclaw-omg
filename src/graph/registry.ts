@@ -18,6 +18,7 @@ import type { NodeType, Priority, NodeIndexEntry, GraphNode } from '../types.js'
 import { NODE_TYPES } from '../types.js'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { clearGraphCache } from './traversal.js'
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -244,6 +245,7 @@ export async function registerNode(
       nodes: { ...data.nodes, [nodeId]: entry },
     }
     cache.set(omgRoot, updated)
+    clearGraphCache(omgRoot)
     await persistRegistry(omgRoot, updated)
   })
 }
@@ -268,6 +270,7 @@ export async function updateRegistryEntry(
       nodes: { ...data.nodes, [nodeId]: merged },
     }
     cache.set(omgRoot, updated)
+    clearGraphCache(omgRoot)
     await persistRegistry(omgRoot, updated)
   })
 }
@@ -287,6 +290,7 @@ export async function removeRegistryEntry(
     const { [nodeId]: _, ...rest } = data.nodes
     const updated: RegistryData = { ...data, nodes: rest }
     cache.set(omgRoot, updated)
+    clearGraphCache(omgRoot)
     await persistRegistry(omgRoot, updated)
   })
 }
@@ -341,6 +345,7 @@ export async function rebuildRegistry(omgRoot: string): Promise<RegistryData> {
 
   const data: RegistryData = { version: 1, nodes }
   cache.set(omgRoot, data)
+  clearGraphCache(omgRoot)
   try {
     await persistRegistry(omgRoot, data)
   } catch (err) {
