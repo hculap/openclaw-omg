@@ -8,7 +8,7 @@ import type { NodeFrontmatter } from '../types.js'
 import type { MergePlan, DedupAuditEntry } from './types.js'
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
-import { updateRegistryEntry } from '../graph/registry.js'
+import { getRegistryEntries, updateRegistryEntry } from '../graph/registry.js'
 
 // ---------------------------------------------------------------------------
 // applyPatch
@@ -117,6 +117,95 @@ export async function archiveAsMerged(
 }
 
 // ---------------------------------------------------------------------------
+// Link redirect helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads a node file, replaces `oldLink` with `newLink` in its frontmatter
+ * links array, writes back atomically, and updates the registry.
+ * Silently skips missing files or parse failures.
+ */
+async function updateNodeLinks(
+  filePath: string,
+  nodeId: string,
+  oldLink: string,
+  newLink: string,
+  omgRoot: string,
+): Promise<void> {
+  let raw: string
+  try {
+    raw = await fs.readFile(filePath, 'utf-8')
+  } catch (err) {
+    if (isEnoent(err)) return
+    throw err
+  }
+
+  let frontmatterRecord: Record<string, unknown>
+  let body: string
+  try {
+    const parsed = parseFrontmatter(raw)
+    frontmatterRecord = { ...parsed.frontmatter }
+    body = parsed.body
+  } catch {
+    return
+  }
+
+  const existingLinks = Array.isArray(frontmatterRecord['links'])
+    ? (frontmatterRecord['links'] as string[])
+    : []
+
+  if (!existingLinks.includes(oldLink)) return
+
+  const updatedLinks = [...new Set(
+    existingLinks.map((l) => (l === oldLink ? newLink : l)),
+  )]
+  frontmatterRecord = { ...frontmatterRecord, links: updatedLinks }
+
+  await atomicWrite(filePath, serializeFrontmatter(frontmatterRecord, body))
+
+  try {
+    await updateRegistryEntry(omgRoot, nodeId, { links: updatedLinks })
+  } catch (err) {
+    console.error(`[omg] dedup: registry update failed for link redirect in "${nodeId}":`, err)
+  }
+}
+
+/**
+ * Scans the registry for all nodes that link to any loser ID and redirects
+ * those links to the keeper. Deduplicates to prevent duplicate keeper links.
+ */
+async function redirectIncomingLinks(
+  loserIds: readonly string[],
+  keeperId: string,
+  omgRoot: string,
+): Promise<void> {
+  const loserSet = new Set(loserIds)
+  let allEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
+  try {
+    allEntries = await getRegistryEntries(omgRoot)
+  } catch (err) {
+    console.error('[omg] dedup: failed to read registry for link redirect:', err)
+    return
+  }
+
+  const redirectTasks: Array<{ nodeId: string; filePath: string; oldLink: string }> = []
+  for (const [nodeId, entry] of allEntries) {
+    if (loserSet.has(nodeId) || nodeId === keeperId) continue
+    for (const link of entry.links ?? []) {
+      if (loserSet.has(link)) {
+        redirectTasks.push({ nodeId, filePath: entry.filePath, oldLink: link })
+      }
+    }
+  }
+
+  await Promise.allSettled(
+    redirectTasks.map(({ nodeId, filePath, oldLink }) =>
+      updateNodeLinks(filePath, nodeId, oldLink, keeperId, omgRoot),
+    ),
+  )
+}
+
+// ---------------------------------------------------------------------------
 // executeMerge
 // ---------------------------------------------------------------------------
 
@@ -199,6 +288,9 @@ export async function executeMerge(
       console.error(`[omg] dedup: failed to archive loser "${loserNodeId}":`, err)
     }
   }
+
+  // Redirect incoming links from losers → keeper
+  await redirectIncomingLinks(plan.mergeNodeIds, plan.keepNodeId, omgRoot)
 
   return {
     auditEntry: {

@@ -29,4 +29,12 @@ export default defineWorkspace([
       sequence: { concurrent: false },
     },
   },
+  {
+    test: {
+      name: 'eval',
+      include: ['tests/eval/**/*.test.ts'],
+      testTimeout: 120_000,
+      hookTimeout: 30_000,
+    },
+  },
 ])

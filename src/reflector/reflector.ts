@@ -394,6 +394,18 @@ export async function runReflection(params: ReflectionParams): Promise<Reflector
     }
   }
 
+  // --- Add backlinks from source nodes → reflection ---
+  for (const result of writeResults) {
+    if (result.status !== 'fulfilled') continue
+    const { spec, written } = result.value
+    const reflectionId = written.frontmatter.id
+    await Promise.allSettled(
+      spec.sources.map((sourceId) =>
+        applyNodeFieldUpdate(sourceId, 'links', 'add', reflectionId, omgRoot),
+      ),
+    )
+  }
+
   // --- Mark archived nodes ---
   const archiveResults = await Promise.allSettled(
     xmlOutput.archiveNodeIds.map(async (nodeId) => {

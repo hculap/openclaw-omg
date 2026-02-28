@@ -589,6 +589,114 @@ describe('runReflection — node-updates: priority field', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Backlinks: source nodes receive link to reflection
+// ---------------------------------------------------------------------------
+
+describe('runReflection — backlinks to source nodes', () => {
+  it('adds reflection node ID to source node links', async () => {
+    // LLM response with a reflection node that lists omg/preference-dark-mode as source
+    const llm = makeMockLlm()
+    const { fs } = await import('memfs')
+
+    // Write the source node to the registry so findNodeById can look it up
+    const registryPath = `${OMG_ROOT}/registry.json`
+    const registryData = {
+      version: 1,
+      nodes: {
+        'omg/preference-dark-mode': {
+          type: 'preference',
+          kind: 'observation',
+          description: 'User prefers dark mode',
+          priority: 'medium',
+          created: '2026-01-01T00:00:00Z',
+          updated: '2026-01-01T00:00:00Z',
+          filePath: `${OMG_ROOT}/nodes/preference/preference-dark-mode-2026-01-01.md`,
+        },
+      },
+    }
+    vol.fromJSON({
+      ...vol.toJSON(),
+      [registryPath]: JSON.stringify(registryData),
+    })
+    clearRegistryCache()
+
+    await runReflection({
+      observationNodes: [makeObservationNode('omg/preference-dark-mode')],
+      config: makeConfig(),
+      llmClient: llm,
+      omgRoot: OMG_ROOT,
+      sessionKey: 'test',
+    })
+
+    // Source node should now have a link to the reflection node
+    const sourceContent = fs.readFileSync(
+      `${OMG_ROOT}/nodes/preference/preference-dark-mode-2026-01-01.md`,
+      'utf-8',
+    ) as string
+    expect(sourceContent).toContain('omg/reflection/test-synthesis')
+  })
+
+  it('does not duplicate backlinks on repeated reflection', async () => {
+    const llm = makeMockLlm()
+    const { fs } = await import('memfs')
+
+    // Set up source node that already has the reflection link
+    vol.fromJSON({
+      ...vol.toJSON(),
+      [`${OMG_ROOT}/nodes/preference/preference-dark-mode-2026-01-01.md`]: `---
+id: omg/preference-dark-mode
+description: User prefers dark mode
+type: preference
+priority: medium
+created: 2026-01-01T00:00:00Z
+updated: 2026-01-01T00:00:00Z
+links:
+  - omg/reflection/test-synthesis
+---
+The user prefers dark mode in all editors.`,
+    })
+
+    const registryPath = `${OMG_ROOT}/registry.json`
+    const registryData = {
+      version: 1,
+      nodes: {
+        'omg/preference-dark-mode': {
+          type: 'preference',
+          kind: 'observation',
+          description: 'User prefers dark mode',
+          priority: 'medium',
+          created: '2026-01-01T00:00:00Z',
+          updated: '2026-01-01T00:00:00Z',
+          filePath: `${OMG_ROOT}/nodes/preference/preference-dark-mode-2026-01-01.md`,
+          links: ['omg/reflection/test-synthesis'],
+        },
+      },
+    }
+    vol.fromJSON({
+      ...vol.toJSON(),
+      [registryPath]: JSON.stringify(registryData),
+    })
+    clearRegistryCache()
+
+    await runReflection({
+      observationNodes: [makeObservationNode('omg/preference-dark-mode')],
+      config: makeConfig(),
+      llmClient: llm,
+      omgRoot: OMG_ROOT,
+      sessionKey: 'test',
+    })
+
+    const sourceContent = fs.readFileSync(
+      `${OMG_ROOT}/nodes/preference/preference-dark-mode-2026-01-01.md`,
+      'utf-8',
+    ) as string
+    // Count occurrences — should be exactly one
+    const matches = sourceContent.match(/omg\/reflection\/test-synthesis/g) ?? []
+    expect(matches.length).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // tokensUsed in output
 // ---------------------------------------------------------------------------
 

@@ -1001,6 +1001,70 @@ describe('parseConfig — bootstrap.cronSchedule', () => {
 })
 
 // ---------------------------------------------------------------------------
+// reflection.ageCutoffByType
+// ---------------------------------------------------------------------------
+
+describe('parseConfig — reflection.ageCutoffByType', () => {
+  it('defaults to empty object', () => {
+    const result = parseConfig({})
+    expect(result.reflection.ageCutoffByType).toEqual({})
+  })
+
+  it('accepts valid per-type overrides', () => {
+    const result = parseConfig({
+      reflection: { ageCutoffByType: { decision: 1, preference: 14 } },
+    })
+    expect(result.reflection.ageCutoffByType).toEqual({ decision: 1, preference: 14 })
+  })
+
+  it('rejects negative values', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { ageCutoffByType: { decision: -1 } } }),
+      'reflection.ageCutoffByType',
+    )
+  })
+
+  it('rejects values > 30', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { ageCutoffByType: { preference: 31 } } }),
+      'reflection.ageCutoffByType',
+    )
+  })
+
+  it('rejects non-integer values', () => {
+    expectFieldError(
+      () => parseConfig({ reflection: { ageCutoffByType: { fact: 2.5 } } }),
+      'reflection.ageCutoffByType',
+    )
+  })
+
+  it('accepts boundary value 0 (immediate eligibility)', () => {
+    const result = parseConfig({
+      reflection: { ageCutoffByType: { episode: 0 } },
+    })
+    expect(result.reflection.ageCutoffByType).toEqual({ episode: 0 })
+  })
+
+  it('accepts boundary value 30', () => {
+    const result = parseConfig({
+      reflection: { ageCutoffByType: { identity: 30 } },
+    })
+    expect(result.reflection.ageCutoffByType).toEqual({ identity: 30 })
+  })
+
+  it('coexists with ageCutoffDays without interference', () => {
+    const result = parseConfig({
+      reflection: {
+        ageCutoffDays: 5,
+        ageCutoffByType: { decision: 1 },
+      },
+    })
+    expect(result.reflection.ageCutoffDays).toBe(5)
+    expect(result.reflection.ageCutoffByType).toEqual({ decision: 1 })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // injection.graph config
 // ---------------------------------------------------------------------------
 

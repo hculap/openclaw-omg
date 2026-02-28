@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { NODE_TYPES } from './types.js'
 import { formatZodErrors } from './error-utils.js'
 
 // ---------------------------------------------------------------------------
@@ -232,6 +233,14 @@ const reflectionSchema = z
       .min(0, 'reflection.ageCutoffDays must be >= 0')
       .max(30, 'reflection.ageCutoffDays must be <= 30')
       .default(3),
+    /**
+     * Per-type override for `ageCutoffDays`. Keys are node types
+     * (e.g. "decision", "preference"), values are days. Types not
+     * listed here fall back to the global `ageCutoffDays`.
+     */
+    ageCutoffByType: z
+      .record(z.enum(NODE_TYPES), z.number().int().min(0).max(30))
+      .default({}),
     /** Cluster-first reflection configuration. */
     clustering: clusteringSchema.default({}),
   })

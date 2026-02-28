@@ -93,14 +93,22 @@ export async function graphMaintenanceCronHandler(
       ? ageCutoffMs
       : Date.now() - (defaultCutoffDays * MILLISECONDS_PER_DAY)
 
+  const cutoffByType = ctx.config.reflection.ageCutoffByType
+
   let eligibleEntries: readonly [string, import('../graph/registry.js').RegistryNodeEntry][]
   try {
     const allEntries = await getRegistryEntries(omgRoot)
     eligibleEntries = allEntries.filter(([, e]) => {
       if (e.archived) return false
       if (e.type === 'reflection') return false
+      const typeCutoffDays = cutoffByType[e.type] ?? defaultCutoffDays
+      const typeCutoffMs = ageCutoffMs === 0
+        ? Date.now()
+        : ageCutoffMs !== undefined
+          ? ageCutoffMs
+          : Date.now() - (typeCutoffDays * MILLISECONDS_PER_DAY)
       const updatedMs = new Date(e.updated).getTime()
-      return updatedMs < cutoffMs
+      return updatedMs < typeCutoffMs
     })
   } catch (err) {
     console.error('[omg] cron omg-reflection: failed to read registry for reflection:', err)
