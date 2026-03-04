@@ -22,10 +22,12 @@ import type {
   NowUpdate,
   WriteContext,
 } from '../types.js'
+import type { OmgConfig } from '../config.js'
 import { parseFrontmatter, serializeFrontmatter } from '../utils/frontmatter.js'
 import { atomicWrite, isEnoent } from '../utils/fs.js'
 import { slugify, computeUid, computeNodeId, computeNodePath } from '../utils/id.js'
 import { registerNode, buildRegistryEntry, getRegistryEntry, updateRegistryEntry } from './registry.js'
+import { resolveCanonicalKeyToNodeId } from '../observer/now-renderer.js'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -218,6 +220,9 @@ async function writeNodeToDeterministicPath(
   // Resolve MOC links from mocHints
   const mocLinks = (mocHints ?? []).map((hint) => `omg/moc-${hint}`)
 
+  // Resolve canonicalKey links to node IDs where possible
+  const resolvedLinkKeys = (linkKeys ?? []).map((key) => resolveCanonicalKeyToNodeId(key) ?? key)
+
   const frontmatter: NodeFrontmatter = {
     id: nodeId,
     description,
@@ -228,8 +233,8 @@ async function writeNodeToDeterministicPath(
     uid,
     canonicalKey,
     ...(title && description !== title ? {} : {}),  // title stored in body heading, not frontmatter
-    ...(mocLinks.length > 0 || (linkKeys?.length ?? 0) > 0
-      ? { links: [...mocLinks, ...(linkKeys ?? [])] }
+    ...(mocLinks.length > 0 || resolvedLinkKeys.length > 0
+      ? { links: [...mocLinks, ...resolvedLinkKeys] }
       : {}),
     ...(tags && tags.length > 0 ? { tags: [...tags] } : {}),
   }
@@ -358,13 +363,31 @@ export async function writeClusteredReflectionNode(
 export async function writeNowNode(
   nowUpdate: NowUpdate,
   recentNodeIds: readonly string[],
-  context: WriteContext
+  context: WriteContext,
+  config?: OmgConfig,
 ): Promise<GraphNode> {
   const now = new Date().toISOString()
   const filePath = join(context.omgRoot, 'now.md')
 
-  const existingCreated = await readExistingCreated(filePath)
+  // Read existing frontmatter for created timestamp and existing links
+  let existingCreated: string | null = null
+  let existingLinks: readonly string[] = []
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8')
+    const { frontmatter: rawFm } = parseFrontmatter(raw)
+    existingCreated = typeof rawFm['created'] === 'string' ? rawFm['created'] : null
+    existingLinks = Array.isArray(rawFm['links']) ? (rawFm['links'] as string[]) : []
+  } catch (err) {
+    if (!isEnoent(err)) {
+      console.warn('[omg] node-writer: writeNowNode — failed to read existing now.md:', err)
+    }
+  }
+
   const created = existingCreated ?? now
+
+  // Merge existing links with new ones (sliding window, deduped, newest first)
+  const maxLinks = config?.injection.nowNodeMaxLinks ?? 10
+  const mergedLinks = [...new Set([...recentNodeIds, ...existingLinks])].slice(0, maxLinks)
 
   const frontmatter: NodeFrontmatter = {
     id: 'omg/now',
@@ -373,7 +396,7 @@ export async function writeNowNode(
     priority: 'high',
     created,
     updated: now,
-    ...(recentNodeIds.length > 0 ? { links: recentNodeIds } : {}),
+    ...(mergedLinks.length > 0 ? { links: mergedLinks } : {}),
   }
 
   await ensureDir(dirname(filePath))

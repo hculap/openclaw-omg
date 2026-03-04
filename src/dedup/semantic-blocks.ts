@@ -17,7 +17,7 @@ import { resolvePrimaryDomain } from '../reflector/domain-resolver.js'
 // ---------------------------------------------------------------------------
 
 /** Node types excluded from semantic dedup (same as literal dedup). */
-const EXCLUDED_TYPES = new Set(['moc', 'index', 'now', 'reflection'])
+const EXCLUDED_TYPES = new Set(['moc', 'index', 'now'])
 
 // ---------------------------------------------------------------------------
 // Public API

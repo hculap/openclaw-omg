@@ -276,7 +276,7 @@ Content.`,
     const maintenance = defs.find((d) => d.id === 'omg-maintenance')!
     await maintenance.handler()
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('broken wikilink'))
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('dead link(s) removed'))
   })
 })
 

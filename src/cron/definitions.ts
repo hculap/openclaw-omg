@@ -16,7 +16,8 @@ import { runSemanticDedup } from '../dedup/semantic-dedup.js'
 import { runBootstrapTick } from '../bootstrap/bootstrap.js'
 import { readBootstrapState, writeBootstrapState, markMaintenanceDone } from '../bootstrap/state.js'
 import { readGraphNode } from '../graph/node-reader.js'
-import { getRegistryEntries, getNodeFilePaths, removeRegistryEntry } from '../graph/registry.js'
+import { getRegistryEntries, getNodeFilePaths, removeRegistryEntry, updateRegistryEntry } from '../graph/registry.js'
+import { resolveCanonicalKeyToNodeId } from '../observer/now-renderer.js'
 import { resolveOmgRoot } from '../utils/paths.js'
 
 /** A single cron job definition. */
@@ -130,6 +131,7 @@ export async function graphMaintenanceCronHandler(
         eligibleEntries,
         ctx.config,
         (filePath: string) => readGraphNode(filePath),
+        omgRoot,
       )
 
       if (clusters.length === 0) {
@@ -242,16 +244,65 @@ export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
     ctx.config.graphMaintenance.archivedNodeRetentionDays,
   )
 
+  // Build lookups for link repair
   const nodeIdSet = new Set(allEntries.filter(([, e]) => !e.archived).map(([id]) => id))
-  let brokenLinkCount = 0
+  const canonicalKeyToNodeId = new Map<string, string>()
   for (const [id, entry] of allEntries) {
+    if (entry.archived) continue
+    if (entry.canonicalKey) {
+      canonicalKeyToNodeId.set(entry.canonicalKey, id)
+    }
+  }
+
+  let brokenLinkCount = 0
+  let repairedLinkCount = 0
+  for (const [id, entry] of allEntries) {
+    if (entry.archived) continue
     const links = entry.links ?? []
+    if (links.length === 0) continue
+
+    let hasRepairs = false
+    const repairedLinks: string[] = []
+
     for (const link of links) {
-      if (!nodeIdSet.has(link)) {
-        console.warn(
-          `[omg] cron omg-maintenance: broken wikilink in "${id}" → "${link}" (target not found)`,
-        )
-        brokenLinkCount++
+      if (nodeIdSet.has(link)) {
+        repairedLinks.push(link)
+        continue
+      }
+
+      // Try to resolve as a canonicalKey → node ID
+      const resolvedId = resolveCanonicalKeyToNodeId(link)
+      if (resolvedId && nodeIdSet.has(resolvedId)) {
+        repairedLinks.push(resolvedId)
+        hasRepairs = true
+        repairedLinkCount++
+        continue
+      }
+
+      // Try direct canonicalKey lookup in registry
+      const registryMatch = canonicalKeyToNodeId.get(link)
+      if (registryMatch) {
+        repairedLinks.push(registryMatch)
+        hasRepairs = true
+        repairedLinkCount++
+        continue
+      }
+
+      // Dead link — drop it
+      brokenLinkCount++
+      console.warn(
+        `[omg] cron omg-maintenance: removing dead link in "${id}" → "${link}" (target not found)`,
+      )
+      hasRepairs = true
+    }
+
+    // Persist repairs
+    if (hasRepairs) {
+      const dedupedLinks = [...new Set(repairedLinks)]
+      try {
+        await updateRegistryEntry(omgRoot, id, { links: dedupedLinks })
+      } catch (err) {
+        console.error(`[omg] cron omg-maintenance: failed to repair links for "${id}":`, err)
       }
     }
   }
@@ -276,7 +327,8 @@ export async function maintenanceCronHandler(ctx: CronContext): Promise<void> {
   }
 
   console.warn(
-    `[omg] cron omg-maintenance: completed — ${brokenLinkCount} broken link(s) found, ` +
+    `[omg] cron omg-maintenance: completed — ${repairedLinkCount} link(s) repaired, ` +
+      `${brokenLinkCount} dead link(s) removed, ` +
       `${duplicateGroupCount} duplicate description group(s) flagged, ` +
       `${cleanupResult.deletedEntries} archived node(s) cleaned`,
   )

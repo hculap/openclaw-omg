@@ -31,6 +31,8 @@ const PREFIX_TO_TYPE: Readonly<Record<string, string>> = {
   decisions: 'decision',
   facts: 'fact',
   episodes: 'episode',
+  reflections: 'reflection',
+  mocs: 'moc',
 }
 
 // ---------------------------------------------------------------------------
@@ -44,14 +46,28 @@ const PREFIX_TO_TYPE: Readonly<Record<string, string>> = {
  * Returns null when the key prefix is not recognised (cannot infer type).
  */
 export function resolveCanonicalKeyToWikilink(canonicalKey: string): string | null {
+  const nodeId = resolveCanonicalKeyToNodeId(canonicalKey)
+  if (!nodeId) return null
+  return `[[${nodeId}]]`
+}
+
+/**
+ * Resolves a canonical key (e.g. "preferences.editor_theme") to an OMG
+ * node ID (e.g. "omg/preference/preferences-editor-theme").
+ *
+ * Returns null when the key prefix is not recognised (cannot infer type).
+ */
+export function resolveCanonicalKeyToNodeId(canonicalKey: string): string | null {
   if (!canonicalKey || !canonicalKey.includes('.')) return null
 
   const prefix = canonicalKey.slice(0, canonicalKey.indexOf('.'))
   const type = PREFIX_TO_TYPE[prefix]
-  if (!type) return null
+  if (!type) {
+    console.warn(`[omg] now-renderer: unresolved canonical key prefix "${prefix}" in key "${canonicalKey}"`)
+    return null
+  }
 
-  const nodeId = computeNodeId(type, canonicalKey)
-  return `[[${nodeId}]]`
+  return computeNodeId(type, canonicalKey)
 }
 
 // ---------------------------------------------------------------------------

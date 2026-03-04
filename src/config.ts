@@ -169,6 +169,28 @@ const observationSchema = z
  * Controls cluster-first reflection: groups eligible nodes by domain and time
  * window before sending each cluster to the LLM for domain-scoped reflection.
  */
+/**
+ * Controls consolidation of new reflections against existing ones.
+ * When enabled, a new cluster whose content is highly similar to an existing
+ * reflection within the same domain+time window is skipped to prevent duplication.
+ */
+const consolidationSchema = z
+  .object({
+    /** Enable consolidation guard. When false, all clusters produce new reflections. */
+    enabled: z.boolean().default(true),
+    /**
+     * Minimum combined similarity score (0–1) for an existing reflection to
+     * be considered a near-duplicate of a cluster. Clusters scoring above this
+     * against an existing reflection in the same domain are skipped.
+     */
+    similarityThreshold: z
+      .number()
+      .min(0, 'reflection.consolidation.similarityThreshold must be >= 0')
+      .max(1, 'reflection.consolidation.similarityThreshold must be <= 1')
+      .default(0.7),
+  })
+  .strip()
+
 const clusteringSchema = z
   .object({
     /** Enable cluster-first reflection. When false, uses monolithic reflection. */
@@ -196,6 +218,8 @@ const clusteringSchema = z
       .default(8000),
     /** Enable anchor-based splitting for oversized clusters. */
     enableAnchorSplit: z.boolean().default(false),
+    /** Consolidation guard against existing reflections. */
+    consolidation: consolidationSchema.default({}),
   })
   .strip()
 
@@ -358,6 +382,17 @@ const injectionSchema = z
      * Example: ["omg/identity-core", "omg/project-main"]
      */
     pinnedNodes: z.array(nodeIdField).default([]),
+    /**
+     * Maximum number of recent node links to keep in the now.md sliding window.
+     * New links are merged with existing links, deduplicated, then trimmed to this limit.
+     * @default 10
+     */
+    nowNodeMaxLinks: z
+      .number()
+      .int()
+      .min(1, 'injection.nowNodeMaxLinks must be at least 1')
+      .max(50, 'injection.nowNodeMaxLinks must be at most 50')
+      .default(10),
     /** Semantic boosting layer — integrates OpenClaw's memory_search tool. */
     semantic: semanticSchema.default({}),
     /** Graph-structure expansion — traverses adjacency to find related nodes. */
@@ -477,6 +512,17 @@ const extractionGuardrailsSchema = z
       .min(1, 'extractionGuardrails.recentWindowSize must be >= 1')
       .max(20, 'extractionGuardrails.recentWindowSize must be <= 20')
       .default(5),
+    /**
+     * Combined similarity score (0–1) above which episode candidates within the
+     * same extraction batch are deduplicated. The lower-priority duplicate is suppressed.
+     * Set to 1.0 to disable intra-batch episode dedup.
+     * @default 0.5
+     */
+    intraBatchEpisodeThreshold: z
+      .number()
+      .min(0, 'extractionGuardrails.intraBatchEpisodeThreshold must be >= 0')
+      .max(1, 'extractionGuardrails.intraBatchEpisodeThreshold must be <= 1')
+      .default(0.5),
   })
   .strip()
 
@@ -838,6 +884,7 @@ const SUB_SUB_SCHEMA_SHAPES: Record<string, ReadonlySet<string>> = {
   'injection.semantic': new Set(Object.keys(semanticSchema.shape)),
   'injection.graph': new Set(Object.keys(graphSchema.shape)),
   'reflection.clustering': new Set(Object.keys(clusteringSchema.shape)),
+  'reflection.clustering.consolidation': new Set(Object.keys(consolidationSchema.shape)),
 }
 
 /**

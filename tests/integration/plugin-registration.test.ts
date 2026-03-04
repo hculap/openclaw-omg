@@ -178,7 +178,7 @@ describe('plugin.register — registerCli', () => {
   it('calls registerCli when it is a function', () => {
     const api = makeMockApi()
     plugin.register(api)
-    expect(api.registerCli).toHaveBeenCalledTimes(1)
+    expect(api.registerCli).toHaveBeenCalledTimes(2)
   })
 
   it('passes commands: ["omg bootstrap"] to registerCli', () => {

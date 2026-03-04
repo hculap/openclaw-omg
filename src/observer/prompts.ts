@@ -191,6 +191,10 @@ Updated project description with new details from this session.
     - Max 120 chars per language side, include 2–3 searchable keywords
     - BAD: "User's partner and children"
     - GOOD: "Family: partner Alex, 2 children (ages 7, 4) — Rodzina: partnerka Alex, 2 dzieci"
+15. For **episode** nodes: if multiple events belong to the same activity or session topic
+    (e.g. a roleplay session, a debugging session, a planning session), combine them into
+    ONE episode node with a comprehensive description. Prefer one rich episode over multiple
+    narrow ones covering the same activity.
 `
 }
 

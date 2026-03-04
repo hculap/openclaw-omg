@@ -15,7 +15,7 @@ import { findMergeTargets, shouldMerge, DEFAULT_MERGE_RETRIEVAL_CONFIG } from '.
 import type { MergeRetrievalConfig } from '../observer/retrieval.js'
 import { renderNowPatch, shouldUpdateNow } from '../observer/now-renderer.js'
 import type { MemoryTools } from '../context/memory-search.js'
-import { checkSourceOverlap, suppressDuplicateCandidates, updateRecentFingerprints } from '../observer/extraction-guardrails.js'
+import { checkSourceOverlap, suppressDuplicateCandidates, suppressIntraBatchEpisodes, updateRecentFingerprints } from '../observer/extraction-guardrails.js'
 import { buildFingerprint, type SourceFingerprint } from '../observer/source-fingerprint.js'
 import { emitMetric } from '../metrics/index.js'
 import type { CircuitBreaker } from './circuit-breaker.js'
@@ -201,6 +201,18 @@ export async function tryRunObservation(
     })
   }
 
+  // ── Intra-batch episode dedup ─────────────────────────────────────────────
+  if (config.extractionGuardrails.enabled) {
+    const { survivors: episodeSurvivors, suppressed: episodeSuppressed } =
+      suppressIntraBatchEpisodes(filteredCandidates, config)
+    if (episodeSuppressed.length > 0) {
+      console.warn(
+        `[omg] agent_end [${sessionKey}]: intra-batch episode dedup suppressed ${episodeSuppressed.length} candidate(s): ${episodeSuppressed.join(', ')}`
+      )
+      filteredCandidates = episodeSurvivors
+    }
+  }
+
   // ── Step B+C: Merge decision + Write ─────────────────────────────────────
   // For each candidate, find merge targets → decide → apply action.
   // Partial failures are tolerated via Promise.allSettled pattern.
@@ -349,7 +361,7 @@ export async function tryRunObservation(
 
       if (nodesChanged || openLoopsChanged || shouldUpdateNow(currentNowContent, extractOutput.nowPatch)) {
         const rendered = renderNowPatch(extractOutput.nowPatch, writtenIds)
-        await writeNowNode(rendered, writtenIds, writeContext)
+        await writeNowNode(rendered, writtenIds, writeContext, config)
       }
     } catch (err) {
       console.error(`[omg] agent_end [${sessionKey}]: now-node write failed — state preserved for retry:`, err)

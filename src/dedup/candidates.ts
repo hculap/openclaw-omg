@@ -31,7 +31,7 @@ export interface CandidateCluster {
 // ---------------------------------------------------------------------------
 
 /** Node types excluded from dedup candidates. */
-const EXCLUDED_TYPES = new Set(['moc', 'index', 'now', 'reflection'])
+const EXCLUDED_TYPES = new Set(['moc', 'index', 'now'])
 
 /** Volatile node types subject to the stale-days filter. */
 const VOLATILE_TYPES = new Set(['episode', 'fact'])
@@ -45,7 +45,7 @@ const VOLATILE_TYPES = new Set(['episode', 'fact'])
  * similarity scoring. Registry-only — zero disk reads.
  *
  * Filtering stages:
- *   1. Skip archived, moc, index, now, reflection nodes
+ *   1. Skip archived, moc, index, now nodes
  *   2. Group by (type, keyPrefix)
  *   3. Pairwise combinedSimilarity within each bucket
  *   4. Incremental scope: at least one node updated >= lastDedupAt

@@ -23,7 +23,7 @@ import { createMemoryTools } from './context/memory-search.js'
 import { beforeCompaction } from './hooks/before-compaction.js'
 import { toolResultPersist } from './hooks/tool-result-persist.js'
 import { registerCronJobs } from './cron/register.js'
-import { graphMaintenanceCronHandler } from './cron/definitions.js'
+import { graphMaintenanceCronHandler, maintenanceCronHandler } from './cron/definitions.js'
 import {
   readWorkspaceRegistry,
   writeWorkspaceRegistry,
@@ -799,6 +799,36 @@ export function register(api: PluginApi): void {
           })
       },
       { commands: ['omg bootstrap'] }
+    )
+
+    api.registerCli(
+      (ctx) => {
+        const program = ctx.program as CliProgram
+        program
+          .command('omg run-maintenance')
+          .action(async () => {
+            if (!workspaceDir) {
+              console.error('[omg] run-maintenance: workspaceDir is not available')
+              return
+            }
+            console.log('[omg] run-maintenance: starting graph maintenance (dedup + reflection)...')
+            const cronCtx = { workspaceDir, config, llmClient }
+            try {
+              await graphMaintenanceCronHandler(cronCtx)
+              console.log('[omg] run-maintenance: graph maintenance completed')
+            } catch (err) {
+              console.error('[omg] run-maintenance: failed:', err)
+            }
+            console.log('[omg] run-maintenance: starting weekly maintenance (link repair + cleanup)...')
+            try {
+              await maintenanceCronHandler(cronCtx)
+              console.log('[omg] run-maintenance: weekly maintenance completed')
+            } catch (err) {
+              console.error('[omg] run-maintenance: weekly maintenance failed:', err)
+            }
+          })
+      },
+      { commands: ['omg run-maintenance'] }
     )
   }
 }

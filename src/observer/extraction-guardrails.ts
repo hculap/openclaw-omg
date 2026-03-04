@@ -190,6 +190,64 @@ export function suppressDuplicateCandidates(
 }
 
 // ---------------------------------------------------------------------------
+// Intra-batch episode dedup
+// ---------------------------------------------------------------------------
+
+/**
+ * Suppresses near-duplicate episode candidates within a single extraction batch.
+ * For each pair of episode candidates with similarity above the threshold,
+ * the lower-priority (or later-appearing) duplicate is suppressed.
+ */
+export function suppressIntraBatchEpisodes(
+  candidates: readonly ExtractCandidate[],
+  config: OmgConfig,
+): SuppressionResult {
+  const threshold = config.extractionGuardrails.intraBatchEpisodeThreshold
+  if (threshold >= 1.0) return { survivors: candidates, suppressed: [] }
+
+  const episodes = candidates.filter((c) => c.type === 'episode')
+  const nonEpisodes = candidates.filter((c) => c.type !== 'episode')
+
+  if (episodes.length < 2) return { survivors: candidates, suppressed: [] }
+
+  // Sort episodes by priority descending (high > medium > low)
+  const priorityOrder: Record<string, number> = { high: 3, medium: 2, low: 1 }
+  const sorted = [...episodes].sort(
+    (a, b) => (priorityOrder[b.priority] ?? 0) - (priorityOrder[a.priority] ?? 0)
+  )
+
+  const suppressed: string[] = []
+  const suppressedSet = new Set<string>()
+
+  for (let i = 0; i < sorted.length; i++) {
+    const a = sorted[i]!
+    if (suppressedSet.has(a.canonicalKey)) continue
+
+    for (let j = i + 1; j < sorted.length; j++) {
+      const b = sorted[j]!
+      if (suppressedSet.has(b.canonicalKey)) continue
+
+      const sim = combinedSimilarity(
+        a.description,
+        b.description,
+        a.canonicalKey,
+        b.canonicalKey,
+      )
+
+      if (sim >= threshold) {
+        suppressedSet.add(b.canonicalKey)
+        suppressed.push(b.canonicalKey)
+      }
+    }
+  }
+
+  if (suppressed.length === 0) return { survivors: candidates, suppressed: [] }
+
+  const survivors = [...nonEpisodes, ...sorted.filter((e) => !suppressedSet.has(e.canonicalKey))]
+  return { survivors, suppressed }
+}
+
+// ---------------------------------------------------------------------------
 // Fingerprint management
 // ---------------------------------------------------------------------------
 

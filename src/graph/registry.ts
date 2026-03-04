@@ -315,7 +315,26 @@ async function listReflectionNodes(omgRoot: string): Promise<GraphNode[]> {
 }
 
 /**
- * Full disk scan → rebuild registry from all graph nodes (observations + reflections).
+ * Lists all .md files in `{omgRoot}/mocs/`, parses each as a GraphNode,
+ * and returns valid results. Returns empty array if the directory does not exist.
+ */
+async function listMocNodes(omgRoot: string): Promise<GraphNode[]> {
+  const dir = path.join(omgRoot, 'mocs')
+  let entries: string[]
+  try {
+    entries = await fs.readdir(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw new Error(`[omg] registry: failed to read mocs directory ${dir}: ${String(err)}`)
+  }
+  const results = await Promise.all(
+    entries.filter((e) => e.endsWith('.md')).map((e) => readGraphNode(path.join(dir, e)))
+  )
+  return results.filter((n): n is GraphNode => n !== null)
+}
+
+/**
+ * Full disk scan → rebuild registry from all graph nodes (observations + reflections + MOCs).
  * Always persists the result to disk.
  */
 export async function rebuildRegistry(omgRoot: string): Promise<RegistryData> {
@@ -338,8 +357,17 @@ export async function rebuildRegistry(omgRoot: string): Promise<RegistryData> {
     reflectionNodes = []
   }
 
+  let mocNodes: GraphNode[]
+  try {
+    mocNodes = await listMocNodes(omgRoot)
+  } catch (err) {
+    // Non-fatal: log and continue without MOC nodes.
+    console.error('[omg] registry: rebuildRegistry — could not list MOC nodes:', err)
+    mocNodes = []
+  }
+
   const nodes: Record<string, RegistryNodeEntry> = {}
-  for (const node of [...observationNodes, ...reflectionNodes]) {
+  for (const node of [...observationNodes, ...reflectionNodes, ...mocNodes]) {
     nodes[node.frontmatter.id] = buildRegistryEntry(node, inferKind(node))
   }
 

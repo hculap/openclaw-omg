@@ -6,6 +6,7 @@ import { resolveOmgRoot } from '../utils/paths.js'
 import { selectContextV2 } from '../context/selector.js'
 import { renderContextBlock } from '../context/renderer.js'
 import { readFileOrNull } from '../utils/fs.js'
+import { getLastCronRunAge } from '../cron/register.js'
 import path from 'node:path'
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,18 @@ export async function beforeAgentStart(
       omgRoot,
     })
 
-    const prependContext = renderContextBlock(slice)
+    let prependContext = renderContextBlock(slice)
+
+    // Cron health check: warn if maintenance hasn't run in 2× expected interval
+    const reflectionAge = getLastCronRunAge('omg-reflection')
+    const expectedIntervalMs = 24 * 60 * 60 * 1000 // 1 day (default reflection schedule)
+    if (reflectionAge === null || reflectionAge > expectedIntervalMs * 2) {
+      const staleMsg = reflectionAge === null
+        ? 'OMG reflection cron has never run'
+        : `OMG reflection cron is stale (last run: ${Math.round(reflectionAge / 3600000)}h ago)`
+      console.warn(`[omg] before_agent_start: ${staleMsg}`)
+    }
+
     return { prependContext }
   } catch (err) {
     console.error('[omg] before_agent_start failed — context injection skipped:', err)

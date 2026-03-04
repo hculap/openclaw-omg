@@ -43,6 +43,7 @@ import type { LlmClient } from '../llm/client.js'
 import type { SourceChunk } from './chunker.js'
 import type { SourceBatch } from './batcher.js'
 import type { GraphNode, ObserverOutput } from '../types.js'
+import { combinedSimilarity } from '../dedup/similarity.js'
 import {
   appendFailureEntry,
   clearFailureLog,
@@ -52,6 +53,55 @@ import {
   type FailureErrorType,
 } from './failure-log.js'
 import { computeBootstrapQuality, logQualityReport } from './quality-metrics.js'
+
+// ---------------------------------------------------------------------------
+// Intra-batch episode dedup for bootstrap
+// ---------------------------------------------------------------------------
+
+/**
+ * Suppresses near-duplicate episode operations within a single batch.
+ * Non-episode operations pass through unchanged. Preserves original ordering.
+ */
+function suppressBatchEpisodeDuplicates(
+  operations: readonly import('../types.js').ObserverOperation[],
+  threshold: number,
+): readonly import('../types.js').ObserverOperation[] {
+  if (threshold >= 1.0) return operations
+
+  const episodes = operations.filter((op) => {
+    if (op.kind === 'upsert') return op.type === 'episode'
+    return op.frontmatter.type === 'episode'
+  })
+
+  if (episodes.length < 2) return operations
+
+  // Find which episodes to suppress (keep first occurrence, suppress later duplicates)
+  const suppressedIndices = new Set<number>()
+  for (let i = 0; i < episodes.length; i++) {
+    if (suppressedIndices.has(i)) continue
+    const a = episodes[i]!
+    const aDesc = a.kind === 'upsert' ? a.description : a.frontmatter.description
+    const aKey = a.kind === 'upsert' ? a.canonicalKey : ''
+    for (let j = i + 1; j < episodes.length; j++) {
+      if (suppressedIndices.has(j)) continue
+      const b = episodes[j]!
+      const bDesc = b.kind === 'upsert' ? b.description : b.frontmatter.description
+      const bKey = b.kind === 'upsert' ? b.canonicalKey : ''
+      if (combinedSimilarity(aDesc, bDesc, aKey, bKey) >= threshold) {
+        suppressedIndices.add(j)
+      }
+    }
+  }
+
+  if (suppressedIndices.size === 0) return operations
+
+  // Build a set of suppressed operation references for O(1) lookup
+  const suppressedOps = new Set(
+    [...suppressedIndices].map((i) => episodes[i])
+  )
+
+  return operations.filter((op) => !suppressedOps.has(op))
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -261,10 +311,22 @@ async function processBatch(
     }).catch((logErr) => console.error('[omg] bootstrap: failed to write failure log:', logErr))
   }
 
+  // Phase 1.5: Suppress duplicate episode operations within the batch
+  const dedupedOperations = suppressBatchEpisodeDuplicates(
+    observerOutput.operations,
+    config.extractionGuardrails.intraBatchEpisodeThreshold,
+  )
+  if (dedupedOperations.length < observerOutput.operations.length) {
+    console.warn(
+      `[omg] bootstrap: intra-batch episode dedup: ${observerOutput.operations.length - dedupedOperations.length} ` +
+      `duplicate episode(s) suppressed in "${batchLabel}"`
+    )
+  }
+
   // Phase 2: write nodes
   const writeContext = { omgRoot, sessionKey: 'bootstrap', scope }
   const writeResults = await Promise.allSettled(
-    observerOutput.operations.map((op) => writeObservationNode(op, writeContext))
+    dedupedOperations.map((op) => writeObservationNode(op, writeContext))
   )
 
   const writtenNodes: GraphNode[] = writeResults
