@@ -118,13 +118,25 @@ export function combinedSimilarity(
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the first segment of a dotted canonical key.
- * E.g. "preferences.editor_theme" → "preferences".
- * Returns the full string if no dot is present.
- * Returns empty string for empty input.
+ * Returns the bucket prefix of a canonical key for dedup grouping.
+ *
+ * Strategy:
+ *   1. If the key contains a dot, return the first dot-segment.
+ *      E.g. "preferences.editor_theme" → "preferences".
+ *   2. If the key has no dot but contains hyphens, return the first two
+ *      hyphen-segments. E.g. "facts-szymon-haircut-march-2026" → "facts-szymon".
+ *      This prevents dotless keys from forming singleton buckets that can
+ *      never be compared against anything.
+ *   3. Returns empty string for empty input.
  */
 export function keyPrefix(canonicalKey: string): string {
   if (canonicalKey === '') return ''
   const dotIndex = canonicalKey.indexOf('.')
-  return dotIndex === -1 ? canonicalKey : canonicalKey.slice(0, dotIndex)
+  if (dotIndex !== -1) return canonicalKey.slice(0, dotIndex)
+
+  // No dot: use first two hyphen-delimited segments as prefix
+  const segments = canonicalKey.split('-')
+  return segments.length >= 2
+    ? `${segments[0]}-${segments[1]}`
+    : canonicalKey
 }

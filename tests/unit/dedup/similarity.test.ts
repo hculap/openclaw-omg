@@ -219,7 +219,11 @@ describe('keyPrefix', () => {
     expect(keyPrefix('preferences.editor_theme')).toBe('preferences')
   })
 
-  it('returns the full key when no dot', () => {
+  it('returns first two hyphen segments when no dot (prevents singleton buckets)', () => {
+    expect(keyPrefix('facts-szymon-haircut-march-2026')).toBe('facts-szymon')
+  })
+
+  it('returns full key when no dot and only one hyphen segment', () => {
     expect(keyPrefix('identity')).toBe('identity')
   })
 
@@ -229,5 +233,17 @@ describe('keyPrefix', () => {
 
   it('returns empty string for empty input', () => {
     expect(keyPrefix('')).toBe('')
+  })
+
+  it('groups dotless keys with same type prefix into same bucket', () => {
+    const a = keyPrefix('facts-szymon-appearance-hair-style')
+    const b = keyPrefix('facts-szymon-haircut-march-2026')
+    expect(a).toBe(b) // both → "facts-szymon"
+  })
+
+  it('groups different dotless variants for same entity type', () => {
+    const a = keyPrefix('facts-beta-impact-company-data')
+    const b = keyPrefix('facts-beta-impact-registry-details')
+    expect(a).toBe(b) // both → "facts-beta"
   })
 })

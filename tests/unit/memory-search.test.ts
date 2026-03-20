@@ -106,7 +106,7 @@ describe('createMemoryTools — API probing', () => {
 
     const tools = createMemoryTools(api) as MemoryTools
     const result = await tools.search('test query')
-    expect(result).toEqual(mockResponse)
+    expect(result).toEqual({ ...mockResponse, disabled: false })
   })
 
   it('get() returns null when execute throws', async () => {

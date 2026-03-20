@@ -64,7 +64,7 @@ describe('beforeAgentStart — graph present', () => {
     expect(result?.prependContext).toContain('</omg-context>')
   })
 
-  it('prependContext includes index content', async () => {
+  it('prependContext does not include index content (removed to save tokens)', async () => {
     vol.fromJSON({
       [`${OMG_ROOT}/index.md`]: INDEX_MD,
     })
@@ -75,7 +75,7 @@ describe('beforeAgentStart — graph present', () => {
       { workspaceDir: WORKSPACE, sessionKey: SESSION_KEY, config }
     )
 
-    expect(result?.prependContext).toContain('Memory Index')
+    expect(result?.prependContext).not.toContain('Memory Index')
   })
 
   it('includes now node content when now.md exists', async () => {

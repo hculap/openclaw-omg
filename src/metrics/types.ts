@@ -32,6 +32,20 @@ export interface SelectorMetrics {
   readonly selectedNodeCountByDomain: Readonly<Record<string, number>>
   readonly memorySearchHitCount: number
   readonly graphExpansionCount: number
+  /** Whether semantic boost was attempted (memoryTools present + enabled). */
+  readonly semanticBoostActive: boolean
+  /** Number of nodes whose final score was changed by semantic boost. */
+  readonly semanticBoostedNodeCount: number
+  /** Top semantic candidates with scores (for diagnostics). */
+  readonly semanticTopHits: readonly SemanticHitDigest[]
+}
+
+/** Compact digest of a semantic search hit for metrics logging. */
+export interface SemanticHitDigest {
+  readonly filePath: string
+  readonly score: number
+  /** Whether this candidate ended up in the final injected context. */
+  readonly selected: boolean
 }
 
 /** Cumulative error metrics per pipeline run. */

@@ -427,7 +427,16 @@ export function register(api: PluginApi): void {
 
   // Probe for OpenClaw memory tools (optional — degrades gracefully to registry-only)
   const memoryTools = createMemoryTools(api)
-  console.error(`[omg] register: ${memoryTools ? 'memory_search/memory_get tools available — hybrid scoring enabled' : 'registry-only scoring'}`)
+  if (memoryTools) {
+    console.error('[omg] register: memory_search/memory_get tools available — hybrid scoring enabled')
+  } else {
+    const reason = !api.runtime?.tools
+      ? 'api.runtime.tools is missing'
+      : typeof (api.runtime.tools as Record<string, unknown>).createMemorySearchTool !== 'function'
+        ? 'createMemorySearchTool is not a function'
+        : 'createMemorySearchTool() returned null (memory plugin disabled?)'
+    console.error(`[omg] register: semantic boost UNAVAILABLE — ${reason}. Using registry-only scoring.`)
+  }
 
   // Resolve workspaceDir from (in priority order):
   //   1. Host-provided api.workspaceDir (per-agent context, may be undefined at gateway level)

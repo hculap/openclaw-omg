@@ -43,12 +43,11 @@ describe('renderContextBlock', () => {
     expect(result).toMatch(/<\/omg-context>$/)
   })
 
-  it('includes Memory Index section with index content', () => {
+  it('does not include Memory Index section (removed to save tokens)', () => {
     const slice = makeSlice({ index: '# Index\n- [[omg/moc-projects]]' })
     const result = renderContextBlock(slice)
-    expect(result).toContain('## Memory Index')
-    expect(result).toContain('# Index')
-    expect(result).toContain('[[omg/moc-projects]]')
+    expect(result).not.toContain('## Memory Index')
+    expect(result).not.toContain('# Index')
   })
 
   it('includes Current State section when nowNode is present', () => {
@@ -65,13 +64,16 @@ describe('renderContextBlock', () => {
     expect(result).not.toContain('## Current State')
   })
 
-  it('includes Relevant Knowledge section with moc and node content', () => {
-    const moc = makeNode('omg/moc/projects', '- [[omg/project/alpha]]', 'moc')
+  it('includes Relevant Knowledge section with compressed moc and node content', () => {
+    const moc = makeNode('omg/moc-projects', '- [[omg/project/alpha]]\n- [[omg/project/beta]]', 'moc')
     const node = makeNode('omg/fact/typescript', 'TypeScript is typed JS.', 'fact')
     const slice = makeSlice({ mocs: [moc], nodes: [node] })
     const result = renderContextBlock(slice)
     expect(result).toContain('## Relevant Knowledge')
-    expect(result).toContain('omg/moc/projects')
+    // MOC body should be compressed (not raw wikilinks)
+    expect(result).toContain('Domain: projects')
+    expect(result).toContain('2 nodes')
+    expect(result).not.toContain('[[omg/project/alpha]]')
     expect(result).toContain('TypeScript is typed JS.')
   })
 
@@ -99,11 +101,11 @@ describe('renderContextBlock', () => {
     expect(posA).toBeLessThan(posB)
   })
 
-  it('minimal slice (only index, no now/mocs/nodes) produces valid output', () => {
+  it('minimal slice (only index, no now/mocs/nodes) produces valid output without index', () => {
     const slice = makeSlice({ index: '# Index', mocs: [], nodes: [], nowNode: null })
     const result = renderContextBlock(slice)
     expect(result).toContain('<omg-context>')
-    expect(result).toContain('## Memory Index')
+    expect(result).not.toContain('## Memory Index')
     expect(result).not.toContain('## Current State')
     expect(result).not.toContain('## Relevant Knowledge')
   })

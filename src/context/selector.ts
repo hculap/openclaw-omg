@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { OmgConfig } from '../config.js'
 import type { GraphNode, GraphContextSlice, Message } from '../types.js'
 import type { RegistryNodeEntry } from '../graph/registry.js'
@@ -62,9 +63,10 @@ export function selectContext(params: SelectionParams): GraphContextSlice {
 
   // Enforce token budget
   // Deduct pinned node costs upfront — they are always included regardless of budget.
+  // Note: indexContent is no longer rendered (renderer skips it), so its tokens
+  // are not deducted from the budget — freeing ~264 tokens for real content.
   const pinnedCost = pinnedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
   let budget = injection.maxContextTokens
-  budget -= estimateTokens(indexContent)
   if (nowContent !== null) budget -= estimateTokens(nowContent)
   budget -= pinnedCost
 
@@ -74,9 +76,8 @@ export function selectContext(params: SelectionParams): GraphContextSlice {
   const selectedNonPinned = fitInBudget(nonPinned, budget)
   const selectedNodes = [...pinnedNodes, ...selectedNonPinned]
 
-  // Compute estimated tokens
+  // Compute estimated tokens (excludes index — no longer rendered)
   const estTokens =
-    estimateTokens(indexContent) +
     (nowContent !== null ? estimateTokens(nowContent) : 0) +
     selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0) +
     selectedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
@@ -158,15 +159,25 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
       : Promise.resolve([] as readonly SemanticCandidate[]),
   ])
 
-  // Build filePath → semanticScore map for use after hydration
+  // Build filePath → semanticScore map for use after hydration.
+  // OpenClaw's memory_search returns workspace-relative paths (e.g. "memory/omg/nodes/fact/foo.md")
+  // while the OMG registry stores absolute paths (e.g. "/home/user/workspace/memory/omg/nodes/fact/foo.md").
+  // We resolve relative paths using the workspace root (parent of omgRoot's "memory/omg" portion)
+  // and index under both forms so lookups work regardless of which path format is used.
+  const workspaceRoot = omgRoot ? resolveWorkspaceFromOmgRoot(omgRoot) : null
   const semanticByPath = new Map<string, number>()
-  for (const candidate of semanticCandidates) {
-    semanticByPath.set(candidate.filePath, candidate.semanticScore)
-  }
+  const resolvedCandidates = semanticCandidates.map((c) => {
+    const resolved = (workspaceRoot && !c.filePath.startsWith('/'))
+      ? path.join(workspaceRoot, c.filePath)
+      : c.filePath
+    semanticByPath.set(c.filePath, c.semanticScore)
+    semanticByPath.set(resolved, c.semanticScore)
+    return { ...c, filePath: resolved }
+  })
 
   // Merge semantic scores into registry scores for candidate selection
-  const boostedEntries = semanticCandidates.length > 0
-    ? mergeSemantic(scoredEntries, semanticCandidates, injection.semantic.weight)
+  const boostedEntries = resolvedCandidates.length > 0
+    ? mergeSemantic(scoredEntries, resolvedCandidates, injection.semantic.weight)
     : scoredEntries
 
   // Partition moc vs regular candidates
@@ -190,6 +201,13 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     hydrateEntries(regularCandidates, hydrateNode),
   ])
 
+  // Semantic diagnostics context for metrics
+  const semanticDiag: SemanticDiagnostics = {
+    active: shouldUseSemantic,
+    candidates: resolvedCandidates,
+    semanticByPath,
+  }
+
   // When no semantic signal, use graph-aware or plain selection
   if (semanticByPath.size === 0 || injection.semantic.weight === 0) {
     // When graph expansion ran, hydratedRegular is already ordered by
@@ -205,7 +223,7 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
           recentMessages,
           config,
         })
-    emitSelectorMetrics(result, semanticCandidates.length, graphExpansionCount)
+    emitSelectorMetrics(result, semanticDiag, graphExpansionCount)
     return result
   }
 
@@ -221,11 +239,18 @@ export async function selectContextV2(params: SelectionParamsV2): Promise<GraphC
     semanticByPath,
     semanticWeight: injection.semantic.weight,
   })
-  emitSelectorMetrics(result, semanticCandidates.length, graphExpansionCount)
+  emitSelectorMetrics(result, semanticDiag, graphExpansionCount)
   return result
 }
 
-function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: number, graphExpansionCount: number = 0): void {
+/** Internal bag of semantic diagnostics threaded from selectContextV2. */
+interface SemanticDiagnostics {
+  readonly active: boolean
+  readonly candidates: readonly SemanticCandidate[]
+  readonly semanticByPath: ReadonlyMap<string, number>
+}
+
+function emitSelectorMetrics(slice: GraphContextSlice, semantic: SemanticDiagnostics, graphExpansionCount: number = 0): void {
   const allNodes = [...slice.mocs, ...slice.nodes]
   if (slice.nowNode) allNodes.push(slice.nowNode)
 
@@ -246,6 +271,20 @@ function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: num
     selectedNodeCountByDomain[domain] = (selectedNodeCountByDomain[domain] ?? 0) + 1
   }
 
+  // Build semantic diagnostics: which candidates were selected into the final slice
+  const selectedPaths = new Set(allNodes.map((n) => n.filePath))
+  const semanticTopHits = semantic.candidates
+    .slice(0, 10)
+    .map((c) => ({
+      filePath: c.filePath,
+      score: Math.round(c.semanticScore * 1000) / 1000,
+      selected: selectedPaths.has(c.filePath),
+    }))
+
+  const semanticBoostedNodeCount = allNodes.filter((n) =>
+    semantic.semanticByPath.has(n.filePath),
+  ).length
+
   emitMetric({
     stage: 'selector',
     timestamp: new Date().toISOString(),
@@ -255,8 +294,11 @@ function emitSelectorMetrics(slice: GraphContextSlice, memorySearchHitCount: num
       injectedTokens: slice.estimatedTokens,
       selectedNodeCountByType,
       selectedNodeCountByDomain,
-      memorySearchHitCount,
+      memorySearchHitCount: semantic.candidates.length,
       graphExpansionCount,
+      semanticBoostActive: semantic.active,
+      semanticBoostedNodeCount,
+      semanticTopHits,
     },
   })
 }
@@ -277,13 +319,33 @@ async function runMemorySearch(
     const lastUserMsg = [...recentMessages].reverse().find((m) => m.role === 'user')?.content ?? ''
     const query = buildSearchQuery(lastUserMsg, nowContent, keywords)
 
-    const response = await memoryTools.search(query.length > 0 ? `${query} limit:${maxResults}` : `limit:${maxResults}`)
-    if (!response) return []
+    const fullQuery = query.length > 0 ? `${query} limit:${maxResults}` : `limit:${maxResults}`
+    const response = await memoryTools.search(fullQuery)
+    if (!response) {
+      console.warn('[omg] semantic: memory_search returned null — registry-only scoring')
+      return []
+    }
 
-    return buildSemanticCandidates(response, minScore)
+    if (response.disabled) {
+      console.warn('[omg] semantic: memory plugin disabled — registry-only scoring')
+      return []
+    }
+
+    const candidates = buildSemanticCandidates(response, minScore)
+    console.warn(
+      `[omg] semantic: query="${query.slice(0, 80)}" → ${response.results.length} raw hits, ${candidates.length} after normalize (minScore=${minScore})`,
+    )
+    if (candidates.length > 0) {
+      const top3 = candidates.slice(0, 3).map((c) =>
+        `${c.filePath.split('/').slice(-2).join('/')}:${c.semanticScore.toFixed(2)}`
+      )
+      console.warn(`[omg] semantic: top hits: ${top3.join(', ')}`)
+    }
+
+    return candidates
   } catch (error) {
     console.error(
-      '[omg] runMemorySearch: memory_search failed — falling back to registry-only scoring.',
+      '[omg] semantic: memory_search failed — falling back to registry-only scoring.',
       error instanceof Error ? error.message : String(error)
     )
     return []
@@ -317,10 +379,9 @@ function selectContextPreSorted(params: {
     .filter((n) => !pinnedIdSet.has(n.frontmatter.id))
     .slice(0, Math.max(0, injection.maxNodes - pinnedNodes.length))
 
-  // Enforce token budget
+  // Enforce token budget (index no longer rendered — tokens freed for real content)
   const pinnedCost = pinnedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
   let budget = injection.maxContextTokens
-  budget -= estimateTokens(indexContent)
   if (nowContent !== null) budget -= estimateTokens(nowContent)
   budget -= pinnedCost
 
@@ -331,7 +392,6 @@ function selectContextPreSorted(params: {
   const selectedNodes = [...pinnedNodes, ...selectedNonPinned]
 
   const estTokens =
-    estimateTokens(indexContent) +
     (nowContent !== null ? estimateTokens(nowContent) : 0) +
     selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0) +
     selectedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
@@ -375,10 +435,9 @@ function selectContextWithSemanticBoost(params: {
     .filter((n) => !pinnedIdSet.has(n.frontmatter.id))
     .slice(0, Math.max(0, injection.maxNodes - pinnedNodes.length))
 
-  // Enforce token budget
+  // Enforce token budget (index no longer rendered — tokens freed for real content)
   const pinnedCost = pinnedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
   let budget = injection.maxContextTokens
-  budget -= estimateTokens(indexContent)
   if (nowContent !== null) budget -= estimateTokens(nowContent)
   budget -= pinnedCost
 
@@ -389,7 +448,6 @@ function selectContextWithSemanticBoost(params: {
   const selectedNodes = [...pinnedNodes, ...selectedNonPinned]
 
   const estTokens =
-    estimateTokens(indexContent) +
     (nowContent !== null ? estimateTokens(nowContent) : 0) +
     selectedMocs.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0) +
     selectedNodes.reduce((sum, n) => sum + estimateTokens(nodeText(n)), 0)
@@ -780,4 +838,14 @@ function buildNowNode(content: string): GraphNode {
     // Synthetic in-memory node — not backed by a file on disk.
     filePath: '',
   }
+}
+
+/**
+ * Derives the workspace root from omgRoot.
+ * omgRoot is typically `{workspaceDir}/memory/omg`, so workspace is two
+ * directories up. OpenClaw's memory_search returns paths relative to the
+ * workspace root (e.g. `memory/omg/nodes/fact/foo.md`).
+ */
+function resolveWorkspaceFromOmgRoot(omgRoot: string): string {
+  return path.resolve(omgRoot, '..', '..')
 }

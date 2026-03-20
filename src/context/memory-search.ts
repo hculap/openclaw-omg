@@ -13,9 +13,21 @@
 
 /** A single result returned by OpenClaw's memory_search tool. */
 export interface MemorySearchResult {
+  /** File path relative to workspace root (OpenClaw uses `path`, not `filePath`). */
   readonly filePath: string
   readonly score: number
   readonly snippet: string
+}
+
+/** Raw result shape from OpenClaw's memory_search tool. */
+interface RawMemorySearchResult {
+  readonly path: string
+  readonly score: number
+  readonly snippet: string
+  readonly startLine?: number
+  readonly endLine?: number
+  readonly source?: string
+  readonly citation?: string
 }
 
 /** Full response from OpenClaw's memory_search tool. */
@@ -87,6 +99,8 @@ export function createMemoryTools(api: { config?: unknown; runtime?: { tools?: R
   const searchTool = tools.createMemorySearchTool(toolOptions)
   if (!searchTool) return null
 
+  // Tool API contract validated — execute(toolCallId, params) with Anthropic-format response
+
   const getTool = typeof tools.createMemoryGetTool === 'function'
     ? tools.createMemoryGetTool(toolOptions)
     : null
@@ -94,9 +108,64 @@ export function createMemoryTools(api: { config?: unknown; runtime?: { tools?: R
   return {
     async search(query: string): Promise<MemorySearchResponse | null> {
       try {
-        const response = await searchTool.execute({ query })
-        return response as MemorySearchResponse
-      } catch {
+        // OpenClaw tool execute signature: (toolCallId, params) => Promise<result>
+        // The tool reads params from the second argument via readStringParam.
+        let response: unknown
+        try {
+          response = await (searchTool.execute as Function)('omg-semantic', { query })
+        } catch (innerErr) {
+          console.error('[omg] memory-search: execute error:', innerErr instanceof Error ? innerErr.message : String(innerErr))
+          throw innerErr
+        }
+        if (response === null || response === undefined) {
+          console.warn('[omg] memory-search: searchTool.execute returned', response)
+          return null
+        }
+
+        // OpenClaw tools return Anthropic-format tool results:
+        //   { content: [{ type: "text", text: JSON.stringify(payload) }] }
+        // We need to unwrap the JSON from the content block.
+        let payload: Record<string, unknown>
+        const respAny = response as Record<string, unknown>
+        if (Array.isArray(respAny.content)) {
+          const textBlock = (respAny.content as Array<{ type: string; text: string }>)
+            .find((b) => b.type === 'text')
+          if (!textBlock?.text) {
+            console.warn('[omg] memory-search: no text block in response content')
+            return null
+          }
+          payload = JSON.parse(textBlock.text) as Record<string, unknown>
+        } else if (Array.isArray(respAny.results)) {
+          // Direct object (in case API changes)
+          payload = respAny
+        } else {
+          console.warn(`[omg] memory-search: unexpected response shape: ${JSON.stringify(response).slice(0, 200)}`)
+          return null
+        }
+
+        // Normalize raw results: map `path` → `filePath` (OpenClaw uses `path`)
+        const rawResults = Array.isArray(payload.results) ? payload.results as RawMemorySearchResult[] : []
+        const typed: MemorySearchResponse = {
+          results: rawResults.map((r) => ({
+            filePath: r.path ?? (r as unknown as MemorySearchResult).filePath ?? '',
+            score: r.score ?? 0,
+            snippet: r.snippet ?? '',
+          })),
+          disabled: Boolean(payload.disabled),
+        }
+        if (typed.disabled) {
+          console.warn('[omg] memory-search: response.disabled=true (reason: ' + String(payload.error ?? 'unknown') + ')')
+        } else if (typed.results.length === 0) {
+          console.warn(`[omg] memory-search: 0 results for query "${query.slice(0, 60)}"`)
+        } else {
+          console.warn(`[omg] memory-search: ${typed.results.length} results (provider=${payload.provider ?? '?'}, model=${payload.model ?? '?'})`)
+        }
+        return typed
+      } catch (err) {
+        console.error(
+          '[omg] memory-search: searchTool.execute threw:',
+          err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+        )
         return null
       }
     },
